@@ -8,7 +8,10 @@ import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
+  coerceRuntimeModeToSupported,
   type MessageId,
+  type ModelSelection,
+  type RuntimeMode,
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
@@ -20,7 +23,7 @@ import { buildProjectThreadStartTurnInput } from "../lib/projectThreadStartTurn"
 import { toUploadChatImageAttachments } from "../lib/composerImages";
 import { randomHex } from "../lib/uuid";
 import { appAtomRegistry } from "./atom-registry";
-import { useProjects, useThreadShells } from "./entities";
+import { useProjects, useServerConfigs, useThreadShells } from "./entities";
 import {
   confirmThreadOutboxMessageQueued,
   ensureThreadOutboxLoaded,
@@ -102,6 +105,7 @@ export function useThreadOutboxDrain(): void {
   const shellStatuses = useThreadOutboxShellStatuses();
   const threads = useThreadShells();
   const projects = useProjects();
+  const serverConfigs = useServerConfigs();
   const { connectedEnvironments } = useRemoteConnectionStatus();
   const [retryTick, setRetryTick] = useState(0);
   const retryAttemptRef = useRef(new Map<MessageId, number>());
@@ -117,6 +121,22 @@ export function useThreadOutboxDrain(): void {
       retryTimersRef.current.clear();
     };
   }, []);
+
+  const runtimeModeForDelivery = useCallback(
+    (
+      queuedMessage: QueuedThreadMessage,
+      modelSelection: ModelSelection,
+      runtimeMode: RuntimeMode,
+    ) => {
+      const supportedRuntimeModes = serverConfigs
+        .get(queuedMessage.environmentId)
+        ?.providers.find(
+          (provider) => provider.instanceId === modelSelection.instanceId,
+        )?.supportedRuntimeModes;
+      return coerceRuntimeModeToSupported(runtimeMode, supportedRuntimeModes);
+    },
+    [serverConfigs],
+  );
 
   const makeDeliveryHelpers = useCallback((queuedMessage: QueuedThreadMessage) => {
     const reportFailure = (
@@ -168,6 +188,11 @@ export function useThreadOutboxDrain(): void {
   const sendQueuedMessage = useCallback(
     async (queuedMessage: QueuedThreadMessage, thread: EnvironmentThreadShell) => {
       const settings = resolveQueuedThreadSettings(queuedMessage, thread);
+      const runtimeMode = runtimeModeForDelivery(
+        queuedMessage,
+        settings.modelSelection,
+        settings.runtimeMode,
+      );
       const { reportFailure, completeDelivery } = makeDeliveryHelpers(queuedMessage);
 
       if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
@@ -185,13 +210,13 @@ export function useThreadOutboxDrain(): void {
         }
       }
 
-      if (settings.runtimeMode !== thread.runtimeMode) {
+      if (runtimeMode !== thread.runtimeMode) {
         const runtimeResult = await setThreadRuntimeMode({
           environmentId: queuedMessage.environmentId,
           input: {
             commandId: settingsCommandId(queuedMessage, "runtime-mode"),
             threadId: queuedMessage.threadId,
-            runtimeMode: settings.runtimeMode,
+            runtimeMode,
             createdAt: queuedMessage.createdAt,
           },
         });
@@ -229,7 +254,7 @@ export function useThreadOutboxDrain(): void {
             attachments: toUploadChatImageAttachments(queuedMessage.attachments),
           },
           modelSelection: settings.modelSelection,
-          runtimeMode: settings.runtimeMode,
+          runtimeMode,
           interactionMode: settings.interactionMode,
           createdAt: queuedMessage.createdAt,
         },
@@ -240,6 +265,7 @@ export function useThreadOutboxDrain(): void {
       makeDeliveryHelpers,
       setThreadInteractionMode,
       setThreadRuntimeMode,
+      runtimeModeForDelivery,
       startTurn,
       updateThreadMetadata,
     ],
@@ -256,6 +282,11 @@ export function useThreadOutboxDrain(): void {
         return false;
       }
       const { completeDelivery } = makeDeliveryHelpers(queuedMessage);
+      const runtimeMode = runtimeModeForDelivery(
+        queuedMessage,
+        modelSelection,
+        queuedMessage.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+      );
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: buildProjectThreadStartTurnInput({
@@ -268,7 +299,7 @@ export function useThreadOutboxDrain(): void {
           text: queuedMessage.text.trim(),
           attachments: queuedMessage.attachments,
           modelSelection,
-          runtimeMode: queuedMessage.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+          runtimeMode,
           interactionMode: queuedMessage.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,
@@ -279,7 +310,7 @@ export function useThreadOutboxDrain(): void {
       });
       return completeDelivery(deliveryResult);
     },
-    [makeDeliveryHelpers, startTurn],
+    [makeDeliveryHelpers, runtimeModeForDelivery, startTurn],
   );
 
   useEffect(() => {

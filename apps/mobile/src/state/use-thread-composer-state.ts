@@ -129,53 +129,56 @@ export function useThreadComposerState() {
     );
   }, [selectedThreadDetail, selectedThreadSessionActivity, selectedThreadShell]);
 
-  const onSendMessage = useCallback(async () => {
-    if (!selectedThreadShell) {
-      return null;
-    }
+  const onSendMessage = useCallback(
+    async (runtimeModeForSend: RuntimeMode) => {
+      if (!selectedThreadShell) {
+        return null;
+      }
 
-    const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
-    const draft = getComposerDraftSnapshot(threadKey);
-    const thread = selectedThreadDetail ?? selectedThreadShell;
-    const text = draft.text.trim();
-    const attachments = draft.attachments;
-    if (text.length === 0 && attachments.length === 0) {
-      return null;
-    }
+      const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
+      const draft = getComposerDraftSnapshot(threadKey);
+      const thread = selectedThreadDetail ?? selectedThreadShell;
+      const text = draft.text.trim();
+      const attachments = draft.attachments;
+      if (text.length === 0 && attachments.length === 0) {
+        return null;
+      }
 
-    const metadata = makeQueuedMessageMetadata();
-    const messageId = MessageId.make(metadata.messageId);
-    // Enqueue publishes the queued atom synchronously (the durable write
-    // happens behind it), so clearing the draft here gives send feedback on
-    // the tap frame instead of after file I/O. If the write fails the message
-    // is rolled out of the queue and the content is merged back into the
-    // draft, preserving anything typed since.
-    const enqueuePromise = enqueueThreadOutboxMessage({
-      environmentId: selectedThreadShell.environmentId,
-      threadId: selectedThreadShell.id,
-      messageId,
-      commandId: CommandId.make(metadata.commandId),
-      text,
-      attachments,
-      modelSelection: draft.modelSelection ?? thread.modelSelection,
-      runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
-      interactionMode: draft.interactionMode ?? thread.interactionMode,
-      createdAt: metadata.createdAt,
-    });
-    clearComposerDraftContent(threadKey);
-    enqueuePromise.catch((error: unknown) => {
-      // Restore text via merge (idempotent) but attachments via the uncapped
-      // append: the merge path slots existing attachments first and truncates
-      // at the send limit, which would silently drop this message's images if
-      // the user attached new ones while the write was in flight.
-      void mergeComposerDraftContent(threadKey, { text, attachments: [] });
-      appendComposerDraftAttachments(threadKey, attachments);
-      setPendingConnectionError(
-        error instanceof Error ? error.message : "Failed to save the queued message.",
-      );
-    });
-    return messageId;
-  }, [selectedThreadDetail, selectedThreadShell]);
+      const metadata = makeQueuedMessageMetadata();
+      const messageId = MessageId.make(metadata.messageId);
+      // Enqueue publishes the queued atom synchronously (the durable write
+      // happens behind it), so clearing the draft here gives send feedback on
+      // the tap frame instead of after file I/O. If the write fails the message
+      // is rolled out of the queue and the content is merged back into the
+      // draft, preserving anything typed since.
+      const enqueuePromise = enqueueThreadOutboxMessage({
+        environmentId: selectedThreadShell.environmentId,
+        threadId: selectedThreadShell.id,
+        messageId,
+        commandId: CommandId.make(metadata.commandId),
+        text,
+        attachments,
+        modelSelection: draft.modelSelection ?? thread.modelSelection,
+        runtimeMode: runtimeModeForSend,
+        interactionMode: draft.interactionMode ?? thread.interactionMode,
+        createdAt: metadata.createdAt,
+      });
+      clearComposerDraftContent(threadKey);
+      enqueuePromise.catch((error: unknown) => {
+        // Restore text via merge (idempotent) but attachments via the uncapped
+        // append: the merge path slots existing attachments first and truncates
+        // at the send limit, which would silently drop this message's images if
+        // the user attached new ones while the write was in flight.
+        void mergeComposerDraftContent(threadKey, { text, attachments: [] });
+        appendComposerDraftAttachments(threadKey, attachments);
+        setPendingConnectionError(
+          error instanceof Error ? error.message : "Failed to save the queued message.",
+        );
+      });
+      return messageId;
+    },
+    [selectedThreadDetail, selectedThreadShell],
+  );
 
   const onChangeDraftMessage = useCallback(
     (value: string) => {
