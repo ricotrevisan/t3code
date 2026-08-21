@@ -1,4 +1,8 @@
-import { HostProcessHostname, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessEnvironment,
+  HostProcessHostname,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -8,6 +12,7 @@ import * as ProcessRunner from "../processRunner.ts";
 
 interface ResolveServerEnvironmentLabelInput {
   readonly cwdBaseName: string;
+  readonly labelFilePath?: string;
 }
 
 const ServerEnvironmentLabelCommandProbe = Schema.Literals([
@@ -179,9 +184,61 @@ const resolveFriendlyHostLabel = Effect.fn("resolveFriendlyHostLabel")(function*
   return null;
 });
 
+const readConfiguredLabelFile = Effect.fn("readConfiguredLabelFile")(function* (path: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  return yield* fileSystem.exists(path).pipe(
+    Effect.mapError(
+      (cause) =>
+        new ServerEnvironmentLabelFileError({
+          operation: "inspect",
+          path,
+          cause,
+        }),
+    ),
+    Effect.flatMap((exists) =>
+      exists
+        ? fileSystem.readFileString(path).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerEnvironmentLabelFileError({
+                  operation: "read",
+                  path,
+                  cause,
+                }),
+            ),
+          )
+        : Effect.succeed(null),
+    ),
+    Effect.catchTags({
+      ServerEnvironmentLabelFileError: (error) =>
+        Effect.logDebug(error.message).pipe(
+          Effect.annotateLogs({
+            operation: error.operation,
+            path: error.path,
+            cause: error,
+          }),
+          Effect.as(null),
+        ),
+    }),
+  );
+});
+
 export const resolveServerEnvironmentLabel = Effect.fn("resolveServerEnvironmentLabel")(function* (
   input: ResolveServerEnvironmentLabelInput,
 ) {
+  const processEnv = yield* HostProcessEnvironment;
+  const envLabel = normalizeLabel(processEnv.T3CODE_ENVIRONMENT_LABEL);
+  if (envLabel) {
+    return envLabel;
+  }
+
+  if (input.labelFilePath) {
+    const fileLabel = normalizeLabel(yield* readConfiguredLabelFile(input.labelFilePath));
+    if (fileLabel) {
+      return fileLabel;
+    }
+  }
+
   const friendlyHostLabel = yield* resolveFriendlyHostLabel();
   if (friendlyHostLabel) {
     return friendlyHostLabel;
