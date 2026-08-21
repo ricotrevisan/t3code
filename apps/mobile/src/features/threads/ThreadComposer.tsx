@@ -7,6 +7,7 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
+import { coerceRuntimeModeToSupported } from "@t3tools/contracts";
 import {
   detectComposerTrigger,
   replaceTextRange,
@@ -115,7 +116,7 @@ export interface ThreadComposerProps {
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
-  readonly onSendMessage: () => Promise<MessageId | null>;
+  readonly onSendMessage: (runtimeMode: RuntimeMode) => Promise<MessageId | null>;
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
@@ -355,6 +356,11 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+  const supportedRuntimeModes = selectedProviderStatus?.supportedRuntimeModes;
+  const effectiveRuntimeMode = coerceRuntimeModeToSupported(
+    currentRuntimeMode,
+    supportedRuntimeModes,
+  );
 
   // ── Trigger detection ────────────────────────────────────
   const [composerSelection, setComposerSelection] = useState(() => ({
@@ -552,7 +558,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     if (inFlightThreadIdsRef.current.has(threadKey)) return;
     inFlightThreadIdsRef.current.add(threadKey);
     try {
-      const messageId = await onSendMessage();
+      const messageId = await onSendMessage(effectiveRuntimeMode);
       if (messageId === null) {
         return;
       }
@@ -569,6 +575,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       inFlightThreadIdsRef.current.delete(threadKey);
     }
   }, [
+    effectiveRuntimeMode,
     onSendMessage,
     props.environmentId,
     props.environmentLabel,
@@ -654,16 +661,18 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       optionDescriptors: providerOptionDescriptors,
       onUpdateOptionSelections: (options) =>
         props.onUpdateModelSelection({ ...currentModelSelection, options }),
-      runtimeMode: currentRuntimeMode,
+      runtimeMode: effectiveRuntimeMode,
+      supportedRuntimeModes,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
     }),
     [
       currentModelSelection,
-      currentRuntimeMode,
+      effectiveRuntimeMode,
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
       providerOptionDescriptors,
       settingsOwnerId,
+      supportedRuntimeModes,
       threadProviderGroups,
     ],
   );
