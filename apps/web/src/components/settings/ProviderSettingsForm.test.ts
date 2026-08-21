@@ -22,6 +22,15 @@ describe("ProviderSettingsForm helpers", () => {
     ]);
   });
 
+  it("derives Prime Agent config fields from the client definition schema", () => {
+    const primeAgent = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("primeAgent")];
+    expect(primeAgent).toBeDefined();
+    expect(deriveProviderSettingsFields(primeAgent!).map((field) => field.key)).toEqual([
+      "binaryPath",
+      "launchArgs",
+    ]);
+  });
+
   it("sources labels and descriptions from schema annotations", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();

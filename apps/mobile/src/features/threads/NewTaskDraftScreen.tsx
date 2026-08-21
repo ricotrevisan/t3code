@@ -21,7 +21,10 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@t3tools/contracts";
+import {
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  coerceRuntimeModeToSupported,
+} from "@t3tools/contracts";
 
 import { ComposerEditor, type ComposerEditorHandle } from "../../components/ComposerEditor";
 import {
@@ -807,7 +810,12 @@ export function NewTaskDraftScreen(props: {
     const selectedWorktreePath =
       draft.workspaceSelection?.worktreePath ?? flow.selectedWorktreePath;
     const startFromOrigin = draft.workspaceSelection?.startFromOrigin ?? flow.startFromOrigin;
-    const runtimeMode = draft.runtimeMode ?? flow.runtimeMode;
+    const runtimeMode = coerceRuntimeModeToSupported(
+      draft.runtimeMode ?? flow.runtimeMode,
+      selectedEnvironmentServerConfig?.providers.find(
+        (provider) => provider.instanceId === modelSelection?.instanceId,
+      )?.supportedRuntimeModes,
+    );
     const interactionMode = flow.planModeEnabled
       ? (draft.interactionMode ?? flow.interactionMode)
       : "default";
