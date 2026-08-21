@@ -28,6 +28,7 @@ import {
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
+  coerceRuntimeModeToSupported,
   isProviderSendTurnSupportedImageMimeType,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
 } from "./orchestration.ts";
@@ -1154,4 +1155,25 @@ it("isProviderSendTurnSupportedImageMimeType accepts raster formats and rejects 
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("image/png"), true);
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("IMAGE/JPEG"), true);
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("image/svg+xml"), false);
+});
+
+it("keeps the current runtime mode when provider support is unspecified", () => {
+  assert.strictEqual(
+    coerceRuntimeModeToSupported("approval-required", undefined),
+    "approval-required",
+  );
+});
+
+it("uses full access when the current runtime mode is unsupported", () => {
+  assert.strictEqual(
+    coerceRuntimeModeToSupported("approval-required", ["auto", "full-access"]),
+    "full-access",
+  );
+});
+
+it("uses the first reported mode when full access is unavailable", () => {
+  assert.strictEqual(
+    coerceRuntimeModeToSupported("approval-required", ["auto-accept-edits", "auto"]),
+    "auto-accept-edits",
+  );
 });

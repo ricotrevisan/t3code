@@ -36,6 +36,42 @@ import {
 } from "./types";
 
 export { formatDuration } from "@t3tools/shared/orchestrationTiming";
+export type ProviderPickerKind = ProviderDriverKind;
+
+export const PROVIDER_OPTIONS: Array<{
+  value: ProviderPickerKind;
+  label: string;
+  available: boolean;
+  /** Shown on the model picker sidebar when relevant */
+  pickerSidebarBadge?: "new" | "soon";
+}> = [
+  { value: ProviderDriverKind.make("codex"), label: "Codex", available: true },
+  { value: ProviderDriverKind.make("claudeAgent"), label: "Claude", available: true },
+  {
+    value: ProviderDriverKind.make("opencode"),
+    label: "OpenCode",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+  {
+    value: ProviderDriverKind.make("cursor"),
+    label: "Cursor",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+  {
+    value: ProviderDriverKind.make("grok"),
+    label: "Grok",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+  {
+    value: ProviderDriverKind.make("primeAgent"),
+    label: "Prime Agent",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+];
 
 export type WorkLogToolLifecycleStatus =
   | "inProgress"

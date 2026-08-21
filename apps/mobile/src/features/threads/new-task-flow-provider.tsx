@@ -13,6 +13,7 @@ import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
+  coerceRuntimeModeToSupported,
   MessageId,
   T3_PROJECT_FILE_NAME,
   ThreadId,
@@ -165,6 +166,7 @@ type NewTaskFlowContextValue = {
   readonly selectedModel: ModelSelection | null;
   readonly selectedModelOption: ModelOption | null;
   readonly selectedProviderStatus: ServerProvider | null;
+  readonly supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
   readonly filteredBranches: ReadonlyArray<VcsRef>;
   readonly reset: () => void;
@@ -417,6 +419,10 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     selectedEnvironmentServerConfig?.settings.newWorktreesStartFromOrigin ??
     true;
   const runtimeMode = selectedProjectDraft.runtimeMode ?? DEFAULT_RUNTIME_MODE;
+  const storedRuntimeMode = selectedProjectDraft.runtimeMode ?? DEFAULT_RUNTIME_MODE;
+  const interactionMode = planModeEnabled
+    ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
+    : DEFAULT_PROVIDER_INTERACTION_MODE;
 
   // Antigravity keeps unavailable selections so sign-out or a catalog change
   // cannot switch the user's model. Other providers retain their fallback
@@ -481,6 +487,14 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const interactionMode = planModeEnabled
     ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
     : DEFAULT_PROVIDER_INTERACTION_MODE;
+  const supportedRuntimeModes = useMemo(
+    () =>
+      selectedEnvironmentServerConfig?.providers.find(
+        (provider) => provider.instanceId === selectedModel?.instanceId,
+      )?.supportedRuntimeModes,
+    [selectedEnvironmentServerConfig, selectedModel?.instanceId],
+  );
+  const runtimeMode = coerceRuntimeModeToSupported(storedRuntimeMode, supportedRuntimeModes);
   const setSelectedModelKey = useCallback(
     // Options ride along in the same write: a follow-up setSelectedModelOptions
     // call would rebuild the selection from the stale pre-switch model.
@@ -902,7 +916,12 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         text,
         attachments: draft.attachments,
         modelSelection: draftModelSelection,
-        runtimeMode: draft.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+        runtimeMode: coerceRuntimeModeToSupported(
+          draft.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+          selectedEnvironmentServerConfig?.providers.find(
+            (provider) => provider.instanceId === draftModelSelection.instanceId,
+          )?.supportedRuntimeModes,
+        ),
         interactionMode: resolvePendingTaskInteractionMode({
           preferenceLoaded: planModePreferenceLoaded,
           planModeEnabled: legacyPlanModeEnabled,
@@ -1081,6 +1100,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedModel,
       selectedModelOption,
       selectedProviderStatus,
+      supportedRuntimeModes,
       providerGroups,
       filteredBranches,
       reset,
@@ -1144,6 +1164,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedProjectDraftKey,
       selectedProviderStatus,
       setSelectedModelOptions,
+      supportedRuntimeModes,
       selectedProject,
       selectedProjectKey,
       selectedWorktreePath,
