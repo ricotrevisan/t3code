@@ -27,6 +27,7 @@ import {
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   resolveEnvironmentMachineKind,
+  coerceRuntimeModeToSupported,
 } from "@t3tools/contracts";
 
 import { ComposerEditor, type ComposerEditorHandle } from "../../components/ComposerEditor";
@@ -887,6 +888,15 @@ export function NewTaskDraftScreen(props: {
       ),
       flow.planModeEnabled ? (draft.interactionMode ?? flow.interactionMode) : "default",
     );
+    const runtimeMode = coerceRuntimeModeToSupported(
+      draft.runtimeMode ?? flow.runtimeMode,
+      selectedEnvironmentServerConfig?.providers.find(
+        (provider) => provider.instanceId === modelSelection?.instanceId,
+      )?.supportedRuntimeModes,
+    );
+    const interactionMode = flow.planModeEnabled
+      ? (draft.interactionMode ?? flow.interactionMode)
+      : "default";
     const initialMessageText = draft.text.trim();
 
     if (

@@ -233,7 +233,7 @@ export function useThreadComposerState() {
     );
   }, [selectedThreadDetail, selectedThreadSessionActivity, selectedThreadShell]);
 
-  const onSendMessage = useCallback(async () => {
+  const onSendMessage = useCallback(async (runtimeModeForSend: RuntimeMode) => {
     if (!selectedThreadShell) {
       return null;
     }
@@ -364,6 +364,9 @@ export function useThreadComposerState() {
         provider,
         draft.interactionMode ?? thread.interactionMode,
       ),
+      modelSelection: draft.modelSelection ?? thread.modelSelection,
+      runtimeMode: runtimeModeForSend,
+      interactionMode: draft.interactionMode ?? thread.interactionMode,
       createdAt: metadata.createdAt,
     });
     clearComposerDraftContent(threadKey, { deferAttachmentCleanup: true });

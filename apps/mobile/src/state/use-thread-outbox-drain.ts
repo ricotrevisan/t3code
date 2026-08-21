@@ -9,7 +9,10 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  coerceRuntimeModeToSupported,
   type MessageId,
+  type ModelSelection,
+  type RuntimeMode,
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
@@ -609,6 +612,22 @@ export function useThreadOutboxDrain(): void {
     };
   }, []);
 
+  const runtimeModeForDelivery = useCallback(
+    (
+      queuedMessage: QueuedThreadMessage,
+      modelSelection: ModelSelection,
+      runtimeMode: RuntimeMode,
+    ) => {
+      const supportedRuntimeModes = serverConfigs
+        .get(queuedMessage.environmentId)
+        ?.providers.find(
+          (provider) => provider.instanceId === modelSelection.instanceId,
+        )?.supportedRuntimeModes;
+      return coerceRuntimeModeToSupported(runtimeMode, supportedRuntimeModes);
+    },
+    [serverConfigs],
+  );
+
   const makeDeliveryHelpers = useCallback((queuedMessage: QueuedThreadMessage) => {
     const reportFailure = (
       commandResult: AtomCommandResult<unknown, unknown>,
@@ -652,6 +671,12 @@ export function useThreadOutboxDrain(): void {
           "Antigravity model unavailable. Set it up on web or desktop, or choose another model.",
         );
       }
+      const settings = resolveQueuedThreadSettings(queuedMessage, thread);
+      const runtimeMode = runtimeModeForDelivery(
+        queuedMessage,
+        settings.modelSelection,
+        settings.runtimeMode,
+      );
       const { reportFailure } = makeDeliveryHelpers(queuedMessage);
 
       if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
@@ -669,13 +694,13 @@ export function useThreadOutboxDrain(): void {
         }
       }
 
-      if (settings.runtimeMode !== thread.runtimeMode) {
+      if (runtimeMode !== thread.runtimeMode) {
         const runtimeResult = await setThreadRuntimeMode({
           environmentId: queuedMessage.environmentId,
           input: {
             commandId: settingsCommandId(queuedMessage, "runtime-mode"),
             threadId: queuedMessage.threadId,
-            runtimeMode: settings.runtimeMode,
+            runtimeMode,
             createdAt: queuedMessage.createdAt,
           },
         });
@@ -764,6 +789,9 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
+          modelSelection: settings.modelSelection,
+          runtimeMode,
+          interactionMode: settings.interactionMode,
           createdAt: queuedMessage.createdAt,
         },
       });
@@ -786,6 +814,7 @@ export function useThreadOutboxDrain(): void {
       makeDeliveryHelpers,
       setThreadInteractionMode,
       setThreadRuntimeMode,
+      runtimeModeForDelivery,
       startTurn,
       updateThreadMetadata,
       restoreQueuedMessage,
@@ -869,6 +898,10 @@ export function useThreadOutboxDrain(): void {
         queuedMessage,
         settings,
         currentConfig.providers,
+      const runtimeMode = runtimeModeForDelivery(
+        queuedMessage,
+        modelSelection,
+        queuedMessage.runtimeMode ?? DEFAULT_RUNTIME_MODE,
       );
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
@@ -884,6 +917,9 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
+          modelSelection,
+          runtimeMode,
+          interactionMode: queuedMessage.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,
           worktreePath: creation.worktreePath,
@@ -914,6 +950,7 @@ export function useThreadOutboxDrain(): void {
       return outcome === "removed";
     },
     [makeDeliveryHelpers, restoreQueuedMessage, startTurn],
+    [makeDeliveryHelpers, restoreQueuedMessage, runtimeModeForDelivery, serverConfigs, startTurn],
   );
 
   useEffect(() => {

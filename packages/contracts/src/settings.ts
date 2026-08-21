@@ -634,6 +634,10 @@ export type AntigravityAuthMethod = typeof AntigravityAuthMethod.Type;
 
 export const AntigravitySettings = makeProviderSettingsSchema(
   {
+export const PrimeSettings = makeProviderSettingsSchema(
+  {
+    // Off by default (like Cursor, Grok, and OpenCode): the binding is not
+    // yet stable enough to probe on every install. Users opt in from Settings.
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
@@ -660,6 +664,20 @@ export const AntigravitySettings = makeProviderSettingsSchema(
         providerSettingsForm: {
           control: "password",
           placeholder: "Optional",
+    binaryPath: makeBinaryPathSetting("prime-agent").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the Prime Agent binary used by this instance.",
+        providerSettingsForm: { placeholder: "prime-agent", clearWhenEmpty: "omit" },
+      }),
+    ),
+    launchArgs: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Launch arguments",
+        description: "Additional CLI arguments passed on session start.",
+        providerSettingsForm: {
+          placeholder: "e.g. --thinking high",
           clearWhenEmpty: "omit",
         },
       }),
@@ -698,6 +716,12 @@ export const AntigravitySettings = makeProviderSettingsSchema(
   { order: ["authMethod", "apiKey", "gcpProject", "gcpLocation", "binaryPath"] },
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
+  },
+  {
+    order: ["binaryPath", "launchArgs"],
+  },
+);
+export type PrimeSettings = typeof PrimeSettings.Type;
 
 export const OpenCodeSettings = makeProviderSettingsSchema(
   {
@@ -938,6 +962,7 @@ export const ServerSettings = Schema.Struct({
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     antigravity: AntigravitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    primeAgent: PrimeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
@@ -1110,6 +1135,12 @@ const OpenCodeSettingsPatch = Schema.Struct({
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
+const PrimeSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  launchArgs: Schema.optionalKey(TrimmedString),
+});
+
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
@@ -1156,6 +1187,7 @@ export const ServerSettingsPatch = Schema.Struct({
       grok: Schema.optionalKey(GrokSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       antigravity: Schema.optionalKey(AntigravitySettingsPatch),
+      primeAgent: Schema.optionalKey(PrimeSettingsPatch),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual
