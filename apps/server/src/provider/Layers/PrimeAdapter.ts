@@ -6,6 +6,7 @@ import {
   type ProviderApprovalDecision,
   ProviderDriverKind,
   type ProviderRuntimeEvent,
+  type ProviderSendTurnInput,
   type ProviderSession,
   ProviderInstanceId,
   RuntimeItemId,
@@ -1268,15 +1269,82 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         return session;
       }).pipe(Effect.scoped);
 
+    const buildTurnAttachments = (input: ProviderSendTurnInput) =>
+      Effect.forEach(input.attachments ?? [], (attachment) => {
+        const attachmentPath = resolveAttachmentPath({
+          attachmentsDir: serverConfig.attachmentsDir,
+          attachment,
+        });
+        if (!attachmentPath) {
+          return Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "prompt",
+              detail: `Invalid attachment id '${attachment.id}'.`,
+            }),
+          );
+        }
+        return fileSystem.readFile(attachmentPath).pipe(
+          Effect.map((bytes) => ({
+            type: "image" as const,
+            data: Buffer.from(bytes).toString("base64"),
+            mimeType: attachment.mimeType,
+          })),
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "prompt",
+                detail: cause.message,
+                cause,
+              }),
+          ),
+        );
+      });
+
+    const steerRunningTurn = (
+      ctx: PrimeSessionContext,
+      input: ProviderSendTurnInput,
+      turnId: TurnId,
+    ) =>
+      Effect.gen(function* () {
+        const message = input.input?.trim() ?? "";
+        const images = yield* buildTurnAttachments(input);
+        if (!message && images.length === 0) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue: "Turn requires non-empty text or at least one image.",
+          });
+        }
+        yield* ctx.rpc
+          .request({
+            type: "steer",
+            message,
+            ...(images.length > 0 ? { images } : {}),
+          })
+          .pipe(Effect.mapError((cause) => toRpcRequestError("steer", cause)));
+        const turn = ctx.turns.find((entry) => entry.id === turnId);
+        turn?.items.push(
+          ...(message ? [{ type: "user_text", text: message }] : []),
+          ...images.map((image) => ({ type: "user_image", mimeType: image.mimeType })),
+        );
+        ctx.session = { ...ctx.session, updatedAt: yield* nowIso };
+        return {
+          threadId: input.threadId,
+          turnId,
+          ...(ctx.session.resumeCursor !== undefined
+            ? { resumeCursor: ctx.session.resumeCursor }
+            : {}),
+        };
+      });
+
     const sendTurn: PrimeAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
         if (ctx.activeTurnId !== undefined) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "prompt",
-            detail: "A Prime turn is already streaming.",
-          });
+          // Prime queues mid-turn input as steering on the live turn.
+          return yield* steerRunningTurn(ctx, input, ctx.activeTurnId);
         }
         const selected = yield* applyModelSelection({
           rpc: ctx.rpc,
@@ -1291,37 +1359,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           ctx.session = { ...ctx.session, model: selected.slug };
         }
         const message = input.input?.trim() ?? "";
-        const images = yield* Effect.forEach(input.attachments ?? [], (attachment) => {
-          const attachmentPath = resolveAttachmentPath({
-            attachmentsDir: serverConfig.attachmentsDir,
-            attachment,
-          });
-          if (!attachmentPath) {
-            return Effect.fail(
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "prompt",
-                detail: `Invalid attachment id '${attachment.id}'.`,
-              }),
-            );
-          }
-          return fileSystem.readFile(attachmentPath).pipe(
-            Effect.map((bytes) => ({
-              type: "image" as const,
-              data: Buffer.from(bytes).toString("base64"),
-              mimeType: attachment.mimeType,
-            })),
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapterRequestError({
-                  provider: PROVIDER,
-                  method: "prompt",
-                  detail: cause.message,
-                  cause,
-                }),
-            ),
-          );
-        });
+        const images = yield* buildTurnAttachments(input);
         if (!message && images.length === 0) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
