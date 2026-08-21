@@ -41,6 +41,7 @@ const decodeRequestLog = Schema.decodeUnknownSync(
         level: Schema.optional(Schema.String),
         confirmed: Schema.optional(Schema.Boolean),
         cancelled: Schema.optional(Schema.Boolean),
+        message: Schema.optional(Schema.String),
         value: Schema.optional(Schema.String),
       }),
     }),
@@ -941,26 +942,59 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
     }),
   );
 
-  it.effect("fails closed when a second overlapping prompt is sent", () =>
+  it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () =>
     Effect.gen(function* () {
-      const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
+      const config = yield* ServerConfig;
+      const requestLogPath = NodePath.join(config.baseDir, "prime-steer-requests.ndjson");
+      const binaryPath = yield* Effect.promise(() =>
+        makeMockPrimeWrapper({ T3_PRIME_MOCK_REQUEST_LOG_PATH: requestLogPath }),
+      );
       const adapter = yield* makeTestAdapter(binaryPath);
-      const threadId = ThreadId.make("prime-overlap-thread");
+      const threadId = ThreadId.make("prime-steer-thread");
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
       yield* adapter.startSession({
         threadId,
         provider: ProviderDriverKind.make("primeAgent"),
         cwd: process.cwd(),
         runtimeMode: "full-access",
       });
+      const turn = yield* adapter.sendTurn({ threadId, input: "slow turn", attachments: [] });
 
-      yield* adapter.sendTurn({ threadId, input: "slow turn", attachments: [] });
-      const overlapped = yield* adapter
-        .sendTurn({ threadId, input: "second prompt", attachments: [] })
-        .pipe(Effect.result);
+      // A mid-turn sendTurn is a steer: the message joins the live Prime turn.
+      const steered = yield* adapter.sendTurn({ threadId, input: "steer now", attachments: [] });
+      assert.equal(String(steered.turnId), String(turn.turnId));
 
-      assert.equal(overlapped._tag, "Failure");
-      if (overlapped._tag === "Failure") {
-        assert.include(overlapped.failure.message, "already streaming");
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const startedEvents = runtimeEvents.filter((event) => event.type === "turn.started");
+      const completedEvents = runtimeEvents.filter((event) => event.type === "turn.completed");
+      assert.equal(startedEvents.length, 1);
+      assert.equal(String(startedEvents[0]?.turnId), String(turn.turnId));
+      assert.equal(completedEvents.length, 1);
+      assert.equal(String(completedEvents[0]?.turnId), String(turn.turnId));
+      const deltas = runtimeEvents.flatMap((event) =>
+        event.type === "content.delta" && event.payload.streamKind === "assistant_text"
+          ? [event.payload.delta]
+          : [],
+      );
+      assert.isTrue(deltas.some((text) => text.includes("too late") && text.includes("steer now")));
+
+      const log = yield* waitForFileContent(requestLogPath, 80, '"steer"');
+      const steerLine = log
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .map((line) => decodeRequestLog(line))
+        .find((recorded) => recorded.command.type === "steer");
+      assert.isDefined(steerLine);
+      if (steerLine !== undefined) {
+        const steerCommand = steerLine.command as { type: string; message?: string };
+        assert.equal(steerCommand.message, "steer now");
       }
 
       yield* adapter.stopSession(threadId);

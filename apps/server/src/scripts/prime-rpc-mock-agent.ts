@@ -46,6 +46,7 @@ let turnGeneration = 0;
 let delayedTimer: ReturnType<typeof setTimeout> | undefined;
 let pendingApprovalId: string | undefined;
 let pendingUserInputId: string | undefined;
+const steerQueue: string[] = [];
 let currentModel: { id: string; name: string; provider: string } = {
   id: "gpt-5.6-sol",
   name: "GPT-5.6 Sol",
@@ -318,6 +319,16 @@ function handle(command: Record<string, unknown>): void {
       respond(id, "set_thinking_level", true);
       return;
     }
+    case "steer": {
+      if (!streaming) {
+        respond(id, "steer", false, { error: "Agent is not streaming." });
+        return;
+      }
+      const message = typeof command.message === "string" ? command.message : "";
+      steerQueue.push(message);
+      respond(id, "steer", true);
+      return;
+    }
     case "prompt": {
       if (streaming) {
         respond(id, "prompt", false, {
@@ -429,18 +440,19 @@ function handle(command: Record<string, unknown>): void {
           if (!stillCurrent()) {
             return;
           }
+          const slowText = ["too late", ...steerQueue].join(" ");
           finishTurn(() => {
             send({
               type: "message_update",
               assistantMessageEvent: {
                 type: "text_delta",
                 contentIndex: 0,
-                delta: "too late",
+                delta: slowText,
               },
             });
             send({
               type: "agent_end",
-              messages: [{ role: "assistant", content: [{ type: "text", text: "too late" }] }],
+              messages: [{ role: "assistant", content: [{ type: "text", text: slowText }] }],
             });
           });
         }, 2_000);
