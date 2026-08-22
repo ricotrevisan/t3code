@@ -62,8 +62,8 @@ export default function t3ApprovalExtension(pi: ExtensionAPI) {
     handler: () => {},
   });
 
-  const mode = pi.getFlag("t3-approval-mode");
   pi.on("tool_call", async (event, ctx) => {
+    const mode = pi.getFlag("t3-approval-mode");
     if (mode === "full-access") {
       return undefined;
     }

@@ -43,11 +43,13 @@ interface ExtensionHarness {
     readonly name: string;
     readonly description?: string;
   };
+  readonly setMode: (mode: string | boolean | undefined) => void;
   readonly toolCall: ToolCallHandler;
 }
 
 const loadExtensionHarness = (extensionPath: string, mode: string | boolean | undefined) =>
   Effect.gen(function* () {
+    let currentMode = mode;
     let flag: ExtensionHarness["flag"] | undefined;
     let command: ExtensionHarness["command"] | undefined;
     let toolCall: ToolCallHandler | undefined;
@@ -73,7 +75,7 @@ const loadExtensionHarness = (extensionPath: string, mode: string | boolean | un
           ...(options.description !== undefined ? { description: options.description } : {}),
         };
       },
-      getFlag: () => mode,
+      getFlag: () => currentMode,
       on: (_event, handler) => {
         toolCall = handler;
       },
@@ -81,7 +83,14 @@ const loadExtensionHarness = (extensionPath: string, mode: string | boolean | un
     if (flag === undefined || command === undefined || toolCall === undefined) {
       return yield* Effect.die(new Error("Installed extension did not register its protocol."));
     }
-    return { flag, command, toolCall } satisfies ExtensionHarness;
+    return {
+      flag,
+      command,
+      setMode: (nextMode) => {
+        currentMode = nextMode;
+      },
+      toolCall,
+    } satisfies ExtensionHarness;
   });
 
 describe("primeApprovalExtension", () => {
@@ -140,6 +149,41 @@ describe("primeApprovalExtension", () => {
             name: "t3-approval-v1",
             description: "T3 approval bridge protocol 1",
           });
+        }),
+      ),
+    ),
+  );
+
+  it.live("reads the mode after Prime applies CLI flag values", () =>
+    provide(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-prime-approval-extension-late-flag-",
+          });
+          const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
+          const harness = yield* loadExtensionHarness(extensionPath, "deny");
+          let confirmations = 0;
+
+          harness.setMode("approval-required");
+          const result = yield* Effect.promise(() =>
+            harness.toolCall(
+              { toolName: "ipython", input: { code: "1 + 1" } },
+              {
+                hasUI: true,
+                ui: {
+                  confirm: async () => {
+                    confirmations += 1;
+                    return true;
+                  },
+                },
+              },
+            ),
+          );
+
+          expect(result).toBeUndefined();
+          expect(confirmations).toBe(1);
         }),
       ),
     ),
