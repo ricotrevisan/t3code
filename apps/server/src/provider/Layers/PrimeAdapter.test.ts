@@ -1001,9 +1001,11 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
     }),
   );
 
-  it.effect("abort interrupts an in-flight turn", () =>
+  it.effect("abort interrupts an in-flight turn and allows the next turn", () =>
     Effect.gen(function* () {
-      const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
+      const binaryPath = yield* Effect.promise(() =>
+        makeMockPrimeWrapper({ T3_PRIME_MOCK_SUSPEND_AFTER_ABORT: "1" }),
+      );
       const adapter = yield* makeTestAdapter(binaryPath);
       const threadId = ThreadId.make("prime-abort-thread");
       const aborted = yield* Deferred.make<void>();
@@ -1040,6 +1042,9 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
         Effect.timeoutOption("50 millis"),
       );
       assert.isTrue(Option.isNone(completedRace));
+
+      yield* adapter.sendTurn({ threadId, input: "turn after abort", attachments: [] });
+      yield* Deferred.await(completed);
 
       yield* adapter.stopSession(threadId);
     }),
