@@ -592,7 +592,7 @@ export type CursorSettings = typeof CursorSettings.Type;
 
 export const GrokSettings = makeProviderSettingsSchema(
   {
-    // Off by default (like Cursor and OpenCode): the binding is not yet
+    // Off by default (like OpenCode): the binding is not yet
     // stable enough to probe on every install. Users opt in from Settings.
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
@@ -636,7 +636,7 @@ export const AntigravitySettings = makeProviderSettingsSchema(
   {
 export const PrimeSettings = makeProviderSettingsSchema(
   {
-    // Off by default (like Cursor, Grok, and OpenCode): the binding is not
+    // Off by default (like Grok and OpenCode): the binding is not
     // yet stable enough to probe on every install. Users opt in from Settings.
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
@@ -725,7 +725,7 @@ export type PrimeSettings = typeof PrimeSettings.Type;
 
 export const OpenCodeSettings = makeProviderSettingsSchema(
   {
-    // Off by default (like Cursor and Grok): the binding is not yet stable
+    // Off by default (like Grok): the binding is not yet stable
     // enough to probe on every install. Users opt in from Settings.
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
