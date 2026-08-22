@@ -13,6 +13,7 @@ const exitLogPath = process.env.T3_PRIME_MOCK_EXIT_LOG_PATH;
 const requestLogPath = process.env.T3_PRIME_MOCK_REQUEST_LOG_PATH;
 const approvalSideEffectPath = process.env.T3_PRIME_MOCK_APPROVAL_SIDE_EFFECT_PATH;
 const approvalHandshake = process.env.T3_PRIME_MOCK_APPROVAL_HANDSHAKE ?? "valid";
+const suspendAfterAbort = process.env.T3_PRIME_MOCK_SUSPEND_AFTER_ABORT === "1";
 const argv = process.argv.slice(2);
 const openRouterCatalogExtensionLoaded = argv.some(
   (value, index) =>
@@ -42,6 +43,7 @@ if (!noSession) {
 }
 
 let streaming = false;
+let sessionInputSuspended = false;
 let turnGeneration = 0;
 let delayedTimer: ReturnType<typeof setTimeout> | undefined;
 let pendingApprovalId: string | undefined;
@@ -330,6 +332,13 @@ function handle(command: Record<string, unknown>): void {
       return;
     }
     case "prompt": {
+      if (sessionInputSuspended && command.streamingBehavior === undefined) {
+        respond(id, "prompt", false, {
+          error: "Cannot admit a session action while queued session input is suspended.",
+        });
+        return;
+      }
+      sessionInputSuspended = false;
       if (streaming) {
         respond(id, "prompt", false, {
           error: "Agent is already streaming. Specify streamingBehavior to queue the message.",
@@ -564,6 +573,7 @@ function handle(command: Record<string, unknown>): void {
       turnGeneration += 1;
       const wasStreaming = streaming;
       streaming = false;
+      sessionInputSuspended = suspendAfterAbort;
       respond(id, "abort", true);
       if (wasStreaming) {
         send({
