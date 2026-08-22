@@ -1362,6 +1362,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           .request({
             type: "prompt",
             message,
+            streamingBehavior: "followUp",
             ...(images.length > 0 ? { images } : {}),
           })
           .pipe(
