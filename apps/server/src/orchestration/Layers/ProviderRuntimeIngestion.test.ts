@@ -41,6 +41,7 @@ import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "../../provider/orphanedProviderSession.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
@@ -367,6 +368,60 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
+  });
+
+  it("recovers an orphaned session when fresh activity proves its turn is still running", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-survived-restart");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-survived-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      turnId,
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-reconcile-orphaned-session"),
+      threadId: asThreadId("thread-1"),
+      session: {
+        threadId: asThreadId("thread-1"),
+        status: "error",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+        updatedAt: "2026-01-01T00:00:02.000Z",
+      },
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-survived-tool-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("survived-tool"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        title: "Command run",
+        detail: "Bash: vp test run",
+        data: {},
+      },
+    });
+
+    const recovered = await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+    expect(recovered.session?.lastError).toBeNull();
   });
 
   it("applies provider session.state.changed transitions directly", async () => {

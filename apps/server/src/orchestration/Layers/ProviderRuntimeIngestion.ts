@@ -30,6 +30,7 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "../../provider/orphanedProviderSession.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -48,6 +49,20 @@ import { canReplaceThreadTitle } from "../threadTitles.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
+
+const ORPHAN_RECOVERY_EVENT_TYPES: ReadonlySet<ProviderRuntimeEvent["type"]> = new Set([
+  "turn.plan.updated",
+  "turn.proposed.delta",
+  "turn.proposed.completed",
+  "turn.diff.updated",
+  "item.started",
+  "item.updated",
+  "content.delta",
+  "request.opened",
+  "task.started",
+  "task.progress",
+  "task.updated",
+]);
 
 // Fallback when the in-memory description cache no longer has the task name
 // (server restart, session-exit sweep, TTL/capacity eviction): earlier
@@ -1563,6 +1578,40 @@ const make = Effect.gen(function* () {
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
           : null;
+
+      // During a hot server handoff the replacement process can reconcile the
+      // projected session before the previous process has finished forwarding
+      // provider output. A fresh, non-terminal event for the orphaned turn is
+      // authoritative proof that work is still alive; restore the lifecycle so
+      // clients do not show Failed while output continues to arrive. Only the
+      // startup-reconciliation error is recoverable here, and terminal/delayed
+      // completion events are intentionally excluded from the event set.
+      if (
+        thread.session?.status === "error" &&
+        thread.session.lastError === ORPHANED_PROVIDER_SESSION_ERROR &&
+        eventTurnId !== undefined &&
+        ORPHAN_RECOVERY_EVENT_TYPES.has(event.type) &&
+        event.createdAt > thread.session.updatedAt
+      ) {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.set",
+          commandId: yield* providerCommandId(event, "orphaned-session-recovered"),
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: "running",
+            providerName: event.provider,
+            ...(event.providerInstanceId !== undefined
+              ? { providerInstanceId: event.providerInstanceId }
+              : {}),
+            runtimeMode: thread.session.runtimeMode,
+            activeTurnId: eventTurnId,
+            lastError: null,
+            updatedAt: event.createdAt,
+          },
+          createdAt: event.createdAt,
+        });
+      }
 
       if (
         event.type === "session.started" ||
