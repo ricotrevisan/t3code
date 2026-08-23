@@ -1,3 +1,5 @@
+Never commit or make PRs against `pingdotgg/t3code`. We are working on a fork of that project; they don't take outside contributions.
+
 # T3 Code
 
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs and agents (Codex, Claude Code, Cursor, Grok, OpenCode, Antigravity) and serves web, desktop, and mobile clients.
