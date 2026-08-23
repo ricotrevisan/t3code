@@ -435,6 +435,109 @@ function handle(command: Record<string, unknown>): void {
         });
         return;
       }
+      if (message === "spawn subagents") {
+        send({ type: "agent_start" });
+        send({
+          type: "rlm_child_update",
+          child: {
+            id: "prime-sub-1",
+            sessionName: "audit-renderer",
+            model: "openrouter/ox-alpha",
+            label: "Audit the pie renderer code",
+            status: "queued",
+            sessionDir: "/tmp/prime-sub-1",
+          },
+        });
+        send({
+          type: "rlm_child_update",
+          child: {
+            id: "prime-sub-2",
+            sessionName: "audit-tests-scripts",
+            model: "openrouter/ox-alpha",
+            label: "Audit the new test files",
+            status: "queued",
+            sessionDir: "/tmp/prime-sub-2",
+          },
+        });
+        send({
+          type: "rlm_child_update",
+          child: {
+            id: "prime-sub-1",
+            sessionName: "audit-renderer",
+            model: "openrouter/ox-alpha",
+            label: "Audit the pie renderer code",
+            status: "running",
+            tokenCount: 4200,
+            toolUseCount: 1,
+            sessionDir: "/tmp/prime-sub-1",
+            activity: { kind: "executing", toolName: "ipython" },
+          },
+        });
+        // A text-delta snapshot with identical roster state must be deduped.
+        send({
+          type: "rlm_child_update",
+          child: {
+            id: "prime-sub-1",
+            sessionName: "audit-renderer",
+            model: "openrouter/ox-alpha",
+            label: "Audit the pie renderer code",
+            status: "running",
+            answerPreview: "Reading pie-definition.ts",
+            tokenCount: 4200,
+            toolUseCount: 1,
+            sessionDir: "/tmp/prime-sub-1",
+            activity: { kind: "executing", toolName: "ipython" },
+          },
+        });
+        send({
+          type: "rlm_child_update",
+          child: {
+            id: "prime-sub-1",
+            sessionName: "audit-renderer",
+            model: "openrouter/ox-alpha",
+            label: "Audit the pie renderer code",
+            status: "done",
+            answerPreview: "Found one dead helper in normalize.js",
+            tokenCount: 9100,
+            toolUseCount: 3,
+            durationMs: 2500,
+            sessionDir: "/tmp/prime-sub-1",
+          },
+        });
+        send({
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "text_delta",
+            contentIndex: 0,
+            delta: "spawned subagents",
+          },
+        });
+        setImmediate(() => {
+          if (!stillCurrent()) {
+            return;
+          }
+          finishTurn(() => {
+            send({ type: "agent_end", messages: [{ role: "assistant", content: [] }] });
+          });
+          // Prime RLM children can settle after their parent turn has ended.
+          setImmediate(() => {
+            send({
+              type: "rlm_child_update",
+              child: {
+                id: "prime-sub-2",
+                sessionName: "audit-tests-scripts",
+                model: "openrouter/ox-alpha",
+                label: "Audit the new test files",
+                status: "error",
+                durationMs: 3000,
+                sessionDir: "/tmp/prime-sub-2",
+                error: "Test suite could not start",
+              },
+            });
+          });
+        });
+        return;
+      }
       if (message === "hold split unicode") {
         const prefix =
           '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"';

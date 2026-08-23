@@ -11,6 +11,7 @@ import {
   ProviderInstanceId,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   type ThreadId,
   type ToolLifecycleItemType,
   TurnId,
@@ -155,6 +156,51 @@ const PrimeExtensionEditorRequest = Schema.Struct({
   title: Schema.String,
   prefill: Schema.optional(Schema.String),
 });
+const PrimeRlmChildUpdate = Schema.Struct({
+  type: Schema.Literal("rlm_child_update"),
+  child: Schema.Struct({
+    id: Schema.String,
+    sessionName: Schema.optional(Schema.String),
+    model: Schema.optional(Schema.String),
+    label: Schema.String,
+    status: Schema.Literals(["queued", "running", "done", "error", "cancelled"]),
+    answerPreview: Schema.optional(Schema.String),
+    recap: Schema.optional(Schema.String),
+    activity: Schema.optional(
+      Schema.Struct({
+        kind: Schema.Literals(["waiting", "writing", "executing"]),
+        toolName: Schema.optional(Schema.String),
+      }),
+    ),
+    error: Schema.optional(Schema.String),
+  }),
+});
+
+const decodeRlmChildUpdate = Schema.decodeUnknownExit(PrimeRlmChildUpdate);
+
+const nonEmptyTrimmed = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+};
+
+function primeChildProgressSummary(child: (typeof PrimeRlmChildUpdate.Type)["child"]): string {
+  const recap = nonEmptyTrimmed(child.recap);
+  if (recap !== undefined) {
+    return recap;
+  }
+  if (child.activity?.kind === "executing") {
+    const toolName = nonEmptyTrimmed(child.activity.toolName);
+    return toolName !== undefined ? `Using ${toolName}` : "Using a tool";
+  }
+  if (child.activity?.kind === "writing") {
+    return "Writing response";
+  }
+  if (child.activity?.kind === "waiting") {
+    return "Waiting";
+  }
+  return child.status === "queued" ? "Queued" : "Working";
+}
+
 const PrimeExtensionUserInputRequest = Schema.Union([
   PrimeExtensionSelectRequest,
   PrimeExtensionInputRequest,
@@ -194,6 +240,13 @@ interface PendingPrimeUserInput {
   readonly options: ReadonlyArray<string>;
 }
 
+interface PrimeSubagentState {
+  title: string;
+  model: string | undefined;
+  lastProgressKey: string | undefined;
+  terminal: boolean;
+}
+
 interface PrimeSessionContext {
   readonly threadId: ThreadId;
   readonly rpc: PrimeRpcClient;
@@ -209,6 +262,8 @@ interface PrimeSessionContext {
   turnStarted: boolean;
   stopped: boolean;
   settledTurnId: TurnId | undefined;
+  /** Last emitted Prime RLM child state, used to dedupe streaming snapshots. */
+  readonly subagents: Map<string, PrimeSubagentState>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -673,9 +728,145 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
       }
     });
 
+    // Prime RLM children can outlive the turn that spawned them, so task
+    // events use the most recent turn when no turn is active.
+    const subagentTurnId = (ctx: PrimeSessionContext): TurnId | undefined =>
+      ctx.activeTurnId ?? ctx.turns[ctx.turns.length - 1]?.id;
+
+    const subagentLinkage = (state: PrimeSubagentState) => ({
+      taskType: "subagent" as const,
+      title: state.title,
+      ...(state.model !== undefined ? { model: state.model } : {}),
+    });
+
+    const publishRlmChildUpdate = (
+      ctx: PrimeSessionContext,
+      event: typeof PrimeRlmChildUpdate.Type,
+    ) =>
+      Effect.gen(function* () {
+        const child = event.child;
+        const title =
+          nonEmptyTrimmed(child.sessionName) ?? nonEmptyTrimmed(child.label) ?? child.id;
+        const description = nonEmptyTrimmed(child.label) ?? title;
+        const model = nonEmptyTrimmed(child.model);
+        let state = ctx.subagents.get(child.id);
+        const firstObservation = state === undefined;
+        if (state === undefined) {
+          state = {
+            title,
+            model,
+            lastProgressKey: undefined,
+            terminal: false,
+          };
+          ctx.subagents.set(child.id, state);
+          const turnId = subagentTurnId(ctx);
+          yield* publish({
+            type: "task.started",
+            ...(yield* stamp),
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            threadId: ctx.threadId,
+            ...(turnId !== undefined ? { turnId } : {}),
+            payload: {
+              taskId: RuntimeTaskId.make(child.id),
+              ...subagentLinkage(state),
+              description,
+            },
+          });
+        } else {
+          state.title = title;
+          state.model = model ?? state.model;
+        }
+
+        const terminalStatus =
+          child.status === "done"
+            ? "completed"
+            : child.status === "error"
+              ? "failed"
+              : child.status === "cancelled"
+                ? "stopped"
+                : undefined;
+        const turnId = subagentTurnId(ctx);
+        if (terminalStatus !== undefined) {
+          if (state.terminal) {
+            return;
+          }
+          state.terminal = true;
+          const summary =
+            terminalStatus === "completed"
+              ? (nonEmptyTrimmed(child.answerPreview) ?? nonEmptyTrimmed(child.recap))
+              : (nonEmptyTrimmed(child.error) ??
+                nonEmptyTrimmed(child.answerPreview) ??
+                nonEmptyTrimmed(child.recap));
+          yield* publish({
+            type: "task.completed",
+            ...(yield* stamp),
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            threadId: ctx.threadId,
+            ...(turnId !== undefined ? { turnId } : {}),
+            payload: {
+              taskId: RuntimeTaskId.make(child.id),
+              ...subagentLinkage(state),
+              status: terminalStatus,
+              ...(summary !== undefined ? { summary } : {}),
+            },
+          });
+          return;
+        }
+        if (state.terminal) {
+          return;
+        }
+
+        const summary = primeChildProgressSummary(child);
+        const lastToolName = nonEmptyTrimmed(child.activity?.toolName);
+        const progressKey = [
+          child.status,
+          title,
+          model ?? "",
+          child.activity?.kind ?? "",
+          lastToolName ?? "",
+          nonEmptyTrimmed(child.recap) ?? "",
+        ].join("\0");
+        // The admission snapshot already renders as task.started. Prime emits
+        // rlm_child_update for every text delta, so only publish progress when
+        // meaningful roster state changes.
+        if (firstObservation && child.status === "queued" && child.activity === undefined) {
+          state.lastProgressKey = progressKey;
+          return;
+        }
+        if (state.lastProgressKey === progressKey) {
+          return;
+        }
+        state.lastProgressKey = progressKey;
+        yield* publish({
+          type: "task.progress",
+          ...(yield* stamp),
+          provider: PROVIDER,
+          providerInstanceId: boundInstanceId,
+          threadId: ctx.threadId,
+          ...(turnId !== undefined ? { turnId } : {}),
+          payload: {
+            taskId: RuntimeTaskId.make(child.id),
+            ...subagentLinkage(state),
+            description: summary,
+            summary,
+            status: child.status === "queued" ? "pending" : "running",
+            ...(lastToolName !== undefined ? { lastToolName } : {}),
+          },
+        });
+      });
+
     const handlePrimeEvent = (ctx: PrimeSessionContext, raw: unknown) =>
       Effect.gen(function* () {
         if (sessions.get(ctx.threadId) !== ctx || ctx.stopped) {
+          return;
+        }
+        // RLM children can settle after the spawning turn ends, so handle
+        // their native snapshot event before the active-turn guard.
+        const rlmChildUpdate = decodeRlmChildUpdate(raw);
+        if (Exit.isSuccess(rlmChildUpdate)) {
+          yield* publishRlmChildUpdate(ctx, rlmChildUpdate.value);
           return;
         }
         const turnId = ctx.activeTurnId;
@@ -1233,6 +1424,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           turnStarted: false,
           stopped: false,
           settledTurnId: undefined,
+          subagents: new Map(),
         };
         sessions.set(input.threadId, ctx);
         sessionScopeTransferred = true;
