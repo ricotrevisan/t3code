@@ -1428,4 +1428,96 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       yield* adapter.stopSession(threadId);
     }),
   );
+
+  it.effect("maps Prime RLM child updates to task activities", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const requestLogPath = NodePath.join(config.baseDir, "prime-subagent-requests.ndjson");
+      const binaryPath = yield* Effect.promise(() =>
+        makeMockPrimeWrapper({ T3_PRIME_MOCK_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(binaryPath);
+      const threadId = ThreadId.make("prime-subagents-thread");
+      const startedEvents: Array<ProviderRuntimeEvent & { type: "task.started" }> = [];
+      const progressEvents: Array<ProviderRuntimeEvent & { type: "task.progress" }> = [];
+      const completedEvents: Array<ProviderRuntimeEvent & { type: "task.completed" }> = [];
+      const fleetSettled = yield* Deferred.make<void>();
+      const eventFiber = yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            if (event.type === "task.started") {
+              startedEvents.push(event);
+            }
+            if (event.type === "task.progress") {
+              progressEvents.push(event);
+            }
+            if (event.type === "task.completed") {
+              completedEvents.push(event);
+              // The mock emits this terminal row after the parent turn ends;
+              // seeing it means every earlier row was already delivered.
+              if (event.payload.taskId === "prime-sub-2") {
+                yield* Deferred.succeed(fleetSettled, undefined);
+              }
+            }
+          }),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "spawn subagents",
+        attachments: [],
+      });
+      yield* Deferred.await(fleetSettled);
+
+      const started = startedEvents.find((event) => event.payload.taskId === "prime-sub-1");
+      assert.isDefined(started);
+      assert.equal(started?.turnId, turn.turnId);
+      assert.equal(started?.payload.taskType, "subagent");
+      assert.equal(started?.payload.title, "audit-renderer");
+      assert.equal(started?.payload.description, "Audit the pie renderer code");
+      assert.equal(started?.payload.model, "openrouter/ox-alpha");
+
+      const childOneProgress = progressEvents.filter(
+        (event) => event.payload.taskId === "prime-sub-1",
+      );
+      // Prime emits an RLM snapshot for every text delta. The adapter only
+      // forwards meaningful roster changes.
+      assert.lengthOf(childOneProgress, 1);
+      const progress = childOneProgress[0];
+      assert.equal(progress?.payload.summary, "Using ipython");
+      assert.equal(progress?.payload.status, "running");
+      assert.equal(progress?.payload.lastToolName, "ipython");
+      // Prime's tokenCount is current context size, not cumulative usage, so
+      // the adapter must not present it as total token usage.
+      assert.isUndefined(progress?.payload.typedUsage);
+      // Identity rides on every row so folds survive activity retention.
+      assert.equal(progress?.payload.title, "audit-renderer");
+
+      const completedOne = completedEvents.find((event) => event.payload.taskId === "prime-sub-1");
+      assert.isDefined(completedOne);
+      assert.equal(completedOne?.payload.status, "completed");
+      assert.equal(completedOne?.payload.summary, "Found one dead helper in normalize.js");
+      assert.isUndefined(completedOne?.payload.typedUsage);
+
+      const failedTwo = completedEvents.find((event) => event.payload.taskId === "prime-sub-2");
+      assert.isDefined(failedTwo);
+      assert.equal(failedTwo?.turnId, turn.turnId);
+      assert.equal(failedTwo?.payload.status, "failed");
+      // The failed child's error rides as the terminal summary (the contract's
+      // task.completed payload has no error field; clients read it from there).
+      assert.equal(failedTwo?.payload.summary, "Test suite could not start");
+
+      yield* adapter.stopSession(threadId);
+      yield* Fiber.interrupt(eventFiber);
+    }),
+  );
 });
