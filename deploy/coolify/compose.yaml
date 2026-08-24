@@ -1,0 +1,50 @@
+services:
+  t3code:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        T3_VERSION: "0.0.33"
+        CODEX_VERSION: "0.149.1"
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      T3CODE_HOME: /home/node/.t3
+      SERVICE_URL_T3CODE_3773:
+      SERVICE_FQDN_T3CODE_3773:
+    expose:
+      - "3773"
+    volumes:
+      - t3-state:/home/node/.t3
+      - codex-auth:/home/node/.codex
+      - type: volume
+        source: shared-data
+        target: /opt/data/projects
+        volume:
+          subpath: projects
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3773/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          memory: 512M
+
+volumes:
+  t3-state:
+  codex-auth:
+  shared-data:
+    external: true
+    name: ${SHARED_DATA_VOLUME}
