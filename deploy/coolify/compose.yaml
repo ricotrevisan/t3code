@@ -24,9 +24,6 @@ services:
     volumes:
       - t3-state:/home/node/.t3
       - codex-auth:/home/node/.codex
-      - type: bind
-        source: ${SHARED_PROJECTS_PATH}
-        target: /opt/data/projects
     security_opt:
       - no-new-privileges:true
     healthcheck:
