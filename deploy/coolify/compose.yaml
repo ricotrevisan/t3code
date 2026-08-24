@@ -17,11 +17,9 @@ services:
     volumes:
       - t3-state:/home/node/.t3
       - codex-auth:/home/node/.codex
-      - type: volume
-        source: shared-data
+      - type: bind
+        source: ${SHARED_PROJECTS_PATH}
         target: /opt/data/projects
-        volume:
-          subpath: projects
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -45,6 +43,3 @@ services:
 volumes:
   t3-state:
   codex-auth:
-  shared-data:
-    external: true
-    name: ${SHARED_DATA_VOLUME}

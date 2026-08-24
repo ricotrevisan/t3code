@@ -7,7 +7,7 @@ This directory deploys the published T3 Code server with the Codex CLI as an iso
 - Build pack: Docker Compose
 - Compose file: `/deploy/coolify/compose.yaml`
 - Internal service port: `3773`
-- Required runtime variable: `SHARED_DATA_VOLUME`, set to the existing Docker volume that owns the approved `projects` subdirectory
+- Required runtime variable: `SHARED_PROJECTS_PATH`, set to the host path of the approved existing `projects` directory
 - Generated URL: declared through `SERVICE_URL_T3CODE_3773` and `SERVICE_FQDN_T3CODE_3773`
 
 T3 and Codex state use separate named volumes. Provider authentication is not committed. Run `codex login --device-auth` from a T3 terminal after deployment; `/home/node/.codex` persists the login.
