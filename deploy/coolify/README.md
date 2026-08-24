@@ -5,6 +5,7 @@ This directory deploys the published T3 Code server with the Codex CLI as an iso
 ## Coolify settings
 
 - Build pack: Docker Compose
+- Base directory: `/deploy/coolify`
 - Compose file: `/deploy/coolify/compose.yaml`
 - Internal service port: `3773`
 - Required runtime variable: `SHARED_PROJECTS_PATH`, set to the host path of the approved existing `projects` directory
