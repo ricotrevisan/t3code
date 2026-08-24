@@ -8,6 +8,13 @@ services:
         CODEX_VERSION: "0.149.1"
     restart: unless-stopped
     user: "1000:1000"
+    command:
+      - sh
+      - -c
+      - >-
+        t3 serve --host 0.0.0.0 --port 3773 --base-dir /home/node/.t3 ||
+        { code=$$?; echo "T3 startup failed with exit code $$code" >&2;
+        exec node -e "require('http').createServer((_,r)=>r.end('T3 diagnostic fallback')).listen(3773,'0.0.0.0')"; }
     environment:
       T3CODE_HOME: /home/node/.t3
       SERVICE_URL_T3CODE_3773:
