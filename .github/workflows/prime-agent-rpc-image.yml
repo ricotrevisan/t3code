@@ -33,16 +33,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/coolify-source/Dockerfile
-          push: false
-          build-args: |
-            SOURCE_SHA=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Build image without pushing
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! docker build \
+            --progress=plain \
+            --build-arg "SOURCE_SHA=${GITHUB_SHA}" \
+            --file deploy/coolify-source/Dockerfile \
+            --tag t3code-prime-agent-rpc:ci \
+            . 2>&1 | tee /tmp/docker-build.log; then
+            tail_output="$(tail -n 80 /tmp/docker-build.log)"
+            tail_output="${tail_output//'%'/'%25'}"
+            tail_output="${tail_output//$'\r'/'%0D'}"
+            tail_output="${tail_output//$'\n'/'%0A'}"
+            echo "::error title=Source image build failed::${tail_output}"
+            exit 1
+          fi
