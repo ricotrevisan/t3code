@@ -1,0 +1,9 @@
+{
+  "name": "t3code-prime-agent-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deployment-only locked Prime Agent runtime",
+  "dependencies": {
+    "prime-agent": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.8.0/prime-agent-0.8.0.tgz"
+  }
+}

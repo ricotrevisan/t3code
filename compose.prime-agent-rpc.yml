@@ -9,12 +9,15 @@ services:
     environment:
       # Coolify magic variable: provisions an HTTPS FQDN routed to port 3773.
       SERVICE_FQDN_T3CODE_3773:
+      HOME: /home/node
+      PRIME_AGENT_CODING_AGENT_DIR: /home/node/.prime/agent
       T3CODE_HOME: /home/node/.t3
     expose:
       - "3773"
     volumes:
       - t3_source_data:/home/node/.t3
       - codex_source_data:/home/node/.codex
+      - prime_agent_source_data:/home/node/.prime
       - type: volume
         source: shared_data
         target: /opt/data/projects
@@ -50,6 +53,7 @@ volumes:
   # Deliberately new, separate volumes; never point these at production state.
   t3_source_data:
   codex_source_data:
+  prime_agent_source_data:
   # Existing Docker volume that backs /opt/data; expose only its projects subtree.
   shared_data:
     external: true

@@ -53,3 +53,45 @@ jobs:
             echo "::error title=Source image build failed::${tail_output}"
             exit 1
           fi
+
+      - name: Smoke-test agent runtime
+        shell: bash
+        run: |
+          docker run --rm --entrypoint sh t3code-prime-agent-rpc:ci -euc '
+            test "$(id -u)" = 1000
+            test "$(id -g)" = 1000
+            test "$HOME" = /home/node
+            test "$PRIME_AGENT_CODING_AGENT_DIR" = /home/node/.prime/agent
+            test "$PRIME_AGENT_KERNEL_VENV" = /home/node/.prime/agent/kernel-venv
+            test "$UV_CACHE_DIR" = /home/node/.prime/uv/cache
+            test "$UV_PYTHON_INSTALL_DIR" = /home/node/.prime/uv/python
+            test "$(command -v prime-agent)" = /usr/local/bin/prime-agent
+            test "$(prime-agent --version 2>&1)" = 0.8.0
+            test "$(command -v uv)" = /usr/local/bin/uv
+            test "$(uv --version | cut -d " " -f 1-2)" = "uv 0.12.5"
+            test -L /usr/local/bin/prime-agent
+            test "$(readlink /usr/local/bin/prime-agent)" = /opt/prime-agent/node_modules/.bin/prime-agent
+            command -v codex >/dev/null
+            codex --version
+            touch /home/node/.prime/.ci-write-test
+            rm /home/node/.prime/.ci-write-test
+          '
+
+      - name: Smoke-test fresh Prime kernel bootstrap
+        shell: bash
+        run: |
+          docker run --rm --entrypoint sh t3code-prime-agent-rpc:ci -euc '
+            test ! -e "$PRIME_AGENT_KERNEL_VENV"
+            timeout 600 node --input-type=module -e '\''
+              import { execFileSync } from "node:child_process";
+              import { ensureKernelPython } from "file:///opt/prime-agent/node_modules/prime-agent/dist/core/kernel/bootstrap.js";
+              const python = await ensureKernelPython({ onProgress: console.error });
+              if (!python.startsWith(process.env.PRIME_AGENT_KERNEL_VENV + "/")) {
+                throw new Error(`kernel Python escaped persisted venv: ${python}`);
+              }
+              execFileSync(python, ["-c", "import ipykernel, rlm, requests"], { stdio: "inherit" });
+            '\''
+            test -x "$PRIME_AGENT_KERNEL_VENV/bin/python"
+            test -d "$UV_PYTHON_INSTALL_DIR"
+            test ! -e /home/node/.local/share/prime
+          '
