@@ -1,5 +1,5 @@
 services:
-  t3code:
+  t3code-prime:
     build:
       context: .
       dockerfile: deploy/coolify-source/Dockerfile
@@ -8,8 +8,8 @@ services:
     user: "1000:1000"
     environment:
       # Port-qualified Coolify magic variables provision HTTPS and route to port 3773.
-      SERVICE_FQDN_T3CODE_3773:
-      SERVICE_URL_T3CODE_3773:
+      SERVICE_FQDN_T3CODE_PRIME_3773:
+      SERVICE_URL_T3CODE_PRIME_3773:
       HOME: /home/node
       PRIME_AGENT_CODING_AGENT_DIR: /home/node/.prime/agent
       T3CODE_HOME: /home/node/.t3

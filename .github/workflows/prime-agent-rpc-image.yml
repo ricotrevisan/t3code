@@ -40,8 +40,8 @@ jobs:
         shell: bash
         run: |
           docker compose -f compose.prime-agent-rpc.yml config --quiet
-          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'SERVICE_FQDN_T3CODE_3773'
-          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'SERVICE_URL_T3CODE_3773'
+          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'SERVICE_FQDN_T3CODE_PRIME_3773'
+          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'SERVICE_URL_T3CODE_PRIME_3773'
           docker compose -f compose.prime-agent-rpc.yml config | grep -q 'name: coolify'
 
       - name: Build image without pushing
