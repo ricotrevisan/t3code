@@ -13,6 +13,7 @@ RUN apt-get update \
 WORKDIR /src
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps ./apps
+COPY assets ./assets
 COPY packages ./packages
 COPY scripts ./scripts
 COPY oxlint-plugin-t3code ./oxlint-plugin-t3code

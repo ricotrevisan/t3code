@@ -11,6 +11,7 @@ on:
       - "compose.prime-agent-rpc.yml"
       - "apps/server/**"
       - "apps/web/**"
+      - "assets/**"
       - "packages/**"
       - "oxlint-plugin-t3code/**"
       - "patches/**"
