@@ -19,6 +19,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "t3.json"
+      - "tsconfig.base.json"
       - "vite.config.ts"
   workflow_dispatch:
 

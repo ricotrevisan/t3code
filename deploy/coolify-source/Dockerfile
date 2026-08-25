@@ -17,7 +17,7 @@ COPY packages ./packages
 COPY scripts ./scripts
 COPY oxlint-plugin-t3code ./oxlint-plugin-t3code
 COPY patches ./patches
-COPY vite.config.ts t3.json ./
+COPY vite.config.ts t3.json tsconfig.base.json ./
 
 RUN corepack enable \
  && corepack prepare pnpm@11.10.0 --activate \
