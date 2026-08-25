@@ -8,6 +8,7 @@ on:
       - ".github/workflows/prime-agent-rpc-image.yml"
       - ".dockerignore"
       - "deploy/coolify-source/**"
+      - "compose.prime-agent-rpc.yml"
       - "apps/server/**"
       - "apps/web/**"
       - "packages/**"

@@ -1,7 +1,7 @@
 services:
   t3code:
     build:
-      context: ../..
+      context: .
       dockerfile: deploy/coolify-source/Dockerfile
       args:
         SOURCE_SHA: ${SOURCE_SHA:-unknown}
