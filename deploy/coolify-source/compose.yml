@@ -1,0 +1,40 @@
+services:
+  t3code:
+    build:
+      context: ../..
+      dockerfile: deploy/coolify-source/Dockerfile
+      args:
+        SOURCE_SHA: ${SOURCE_SHA:-unknown}
+    user: "1000:1000"
+    environment:
+      # Coolify magic variable: provisions an HTTPS FQDN routed to port 3773.
+      SERVICE_FQDN_T3CODE_3773:
+      T3CODE_HOME: /home/node/.t3
+    expose:
+      - "3773"
+    volumes:
+      - t3_source_data:/home/node/.t3
+      - codex_source_data:/home/node/.codex
+      - type: bind
+        source: ${SHARED_PROJECTS_PATH:?Set SHARED_PROJECTS_PATH to the host projects directory}
+        target: /opt/data/projects
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:3773/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+volumes:
+  # Deliberately new, separate volumes; never point these at production state.
+  t3_source_data:
+  codex_source_data:

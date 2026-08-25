@@ -1,0 +1,12 @@
+.git
+.github/pr-assets
+.repos
+.plans
+.t3
+node_modules
+**/node_modules
+**/dist
+**/dist-electron
+**/.vite-plus
+coverage
+*.log
