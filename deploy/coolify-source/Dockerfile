@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NODE_OPTIONS=--max-old-space-size=4096
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends g++ git make python3 \
+ && apt-get install -y --no-install-recommends ca-certificates g++ git make python3 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
