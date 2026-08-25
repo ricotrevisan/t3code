@@ -15,6 +15,22 @@ services:
       T3CODE_HOME: /home/node/.t3
     expose:
       - "3773"
+    labels:
+      # Explicit labels keep routing deterministic when Coolify's Compose parser
+      # preserves advanced external-volume/network constructs.
+      - "traefik.enable=true"
+      - "traefik.docker.network=coolify"
+      - "traefik.http.middlewares.t3code-prime-redirect.redirectscheme.scheme=https"
+      - "traefik.http.routers.t3code-prime-http.rule=Host(`t3code-prime.nocode-to-knowcode.com`)"
+      - "traefik.http.routers.t3code-prime-http.entrypoints=http"
+      - "traefik.http.routers.t3code-prime-http.middlewares=t3code-prime-redirect"
+      - "traefik.http.routers.t3code-prime-http.service=t3code-prime"
+      - "traefik.http.routers.t3code-prime-https.rule=Host(`t3code-prime.nocode-to-knowcode.com`)"
+      - "traefik.http.routers.t3code-prime-https.entrypoints=https"
+      - "traefik.http.routers.t3code-prime-https.tls=true"
+      - "traefik.http.routers.t3code-prime-https.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.t3code-prime-https.service=t3code-prime"
+      - "traefik.http.services.t3code-prime.loadbalancer.server.port=3773"
     networks:
       - coolify
     volumes:
