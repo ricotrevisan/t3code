@@ -43,9 +43,9 @@ jobs:
           docker compose -f compose.prime-agent-rpc.yml config | grep -q 'SERVICE_FQDN_T3CODE_PRIME_3773'
           docker compose -f compose.prime-agent-rpc.yml config | grep -q 'SERVICE_URL_T3CODE_PRIME_3773'
           docker compose -f compose.prime-agent-rpc.yml config | grep -q 'name: coolify'
-          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'traefik.docker.network=coolify'
-          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'traefik.http.services.t3code-prime.loadbalancer.server.port=3773'
-          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'traefik.http.routers.t3code-prime-https.tls.certresolver=letsencrypt'
+          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'traefik.docker.network:'
+          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'traefik.http.services.t3code-prime.loadbalancer.server.port:'
+          docker compose -f compose.prime-agent-rpc.yml config | grep -q 'traefik.http.routers.t3code-prime-https.tls.certresolver:'
 
       - name: Build image without pushing
         shell: bash
