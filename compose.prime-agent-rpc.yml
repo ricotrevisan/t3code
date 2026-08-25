@@ -7,13 +7,16 @@ services:
         SOURCE_SHA: ${SOURCE_SHA:-unknown}
     user: "1000:1000"
     environment:
-      # Coolify magic variable: provisions an HTTPS FQDN routed to port 3773.
+      # Port-qualified Coolify magic variables provision HTTPS and route to port 3773.
       SERVICE_FQDN_T3CODE_3773:
+      SERVICE_URL_T3CODE_3773:
       HOME: /home/node
       PRIME_AGENT_CODING_AGENT_DIR: /home/node/.prime/agent
       T3CODE_HOME: /home/node/.t3
     expose:
       - "3773"
+    networks:
+      - coolify
     volumes:
       - t3_source_data:/home/node/.t3
       - codex_source_data:/home/node/.codex
@@ -58,3 +61,9 @@ volumes:
   shared_data:
     external: true
     name: 1188e9713c0a59d0d4a949bf49698a49084b2584648d3f4e5fbb3cf8691c688d
+
+networks:
+  # Raw Compose resources must join Coolify's proxy network explicitly.
+  coolify:
+    external: true
+    name: coolify
