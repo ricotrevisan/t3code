@@ -15,11 +15,23 @@ services:
     volumes:
       - t3_source_data:/home/node/.t3
       - codex_source_data:/home/node/.codex
-      - type: bind
-        source: ${SHARED_PROJECTS_PATH:?Set SHARED_PROJECTS_PATH to the host projects directory}
+      - type: volume
+        source: shared_data
         target: /opt/data/projects
+        volume:
+          subpath: projects
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:3773/"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "--silent",
+          "--show-error",
+          "--max-time",
+          "5",
+          "http://127.0.0.1:3773/",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -38,3 +50,7 @@ volumes:
   # Deliberately new, separate volumes; never point these at production state.
   t3_source_data:
   codex_source_data:
+  # Existing Docker volume that backs /opt/data; expose only its projects subtree.
+  shared_data:
+    external: true
+    name: 1188e9713c0a59d0d4a949bf49698a49084b2584648d3f4e5fbb3cf8691c688d

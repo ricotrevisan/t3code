@@ -43,7 +43,7 @@ jobs:
             --file deploy/coolify-source/Dockerfile \
             --tag t3code-prime-agent-rpc:ci \
             . 2>&1 | tee /tmp/docker-build.log; then
-            tail_output="$(tail -n 80 /tmp/docker-build.log)"
+            tail_output="$(tail -n 25 /tmp/docker-build.log)"
             tail_output="${tail_output//'%'/'%25'}"
             tail_output="${tail_output//$'\r'/'%0D'}"
             tail_output="${tail_output//$'\n'/'%0A'}"
