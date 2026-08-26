@@ -33,6 +33,7 @@
     "effect": "catalog:",
     "msgpackr-extract": "3.0.4",
     "node-pty": "^1.1.0",
+    "playwright-core": "1.60.0",
     "yaml": "catalog:"
   },
   "devDependencies": {
