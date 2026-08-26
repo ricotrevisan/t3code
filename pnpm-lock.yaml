@@ -524,6 +524,9 @@ importers:
       stream-json:
         specifier: 3.6.0
         version: 3.6.0
+      playwright-core:
+        specifier: 1.60.0
+        version: 1.60.0
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
