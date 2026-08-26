@@ -33,6 +33,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { mergeDirenvExportedEnv } from "../../workspace/workspaceDirenvEnv.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
@@ -2801,12 +2802,16 @@ export function makeOpenCodeAdapter(
               // The runtime binds the server's lifetime to the Scope.Scope
               // we provide below — closing `sessionScope` kills the child
               // process automatically. No manual `server.close()` needed.
+              const environment = mergeDirenvExportedEnv(
+                directory,
+                options?.environment ?? process.env,
+              );
               const server = yield* openCodeRuntime.connectToOpenCodeServer({
                 binaryPath,
                 directory,
                 serverUrl,
                 ...(serverPassword ? { serverPassword } : {}),
-                ...(options?.environment ? { environment: options.environment } : {}),
+                environment,
               });
               const client = openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,
