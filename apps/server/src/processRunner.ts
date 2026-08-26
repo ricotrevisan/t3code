@@ -11,6 +11,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { loadDirenvExportedEnv } from "./workspace/workspaceDirenvEnv.ts";
 import {
   collectUint8StreamText,
   decodeUtf8,
@@ -293,20 +294,28 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
   const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const outputMode = input.outputMode ?? "error";
   const truncatedMarker = input.truncatedMarker ?? "";
-  const extendEnv = input.env !== undefined;
+  const executionCwd = input.spawnCwd ?? input.cwd;
+  const direnvEnv = loadDirenvExportedEnv(executionCwd, { env: input.env ?? process.env });
+  const spawnEnv =
+    input.env !== undefined
+      ? { ...input.env, ...direnvEnv }
+      : Object.keys(direnvEnv).length > 0
+        ? direnvEnv
+        : undefined;
+  const extendEnv = spawnEnv !== undefined;
   const spawnCommand = yield* resolveSpawnCommand(
     input.command,
     input.args,
-    input.env === undefined ? {} : { env: input.env, extendEnv },
+    spawnEnv === undefined ? {} : { env: spawnEnv, extendEnv },
   );
 
   const child = yield* spawner
     .spawn(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        ...((input.spawnCwd ?? input.cwd) ? { cwd: input.spawnCwd ?? input.cwd } : {}),
-        ...(input.env !== undefined
+        ...(executionCwd ? { cwd: executionCwd } : {}),
+        ...(spawnEnv !== undefined
           ? {
-              env: input.env,
+              env: spawnEnv,
               extendEnv,
             }
           : {}),
