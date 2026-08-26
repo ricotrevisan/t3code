@@ -30,6 +30,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { isWindowsCommandNotFound } from "../processRunner.ts";
+import { loadDirenvExportedEnv } from "../workspace/workspaceDirenvEnv.ts";
 import { collectStreamAsString } from "./providerSnapshot.ts";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -439,12 +440,21 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
   const runOpenCodeCommand: OpenCodeRuntimeShape["runOpenCodeCommand"] = (input) =>
     Effect.gen(function* () {
-      const spawnCommand = yield* resolveCommand(input.binaryPath, input.args, input.environment);
+      const direnvEnv = loadDirenvExportedEnv(input.cwd, {
+        env: input.environment ?? process.env,
+      });
+      const environment =
+        input.environment !== undefined
+          ? { ...input.environment, ...direnvEnv }
+          : Object.keys(direnvEnv).length > 0
+            ? direnvEnv
+            : undefined;
+      const spawnCommand = yield* resolveCommand(input.binaryPath, input.args, environment);
       const child = yield* spawner.spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           shell: spawnCommand.shell,
           ...(input.cwd ? { cwd: input.cwd } : {}),
-          ...(input.environment ? { env: input.environment } : { extendEnv: true }),
+          ...(environment ? { env: environment } : { extendEnv: true }),
         }),
       );
       const [stdout, stderr, code] = yield* Effect.all(

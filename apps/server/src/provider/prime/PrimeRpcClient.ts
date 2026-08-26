@@ -1,4 +1,5 @@
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { loadDirenvExportedEnv } from "../../workspace/workspaceDirenvEnv.ts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -84,10 +85,19 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
 > {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const args = options.args ?? [];
+  const direnvEnv = loadDirenvExportedEnv(options.cwd, {
+    env: options.environment ?? process.env,
+  });
+  const environment =
+    options.environment !== undefined
+      ? { ...options.environment, ...direnvEnv }
+      : Object.keys(direnvEnv).length > 0
+        ? direnvEnv
+        : undefined;
   const spawnCommand = yield* resolveSpawnCommand(
     options.command,
     args,
-    options.environment ? { env: options.environment, extendEnv: true } : {},
+    environment ? { env: environment, extendEnv: true } : {},
   );
   const outgoing = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
   const incoming = yield* PubSub.unbounded<unknown>({ replay: 64 });
@@ -101,9 +111,7 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
     .spawn(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         cwd: options.cwd,
-        ...(options.environment
-          ? { env: options.environment, extendEnv: true }
-          : { extendEnv: true }),
+        ...(environment ? { env: environment, extendEnv: true } : { extendEnv: true }),
         shell: spawnCommand.shell,
         stdin: {
           stream: Stream.fromQueue(outgoing),
