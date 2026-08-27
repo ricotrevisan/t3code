@@ -86,7 +86,7 @@ export default async function t3OpenRouterCatalogExtension(pi: ExtensionAPI) {
   try {
     const response = await fetch("https://openrouter.ai/api/v1/models", {
       headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) {
       return;
