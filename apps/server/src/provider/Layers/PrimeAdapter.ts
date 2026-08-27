@@ -44,6 +44,10 @@ import {
   preparePrimeApprovalExtension,
   PRIME_APPROVAL_EXTENSION_MODE_FLAG,
 } from "../prime/primeApprovalExtension.ts";
+import {
+  primePackageCatalogExtensionArgs,
+  resolvePrimeAgentDir,
+} from "../prime/primePackageCatalogExtensions.ts";
 import { preparePrimeOpenRouterCatalogExtension } from "../prime/primeOpenRouterCatalogExtension.ts";
 import {
   parsePrimeModelSlug,
@@ -1489,6 +1493,12 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
         );
 
+        const disableDiscoveredExtensions = approvalExtensionPath !== undefined;
+        const packageCatalogExtensionArgs = disableDiscoveredExtensions
+          ? primePackageCatalogExtensionArgs(
+              resolvePrimeAgentDir(options?.environment ?? process.env),
+            )
+          : [];
         const args = [
           "--mode",
           "rpc",
@@ -1500,9 +1510,10 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           daemonSocket,
           ...(resume !== undefined ? ["--resume", resume.sessionFile] : []),
           ...launchArgs,
-          ...(approvalExtensionPath !== undefined ? ["--no-extensions"] : []),
+          ...(disableDiscoveredExtensions ? ["--no-extensions"] : []),
           "--extension",
           catalogExtensionPath,
+          ...packageCatalogExtensionArgs,
           ...(approvalExtensionPath !== undefined
             ? [
                 "--extension",
