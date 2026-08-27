@@ -1,6 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { type PrimeSettings, type ServerProviderModel } from "@t3tools/contracts";
@@ -14,7 +13,6 @@ import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
-import { expandHomePath } from "../../pathExpansion.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -32,6 +30,10 @@ import {
   loggedInPrimeProvidersFromAuthData,
   mapPrimeAvailableModels,
 } from "../prime/primeModels.ts";
+import {
+  primePackageCatalogExtensionArgs,
+  resolvePrimeAgentDir,
+} from "../prime/primePackageCatalogExtensions.ts";
 import { preparePrimeOpenRouterCatalogExtension } from "../prime/primeOpenRouterCatalogExtension.ts";
 
 const PRIME_PRESENTATION = {
@@ -69,14 +71,6 @@ const decodePrimeAvailableModels = Schema.decodeUnknownEffect(PrimeAvailableMode
 const decodePrimeAuthFile = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
-
-function resolvePrimeAgentDir(environment: NodeJS.ProcessEnv): string {
-  const configured = environment.PRIME_AGENT_CODING_AGENT_DIR?.trim();
-  if (configured) {
-    return expandHomePath(configured);
-  }
-  return NodePath.join(NodeOS.homedir(), ".prime", "agent");
-}
 
 function readLoggedInPrimeProviders(
   environment: NodeJS.ProcessEnv,
@@ -134,6 +128,9 @@ const listPrimeModels = (
             ),
           )
         : undefined;
+      const packageCatalogExtensionArgs = primePackageCatalogExtensionArgs(
+        resolvePrimeAgentDir(environment),
+      );
       const rpc = yield* spawnPrimeRpcClient({
         command: primeSettings.binaryPath || "prime-agent",
         args: [
@@ -143,6 +140,7 @@ const listPrimeModels = (
           "--no-tools",
           "--no-extensions",
           ...(catalogExtensionPath ? ["--extension", catalogExtensionPath] : []),
+          ...packageCatalogExtensionArgs,
         ],
         cwd: process.cwd(),
         environment,
