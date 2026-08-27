@@ -175,8 +175,25 @@ const PrimeRlmChildUpdate = Schema.Struct({
     error: Schema.optional(Schema.String),
   }),
 });
+const PrimeSessionActionUpdate = Schema.Struct({
+  type: Schema.Literal("session_action_update"),
+  actions: Schema.Struct({
+    queuedCount: Schema.Number,
+  }),
+});
+const PrimeCustomMessage = Schema.Struct({
+  type: Schema.Literals(["message_start", "message_end"]),
+  message: Schema.Struct({
+    role: Schema.Literal("custom"),
+    customType: Schema.String,
+    content: Schema.optional(Schema.Unknown),
+    details: Schema.optional(Schema.Unknown),
+  }),
+});
 
 const decodeRlmChildUpdate = Schema.decodeUnknownExit(PrimeRlmChildUpdate);
+const decodeSessionActionUpdate = Schema.decodeUnknownExit(PrimeSessionActionUpdate);
+const decodeCustomMessage = Schema.decodeUnknownExit(PrimeCustomMessage);
 
 const nonEmptyTrimmed = (value: string | undefined): string | undefined => {
   const trimmed = value?.trim();
@@ -262,12 +279,66 @@ interface PrimeSessionContext {
   turnStarted: boolean;
   stopped: boolean;
   settledTurnId: TurnId | undefined;
+  /** True while Prime is inside an agent_start / agent_end cycle. */
+  parentCycleOpen: boolean;
+  /** Inbound child report that will start another parent cycle. */
+  pendingParentWake: boolean;
+  queuedActionCount: number;
+  readonly seenAgentMessageIds: Set<string>;
   /** Last emitted Prime RLM child state, used to dedupe streaming snapshots. */
   readonly subagents: Map<string, PrimeSubagentState>;
 }
 
+function hasLiveRlmChildren(ctx: PrimeSessionContext): boolean {
+  for (const child of ctx.subagents.values()) {
+    if (!child.terminal) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function turnIsQuiescent(ctx: PrimeSessionContext): boolean {
+  return (
+    !ctx.parentCycleOpen &&
+    !ctx.pendingParentWake &&
+    ctx.queuedActionCount === 0 &&
+    !hasLiveRlmChildren(ctx)
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function customContentText(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    return nonEmptyTrimmed(content);
+  }
+  if (Array.isArray(content)) {
+    const text = content
+      .filter(isRecord)
+      .map((part) => (typeof part.text === "string" ? part.text : ""))
+      .join("");
+    return nonEmptyTrimmed(text);
+  }
+  return undefined;
+}
+
+function agentMessageReport(message: (typeof PrimeCustomMessage.Type)["message"]): {
+  readonly id: string | undefined;
+  readonly report: string | undefined;
+  readonly fromName: string | undefined;
+} {
+  const details = isRecord(message.details) ? message.details : undefined;
+  const from = isRecord(details?.from) ? details.from : undefined;
+  return {
+    id: typeof details?.id === "string" ? nonEmptyTrimmed(details.id) : undefined,
+    report:
+      (typeof details?.message === "string" ? nonEmptyTrimmed(details.message) : undefined) ??
+      customContentText(message.content),
+    fromName: typeof from?.sessionName === "string" ? nonEmptyTrimmed(from.sessionName) : undefined,
+  };
 }
 
 function parsePrimeResume(
@@ -733,6 +804,66 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
     const subagentTurnId = (ctx: PrimeSessionContext): TurnId | undefined =>
       ctx.activeTurnId ?? ctx.turns[ctx.turns.length - 1]?.id;
 
+    const lastOpenTurnId = (ctx: PrimeSessionContext): TurnId | undefined => {
+      const lastTurnId = ctx.turns[ctx.turns.length - 1]?.id;
+      if (lastTurnId === undefined || ctx.settledTurnId === lastTurnId) {
+        return undefined;
+      }
+      return lastTurnId;
+    };
+
+    const finalizeActiveTurn = (ctx: PrimeSessionContext, messages: ReadonlyArray<unknown>) =>
+      Effect.gen(function* () {
+        const turnId = ctx.activeTurnId;
+        if (turnId === undefined || ctx.settledTurnId === turnId) {
+          return;
+        }
+        const completedAt = yield* nowIso;
+        const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
+        ctx.activeTurnId = undefined;
+        ctx.parentCycleOpen = false;
+        ctx.pendingParentWake = false;
+        ctx.settledTurnId = turnId;
+        if (isAbortedTurn(messages)) {
+          ctx.session = { ...readySession, status: "ready", updatedAt: completedAt };
+          yield* publishTurnInterrupted({
+            threadId: ctx.threadId,
+            turnId,
+            reason: "Interrupted by user.",
+          });
+          return;
+        }
+        const failure = primeFailureFromMessages(messages);
+        const usage = usageFromMessages(messages);
+        ctx.session = {
+          ...readySession,
+          status: "ready",
+          updatedAt: completedAt,
+          ...(failure ? { lastError: failure.errorMessage } : {}),
+        };
+        yield* publish({
+          type: "turn.completed",
+          ...(yield* stamp),
+          provider: PROVIDER,
+          providerInstanceId: boundInstanceId,
+          threadId: ctx.threadId,
+          turnId,
+          payload: {
+            state: failure ? "failed" : "completed",
+            stopReason: failure?.stopReason ?? "stop",
+            ...(failure ? { errorMessage: failure.errorMessage } : {}),
+            ...(usage !== undefined ? { usage } : {}),
+          },
+        });
+      });
+
+    const settleActiveTurnIfQuiescent = (ctx: PrimeSessionContext) =>
+      ctx.activeTurnId === undefined ||
+      ctx.settledTurnId === ctx.activeTurnId ||
+      !turnIsQuiescent(ctx)
+        ? Effect.void
+        : finalizeActiveTurn(ctx, ctx.latestAgentEndMessages ?? []);
+
     const subagentLinkage = (state: PrimeSubagentState) => ({
       taskType: "subagent" as const,
       title: state.title,
@@ -812,6 +943,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
               ...(summary !== undefined ? { summary } : {}),
             },
           });
+          yield* settleActiveTurnIfQuiescent(ctx);
           return;
         }
         if (state.terminal) {
@@ -869,6 +1001,80 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           yield* publishRlmChildUpdate(ctx, rlmChildUpdate.value);
           return;
         }
+
+        const sessionActions = decodeSessionActionUpdate(raw);
+        if (Exit.isSuccess(sessionActions)) {
+          ctx.queuedActionCount = Math.max(0, sessionActions.value.actions.queuedCount);
+          yield* settleActiveTurnIfQuiescent(ctx);
+          return;
+        }
+
+        const customMessage = decodeCustomMessage(raw);
+        if (
+          Exit.isSuccess(customMessage) &&
+          customMessage.value.message.customType === "agent_message"
+        ) {
+          const report = agentMessageReport(customMessage.value.message);
+          if (report.id !== undefined) {
+            if (ctx.seenAgentMessageIds.has(report.id)) {
+              return;
+            }
+            ctx.seenAgentMessageIds.add(report.id);
+          }
+          ctx.pendingParentWake = true;
+          const childEntry =
+            report.fromName === undefined
+              ? undefined
+              : [...ctx.subagents.entries()].find(([, state]) => state.title === report.fromName);
+          const turnId = subagentTurnId(ctx);
+          if (
+            childEntry !== undefined &&
+            !childEntry[1].terminal &&
+            report.report !== undefined &&
+            turnId !== undefined
+          ) {
+            const [childId, childState] = childEntry;
+            const progressKey = `agent_message\0${report.id ?? report.report}`;
+            if (childState.lastProgressKey !== progressKey) {
+              childState.lastProgressKey = progressKey;
+              yield* publish({
+                type: "task.progress",
+                ...(yield* stamp),
+                provider: PROVIDER,
+                providerInstanceId: boundInstanceId,
+                threadId: ctx.threadId,
+                turnId,
+                payload: {
+                  taskId: RuntimeTaskId.make(childId),
+                  ...subagentLinkage(childState),
+                  description: report.report,
+                  summary: report.report,
+                  status: "running",
+                },
+              });
+            }
+          }
+          return;
+        }
+
+        const started = decodeAgentStart(raw);
+        if (Exit.isSuccess(started)) {
+          const turnId = ctx.activeTurnId ?? lastOpenTurnId(ctx);
+          if (turnId === undefined) {
+            return;
+          }
+          ctx.activeTurnId = turnId;
+          ctx.parentCycleOpen = true;
+          ctx.pendingParentWake = false;
+          ctx.session = {
+            ...ctx.session,
+            status: "running",
+            activeTurnId: turnId,
+            updatedAt: yield* nowIso,
+          };
+          return;
+        }
+
         const turnId = ctx.activeTurnId;
         if (turnId === undefined) {
           return;
@@ -960,17 +1166,6 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
               args: confirm.value,
             },
           });
-          return;
-        }
-
-        const started = decodeAgentStart(raw);
-        if (Exit.isSuccess(started)) {
-          ctx.session = {
-            ...ctx.session,
-            status: "running",
-            activeTurnId: turnId,
-            updatedAt: yield* nowIso,
-          };
           return;
         }
 
@@ -1110,41 +1305,15 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
             turn.items.push(...messages);
           }
           ctx.latestAgentEndMessages = messages;
-          const completedAt = yield* nowIso;
-          const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
-          ctx.activeTurnId = undefined;
-          ctx.settledTurnId = turnId;
-          if (isAbortedTurn(messages)) {
-            ctx.session = { ...readySession, status: "ready", updatedAt: completedAt };
-            yield* publishTurnInterrupted({
-              threadId: ctx.threadId,
-              turnId,
-              reason: "Interrupted by user.",
-            });
+          ctx.parentCycleOpen = false;
+          ctx.pendingParentWake = false;
+          // Prime RLM children reply after this agent_end and start a new
+          // parent cycle. Keep the T3 turn open until that work drains.
+          if (isAbortedTurn(messages) || primeFailureFromMessages(messages) !== undefined) {
+            yield* finalizeActiveTurn(ctx, messages);
             return;
           }
-          const failure = primeFailureFromMessages(messages);
-          const usage = usageFromMessages(messages);
-          ctx.session = {
-            ...readySession,
-            status: "ready",
-            updatedAt: completedAt,
-            ...(failure ? { lastError: failure.errorMessage } : {}),
-          };
-          yield* publish({
-            type: "turn.completed",
-            ...(yield* stamp),
-            provider: PROVIDER,
-            providerInstanceId: boundInstanceId,
-            threadId: ctx.threadId,
-            turnId,
-            payload: {
-              state: failure ? "failed" : "completed",
-              stopReason: failure?.stopReason ?? "stop",
-              ...(failure ? { errorMessage: failure.errorMessage } : {}),
-              ...(usage !== undefined ? { usage } : {}),
-            },
-          });
+          yield* settleActiveTurnIfQuiescent(ctx);
         }
       });
 
@@ -1424,6 +1593,10 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           turnStarted: false,
           stopped: false,
           settledTurnId: undefined,
+          parentCycleOpen: false,
+          pendingParentWake: false,
+          queuedActionCount: 0,
+          seenAgentMessageIds: new Set(),
           subagents: new Map(),
         };
         sessions.set(input.threadId, ctx);
@@ -1531,12 +1704,60 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         };
       });
 
+    const continueActiveTurn = (
+      ctx: PrimeSessionContext,
+      input: ProviderSendTurnInput,
+      turnId: TurnId,
+    ) =>
+      Effect.gen(function* () {
+        const message = input.input?.trim() ?? "";
+        const images = yield* buildTurnAttachments(input);
+        if (!message && images.length === 0) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue: "Turn requires non-empty text or at least one image.",
+          });
+        }
+        ctx.parentCycleOpen = true;
+        ctx.pendingParentWake = false;
+        yield* ctx.rpc
+          .request({
+            type: "prompt",
+            message,
+            streamingBehavior: "followUp",
+            ...(images.length > 0 ? { images } : {}),
+          })
+          .pipe(Effect.mapError((cause) => toRpcRequestError("prompt", cause)));
+        const turn = ctx.turns.find((entry) => entry.id === turnId);
+        turn?.items.push(
+          ...(message ? [{ type: "user_text", text: message }] : []),
+          ...images.map((image) => ({ type: "user_image", mimeType: image.mimeType })),
+        );
+        ctx.session = {
+          ...ctx.session,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: yield* nowIso,
+        };
+        return {
+          threadId: input.threadId,
+          turnId,
+          ...(ctx.session.resumeCursor !== undefined
+            ? { resumeCursor: ctx.session.resumeCursor }
+            : {}),
+        };
+      });
+
     const sendTurn: PrimeAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
         if (ctx.activeTurnId !== undefined) {
-          // Prime queues mid-turn input as steering on the live turn.
-          return yield* steerRunningTurn(ctx, input, ctx.activeTurnId);
+          // A live parent cycle can take steer. Between RLM child reports the
+          // parent is idle, so a follow-up prompt stays on this T3 turn.
+          return ctx.parentCycleOpen
+            ? yield* steerRunningTurn(ctx, input, ctx.activeTurnId)
+            : yield* continueActiveTurn(ctx, input, ctx.activeTurnId);
         }
         const selected = yield* applyModelSelection({
           rpc: ctx.rpc,
@@ -1565,6 +1786,8 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         ctx.latestAgentEndMessages = undefined;
         ctx.turnStarted = true;
         ctx.settledTurnId = undefined;
+        ctx.parentCycleOpen = true;
+        ctx.pendingParentWake = false;
         ctx.turns.push({
           id: turnId,
           items: [
@@ -1653,6 +1876,8 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         if (ctx.activeTurnId === activeTurnId) {
           ctx.activeTurnId = undefined;
         }
+        ctx.parentCycleOpen = false;
+        ctx.pendingParentWake = false;
         ctx.settledTurnId = activeTurnId;
         ctx.session = { ...readySession, status: "ready", updatedAt };
         yield* publishTurnInterrupted({
