@@ -516,11 +516,28 @@ function handle(command: Record<string, unknown>): void {
           if (!stillCurrent()) {
             return;
           }
+          // Parent agent_end while a child is still running. The inbound
+          // child report then starts a second parent text cycle.
           finishTurn(() => {
             send({ type: "agent_end", messages: [{ role: "assistant", content: [] }] });
           });
-          // Prime RLM children can settle after their parent turn has ended.
           setImmediate(() => {
+            send({
+              type: "message_end",
+              message: {
+                role: "custom",
+                customType: "agent_message",
+                content:
+                  "[from child:audit-renderer]\nAgent-to-agent message received.\n\nFound one dead helper in normalize.js",
+                display: true,
+                details: {
+                  id: "agentmsg_child1",
+                  message: "Found one dead helper in normalize.js",
+                  from: { sessionName: "audit-renderer", sessionId: "prime-sub-1" },
+                  fromRelationship: "child",
+                },
+              },
+            });
             send({
               type: "rlm_child_update",
               child: {
@@ -533,6 +550,27 @@ function handle(command: Record<string, unknown>): void {
                 sessionDir: "/tmp/prime-sub-2",
                 error: "Test suite could not start",
               },
+            });
+            streaming = true;
+            send({ type: "agent_start" });
+            send({
+              type: "message_update",
+              assistantMessageEvent: {
+                type: "text_delta",
+                contentIndex: 0,
+                delta: "## Verdict\nBoth audits finished",
+              },
+            });
+            finishTurn(() => {
+              send({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "## Verdict\nBoth audits finished" }],
+                  },
+                ],
+              });
             });
           });
         });
