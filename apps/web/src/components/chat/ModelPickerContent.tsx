@@ -282,6 +282,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           model,
           score: scoreModelPickerSearch(
             {
+              slug: model.slug,
               name: model.name,
               ...(model.shortName ? { shortName: model.shortName } : {}),
               ...(model.subProvider ? { subProvider: model.subProvider } : {}),
@@ -293,6 +294,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           ),
           isFavorite: favoritesSet.has(providerModelKey(model.instanceId, model.slug)),
           tieBreaker: buildModelPickerSearchText({
+            slug: model.slug,
             name: model.name,
             ...(model.shortName ? { shortName: model.shortName } : {}),
             ...(model.subProvider ? { subProvider: model.subProvider } : {}),

@@ -279,6 +279,8 @@ function modeState(): AcpSchema.SessionModeState {
 }
 
 const grokAcpModels: ReadonlyArray<AcpSchema.ModelInfo> = [
+  { modelId: "grok-4.6", name: "Grok 4.6" },
+  { modelId: "grok-4.5", name: "Grok 4.5" },
   { modelId: "grok-build", name: "Grok Build" },
   { modelId: "grok-mock-alt", name: "Grok Mock Alt" },
 ];
@@ -286,7 +288,7 @@ const grokAcpModels: ReadonlyArray<AcpSchema.ModelInfo> = [
 function modelState(): AcpSchema.SessionModelState {
   const modelId = grokAcpModels.some((model) => model.modelId === currentModelId)
     ? currentModelId
-    : "grok-build";
+    : "grok-4.6";
   return {
     currentModelId: modelId,
     availableModels: grokAcpModels,
