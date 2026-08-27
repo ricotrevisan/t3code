@@ -1441,10 +1441,12 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       const startedEvents: Array<ProviderRuntimeEvent & { type: "task.started" }> = [];
       const progressEvents: Array<ProviderRuntimeEvent & { type: "task.progress" }> = [];
       const completedEvents: Array<ProviderRuntimeEvent & { type: "task.completed" }> = [];
-      const fleetSettled = yield* Deferred.make<void>();
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const turnCompleted = yield* Deferred.make<void>();
       const eventFiber = yield* adapter.streamEvents.pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
+            runtimeEvents.push(event);
             if (event.type === "task.started") {
               startedEvents.push(event);
             }
@@ -1453,11 +1455,9 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
             }
             if (event.type === "task.completed") {
               completedEvents.push(event);
-              // The mock emits this terminal row after the parent turn ends;
-              // seeing it means every earlier row was already delivered.
-              if (event.payload.taskId === "prime-sub-2") {
-                yield* Deferred.succeed(fleetSettled, undefined);
-              }
+            }
+            if (event.type === "turn.completed") {
+              yield* Deferred.succeed(turnCompleted, undefined);
             }
           }),
         ),
@@ -1476,7 +1476,7 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
         input: "spawn subagents",
         attachments: [],
       });
-      yield* Deferred.await(fleetSettled);
+      yield* Deferred.await(turnCompleted);
 
       const started = startedEvents.find((event) => event.payload.taskId === "prime-sub-1");
       assert.isDefined(started);
@@ -1515,6 +1515,25 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       // The failed child's error rides as the terminal summary (the contract's
       // task.completed payload has no error field; clients read it from there).
       assert.equal(failedTwo?.payload.summary, "Test suite could not start");
+
+      const assistantDeltas = runtimeEvents.flatMap((event) =>
+        event.type === "content.delta" && event.payload.streamKind === "assistant_text"
+          ? [event.payload.delta]
+          : [],
+      );
+      assert.deepEqual(assistantDeltas, ["spawned subagents", "## Verdict\nBoth audits finished"]);
+
+      const turnCompletedEvents = runtimeEvents.filter((event) => event.type === "turn.completed");
+      assert.lengthOf(turnCompletedEvents, 1);
+      assert.equal(turnCompletedEvents[0]?.turnId, turn.turnId);
+      const verdictIndex = runtimeEvents.findIndex(
+        (event) =>
+          event.type === "content.delta" &&
+          event.payload.streamKind === "assistant_text" &&
+          event.payload.delta.includes("## Verdict"),
+      );
+      const completedIndex = runtimeEvents.findIndex((event) => event.type === "turn.completed");
+      assert.isTrue(verdictIndex >= 0 && completedIndex > verdictIndex);
 
       yield* adapter.stopSession(threadId);
       yield* Fiber.interrupt(eventFiber);
