@@ -719,11 +719,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
 
-      if (failedWakeProbe) {
-        // The wake probe found a dead transport while the user is returning to
-        // the app, so reconnect immediately instead of sleeping the first
-        // backoff rung. Only this first attempt skips the ladder; if it fails
-        // too, normal backoff resumes.
+      const skipFirstBackoff =
+        failedWakeProbe || (outcome.established && error.reason === "timeout");
+      if (skipFirstBackoff) {
+        // A failed wake probe or Effect RPC ping timeout means the live
+        // transport is already dead, so reconnect immediately instead of
+        // sleeping the first backoff rung. Only this first attempt skips the
+        // ladder; if it fails too, normal backoff resumes.
         resetRetryLadder();
         yield* setState(connectingState(yield* Ref.get(intent), generation, 1, error));
         continue;

@@ -140,7 +140,24 @@ export const request = Effect.fn("EnvironmentRpc.request")(function* <
     environmentId: supervisor.target.environmentId,
     method: tag,
   });
-  return yield* method(input).pipe(Effect.ensuring(completeObservation));
+  const sessionDropped = SubscriptionRef.changes(supervisor.session).pipe(
+    Stream.drop(1),
+    Stream.filter((next) => Option.getOrUndefined(next) !== session),
+    Stream.take(1),
+    Stream.runDrain,
+    Effect.andThen(
+      Effect.fail(
+        new EnvironmentRpcUnavailableError({
+          environmentId: supervisor.target.environmentId,
+          message: `${supervisor.target.label} is not connected.`,
+        }),
+      ),
+    ),
+  );
+  return yield* method(input).pipe(
+    Effect.raceFirst(sessionDropped),
+    Effect.ensuring(completeObservation),
+  );
 });
 
 export function runStream<TTag extends EnvironmentStreamCommandRpcTag>(

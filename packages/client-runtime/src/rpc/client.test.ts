@@ -25,7 +25,13 @@ import {
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
-import { EnvironmentRpcRequestObserver, request, runStream, subscribe } from "./client.ts";
+import {
+  EnvironmentRpcRequestObserver,
+  EnvironmentRpcUnavailableError,
+  request,
+  runStream,
+  subscribe,
+} from "./client.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -108,6 +114,29 @@ describe("environment RPC", () => {
         `start:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
         `finish:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
       ]);
+    }),
+  );
+
+  it.effect("aborts an in-flight unary request when the session becomes none", () =>
+    Effect.gen(function* () {
+      const client = {
+        [WS_METHODS.cloudGetRelayClientStatus]: () => Effect.never,
+      } as unknown as WsRpcProtocolClient;
+      const { activeSession, supervisor } = yield* makeHarness();
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+
+      const fiber = yield* request(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      yield* SubscriptionRef.set(activeSession, Option.none());
+      const error = yield* Effect.flip(Fiber.join(fiber));
+
+      expect(error).toBeInstanceOf(EnvironmentRpcUnavailableError);
+      expect(error).toMatchObject({
+        message: "Test environment is not connected.",
+      });
     }),
   );
 
