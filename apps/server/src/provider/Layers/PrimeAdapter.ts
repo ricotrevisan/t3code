@@ -48,6 +48,7 @@ import {
   primePackageCatalogExtensionArgs,
   resolvePrimeAgentDir,
 } from "../prime/primePackageCatalogExtensions.ts";
+import { preparePrimeNousPortalCatalogExtension } from "../prime/primeNousPortalCatalogExtension.ts";
 import { preparePrimeOpenRouterCatalogExtension } from "../prime/primeOpenRouterCatalogExtension.ts";
 import {
   parsePrimeModelSlug,
@@ -168,6 +169,7 @@ const PrimeRlmChildUpdate = Schema.Struct({
     model: Schema.optional(Schema.String),
     label: Schema.String,
     status: Schema.Literals(["queued", "running", "done", "error", "cancelled"]),
+    repliedSinceTask: Schema.optional(Schema.Boolean),
     answerPreview: Schema.optional(Schema.String),
     recap: Schema.optional(Schema.String),
     activity: Schema.optional(
@@ -926,6 +928,12 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           if (state.terminal) {
             return;
           }
+          // Prime emits the terminal roster update before it admits the hidden
+          // parent action that delivers a child result. Reserve that wake now
+          // so this T3 turn cannot settle in between those events.
+          if (child.status === "done" && child.repliedSinceTask === false) {
+            ctx.pendingParentWake = true;
+          }
           state.terminal = true;
           const summary =
             terminalStatus === "completed"
@@ -1463,6 +1471,21 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
               }),
           ),
         );
+        const nousPortalCatalogExtensionPath = yield* preparePrimeNousPortalCatalogExtension(
+          serverConfig.baseDir,
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "prepare",
+                detail: "Could not install the Nous Portal catalog extension.",
+                cause,
+              }),
+          ),
+        );
         const approvalExtensionPath = supervised
           ? yield* preparePrimeApprovalExtension(serverConfig.baseDir).pipe(
               Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -1513,6 +1536,8 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           ...(disableDiscoveredExtensions ? ["--no-extensions"] : []),
           "--extension",
           catalogExtensionPath,
+          "--extension",
+          nousPortalCatalogExtensionPath,
           ...packageCatalogExtensionArgs,
           ...(approvalExtensionPath !== undefined
             ? [

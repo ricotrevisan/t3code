@@ -602,6 +602,71 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ]);
       });
 
+      it("replaces Prime models with the currently signed-in provider catalogs", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("primeAgent"),
+          driver: ProviderDriverKind.make("primeAgent"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-08-28T00:00:00.000Z",
+          version: "0.1.0",
+          models: [
+            {
+              slug: "openai-codex/gpt-5.6-sol",
+              name: "GPT-5.6 Sol",
+              subProvider: "openai-codex",
+              isCustom: false,
+              capabilities: null,
+            },
+            {
+              slug: "xai-auth/grok-4.6",
+              name: "Grok 4.6",
+              subProvider: "xai-auth",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const refreshedProvider = {
+          ...previousProvider,
+          checkedAt: "2026-08-28T00:01:00.000Z",
+          models: [previousProvider.models[0]!],
+        } satisfies ServerProvider;
+        const loggedOutProvider = {
+          ...refreshedProvider,
+          status: "warning",
+          auth: { status: "unauthenticated" },
+          checkedAt: "2026-08-28T00:02:00.000Z",
+          models: [],
+          message: "Prime Agent is installed but has no logged-in providers.",
+        } satisfies ServerProvider;
+        const failedProvider = {
+          ...previousProvider,
+          status: "warning",
+          auth: { status: "unknown" },
+          checkedAt: "2026-08-28T00:03:00.000Z",
+          models: [],
+          message: "Prime Agent is installed but could not list models.",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).models,
+          refreshedProvider.models,
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(refreshedProvider, loggedOutProvider).models,
+          [],
+        );
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, failedProvider).models,
+          previousProvider.models,
+        );
+      });
+
       it("drops stale OpenCode models missing from a successful refresh", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("opencode"),

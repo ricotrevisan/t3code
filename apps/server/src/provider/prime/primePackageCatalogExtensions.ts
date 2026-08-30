@@ -71,8 +71,9 @@ function packageSpecsFromSettings(data: unknown): ReadonlyArray<string> {
       }
       continue;
     }
-    if (isRecord(entry) && typeof entry.id === "string") {
-      const spec = entry.id.trim();
+    // Prime object form is `{ source, extensions?, ... }`.
+    if (isRecord(entry) && typeof entry.source === "string") {
+      const spec = entry.source.trim();
       if (spec) {
         specs.push(spec);
       }
@@ -81,11 +82,80 @@ function packageSpecsFromSettings(data: unknown): ReadonlyArray<string> {
   return specs;
 }
 
-function extensionPathsFromPackageJson(packageRoot: string, data: unknown): ReadonlyArray<string> {
+function isExtensionFileName(name: string): boolean {
+  return name.endsWith(".ts") || name.endsWith(".js");
+}
+
+/**
+ * Prime `--extension` loads files, not directory roots. Expand a package.json
+ * `pi.extensions` entry the same way Prime's package loader does: a file is
+ * used as-is, a directory contributes `index.ts`/`index.js` or top-level
+ * `.ts`/`.js` files (nested helpers without an index are skipped).
+ */
+function extensionFilesFromManifestEntry(
+  packageRoot: string,
+  relative: string,
+): ReadonlyArray<string> {
+  const resolved = NodePath.resolve(packageRoot, relative);
+  let stats: NodeFS.Stats;
+  try {
+    stats = NodeFS.statSync(resolved);
+  } catch {
+    return [];
+  }
+  if (stats.isFile()) {
+    return [resolved];
+  }
+  if (!stats.isDirectory()) {
+    return [];
+  }
+
+  const indexTs = NodePath.join(resolved, "index.ts");
+  if (NodeFS.existsSync(indexTs)) {
+    return [indexTs];
+  }
+  const indexJs = NodePath.join(resolved, "index.js");
+  if (NodeFS.existsSync(indexJs)) {
+    return [indexJs];
+  }
+
+  const files: Array<string> = [];
+  let entries: ReadonlyArray<NodeFS.Dirent>;
+  try {
+    entries = NodeFS.readdirSync(resolved, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") {
+      continue;
+    }
+    const fullPath = NodePath.join(resolved, entry.name);
+    if (entry.isFile() && isExtensionFileName(entry.name)) {
+      files.push(fullPath);
+      continue;
+    }
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const nestedIndexTs = NodePath.join(fullPath, "index.ts");
+    if (NodeFS.existsSync(nestedIndexTs)) {
+      files.push(nestedIndexTs);
+      continue;
+    }
+    const nestedIndexJs = NodePath.join(fullPath, "index.js");
+    if (NodeFS.existsSync(nestedIndexJs)) {
+      files.push(nestedIndexJs);
+    }
+  }
+  return files;
+}
+
+function extensionFilesFromPackageJson(packageRoot: string, data: unknown): ReadonlyArray<string> {
   if (!isRecord(data) || !isRecord(data.pi) || !Array.isArray(data.pi.extensions)) {
     return [];
   }
-  const paths: Array<string> = [];
+  const files: Array<string> = [];
   for (const entry of data.pi.extensions) {
     if (typeof entry !== "string") {
       continue;
@@ -94,16 +164,13 @@ function extensionPathsFromPackageJson(packageRoot: string, data: unknown): Read
     if (!relative) {
       continue;
     }
-    const resolved = NodePath.resolve(packageRoot, relative);
-    if (NodeFS.existsSync(resolved)) {
-      paths.push(resolved);
-    }
+    files.push(...extensionFilesFromManifestEntry(packageRoot, relative));
   }
-  return paths;
+  return files;
 }
 
 /**
- * Extension roots from Prime packages installed into `agentDir`.
+ * Extension files from Prime packages installed into `agentDir`.
  *
  * T3 lists Prime models with `--no-extensions` so the probe stays isolated
  * from ad-hoc user extensions. Installed packages still own provider catalogs
@@ -126,7 +193,7 @@ export function resolvePrimePackageCatalogExtensionPaths(agentDir: string): Read
     }
     const packageRoot = NodePath.join(agentDir, "npm", "node_modules", packageName);
     const packageJson = readJsonFile(NodePath.join(packageRoot, "package.json"));
-    for (const extensionPath of extensionPathsFromPackageJson(packageRoot, packageJson)) {
+    for (const extensionPath of extensionFilesFromPackageJson(packageRoot, packageJson)) {
       if (seen.has(extensionPath)) {
         continue;
       }

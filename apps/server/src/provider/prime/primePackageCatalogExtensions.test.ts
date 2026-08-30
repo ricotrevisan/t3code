@@ -38,7 +38,7 @@ describe("resolvePrimeAgentDir", () => {
 });
 
 describe("resolvePrimePackageCatalogExtensionPaths", () => {
-  it.effect("returns installed npm package extension roots from settings.json", () =>
+  it.effect("expands installed npm package catalogs to loadable extension files", () =>
     provide(
       Effect.scoped(
         Effect.gen(function* () {
@@ -47,32 +47,66 @@ describe("resolvePrimePackageCatalogExtensionPaths", () => {
           const agentDir = yield* fileSystem.makeTempDirectoryScoped({
             prefix: "t3code-prime-package-catalog-",
           });
-          const packageRoot = path.join(agentDir, "npm", "node_modules", "pi-xai-oauth");
-          const extensionDir = path.join(packageRoot, "extensions");
-          yield* fileSystem.makeDirectory(extensionDir, { recursive: true });
+          const xaiRoot = path.join(agentDir, "npm", "node_modules", "pi-xai-oauth");
+          const xaiExtensionDir = path.join(xaiRoot, "extensions");
+          const clineRoot = path.join(agentDir, "npm", "node_modules", "pi-clinepass-provider");
+          const clineExtension = path.join(clineRoot, "src", "index.ts");
+          yield* fileSystem.makeDirectory(path.join(xaiExtensionDir, "xai"), { recursive: true });
+          yield* fileSystem.makeDirectory(path.join(clineRoot, "src"), { recursive: true });
           yield* fileSystem.writeFileString(
-            path.join(packageRoot, "package.json"),
+            path.join(xaiRoot, "package.json"),
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed package manifest fixture.
             JSON.stringify({
               name: "pi-xai-oauth",
               pi: { extensions: ["./extensions"] },
             }),
           );
           yield* fileSystem.writeFileString(
-            path.join(agentDir, "settings.json"),
+            path.join(xaiExtensionDir, "xai-oauth.ts"),
+            "export default async function () {}",
+          );
+          yield* fileSystem.writeFileString(
+            path.join(xaiExtensionDir, "xai", "catalog.ts"),
+            "export const ignored = true;",
+          );
+          yield* fileSystem.writeFileString(
+            path.join(clineRoot, "package.json"),
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed package manifest fixture.
             JSON.stringify({
-              packages: ["npm:pi-clinepass-provider", "npm:pi-xai-oauth@1.5.2"],
+              name: "pi-clinepass-provider",
+              pi: { extensions: ["./src/index.ts"] },
+            }),
+          );
+          yield* fileSystem.writeFileString(clineExtension, "export default async function () {}");
+          yield* fileSystem.writeFileString(
+            path.join(agentDir, "settings.json"),
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed Prime settings fixture.
+            JSON.stringify({
+              packages: [
+                "npm:pi-clinepass-provider",
+                { source: "npm:pi-xai-oauth@1.5.2" },
+                "git:https://example.com/pkg.git",
+              ],
             }),
           );
 
-          expect(resolvePrimePackageCatalogExtensionPaths(agentDir)).toEqual([extensionDir]);
-          expect(primePackageCatalogExtensionArgs(agentDir)).toEqual(["--extension", extensionDir]);
+          expect(resolvePrimePackageCatalogExtensionPaths(agentDir)).toEqual([
+            clineExtension,
+            path.join(xaiExtensionDir, "xai-oauth.ts"),
+          ]);
+          expect(primePackageCatalogExtensionArgs(agentDir)).toEqual([
+            "--extension",
+            clineExtension,
+            "--extension",
+            path.join(xaiExtensionDir, "xai-oauth.ts"),
+          ]);
         }),
       ),
     ),
   );
 
   it("returns no paths when settings or packages are missing", () => {
-    expect(resolvePrimePackageCatalogExtensionPaths("/definitely/not/a-prime-agent-dir")).toEqual(
+    expect(resolvePrimePackageCatalogExtensionPaths("/definitely/not-a-prime-agent-dir")).toEqual(
       [],
     );
   });

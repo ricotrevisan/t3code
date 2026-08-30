@@ -304,6 +304,86 @@ it.layer(NodeServices.layer)("checkPrimeProviderStatus", (it) => {
     }),
   );
 
+  it.effect("forwards installed Prime package catalogs when listing models", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-package-list-" });
+          const agentDir = yield* fs.makeTempDirectoryScoped({
+            prefix: "t3code-prime-package-agent-",
+          });
+          const binaryPath = path.join(dir, "prime-agent");
+          const requestLogPath = path.join(dir, "requests.jsonl");
+          const xaiRoot = path.join(agentDir, "npm", "node_modules", "pi-xai-oauth");
+          const xaiExtension = path.join(xaiRoot, "extensions", "xai-oauth.ts");
+          yield* fs.makeDirectory(path.join(xaiRoot, "extensions"), { recursive: true });
+          yield* fs.writeFileString(
+            path.join(xaiRoot, "package.json"),
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed package manifest fixture.
+            JSON.stringify({
+              name: "pi-xai-oauth",
+              pi: { extensions: ["./extensions"] },
+            }),
+          );
+          yield* fs.writeFileString(xaiExtension, "export default async function () {}");
+          yield* fs.writeFileString(
+            path.join(agentDir, "settings.json"),
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed Prime settings fixture.
+            JSON.stringify({ packages: ["npm:pi-xai-oauth"] }),
+          );
+          yield* fs.writeFileString(
+            binaryPath,
+            [
+              "#!/bin/sh",
+              `exec ${shSingleQuote(process.execPath)} ${shSingleQuote(mockAgentPath)} "$@"`,
+              "",
+            ].join("\n"),
+          );
+          yield* fs.chmod(binaryPath, 0o755);
+
+          const result = yield* checkPrimeProviderStatus(
+            decodePrimeSettings({ enabled: true, binaryPath }),
+            {
+              ...PATH_TRAP_ENV,
+              PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+              T3_PRIME_MOCK_REQUEST_LOG_PATH: requestLogPath,
+            },
+            { approvalExtensionBaseDir: path.join(dir, "t3-home") },
+          );
+
+          const invocations = (yield* fs.readFileString(requestLogPath))
+            .trim()
+            .split("\n")
+            .map(
+              (line) => JSON.parse(line) as { args: Array<string>; command: { type?: unknown } },
+            );
+          const listArgs = invocations.find(
+            (entry) => entry.command.type === "get_available_models",
+          )?.args;
+          expect(listArgs).toBeDefined();
+          expect(listArgs).toContain("--no-extensions");
+          const extensionPaths = (listArgs ?? []).flatMap((arg, index, args) =>
+            arg === "--extension" && args[index + 1] ? [args[index + 1]!] : [],
+          );
+          expect(extensionPaths).toContain(xaiExtension);
+          expect(extensionPaths.some((value) => value.endsWith("t3-openrouter-catalog.ts"))).toBe(
+            true,
+          );
+          expect(extensionPaths.some((value) => value.endsWith("t3-nous-portal-catalog.ts"))).toBe(
+            true,
+          );
+
+          return result;
+        }),
+      );
+
+      expect(snapshot.status).toBe("ready");
+      expect(snapshot.models.length).toBeGreaterThan(0);
+    }),
+  );
+
   it.effect("does not fall back to a hardcoded model list when listing fails", () =>
     Effect.gen(function* () {
       const snapshot = yield* Effect.scoped(

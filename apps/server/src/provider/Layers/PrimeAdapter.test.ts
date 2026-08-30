@@ -193,6 +193,7 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       );
       assert.isTrue(extensionPaths.some((path) => path.endsWith("t3-approval-v1.ts")));
       assert.isTrue(extensionPaths.some((path) => path.endsWith("t3-openrouter-catalog.ts")));
+      assert.isTrue(extensionPaths.some((path) => path.endsWith("t3-nous-portal-catalog.ts")));
       assert.include(handshake?.args ?? [], "--t3-approval-mode=approval-required");
 
       const response = recorded.find((entry) => entry.command.type === "extension_ui_response");
@@ -1125,6 +1126,70 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
     }),
   );
 
+  it.effect("re-attaches Prime package catalogs when approvals disable discovered extensions", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const requestLogPath = NodePath.join(config.baseDir, "prime-package-catalog-args.ndjson");
+      const agentDir = NodePath.join(config.baseDir, "prime-agent-home");
+      const xaiRoot = NodePath.join(agentDir, "npm", "node_modules", "pi-xai-oauth");
+      const xaiExtension = NodePath.join(xaiRoot, "extensions", "xai-oauth.ts");
+      yield* fs.makeDirectory(NodePath.join(xaiRoot, "extensions"), { recursive: true });
+      yield* fs.writeFileString(
+        NodePath.join(xaiRoot, "package.json"),
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed package manifest fixture.
+        JSON.stringify({
+          name: "pi-xai-oauth",
+          pi: { extensions: ["./extensions"] },
+        }),
+      );
+      yield* fs.writeFileString(xaiExtension, "export default async function () {}");
+      yield* fs.writeFileString(
+        NodePath.join(agentDir, "settings.json"),
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed Prime settings fixture.
+        JSON.stringify({ packages: ["npm:pi-xai-oauth"] }),
+      );
+      const binaryPath = yield* Effect.promise(() =>
+        makeMockPrimeWrapper({ T3_PRIME_MOCK_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(binaryPath, {
+        instanceId: ProviderInstanceId.make("primeAgent"),
+        environment: {
+          ...process.env,
+          PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+        },
+      });
+      const threadId = ThreadId.make("prime-package-catalog-thread");
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+
+      const log = yield* waitForFileContent(requestLogPath, 80, "get_commands");
+      const recorded = log
+        .trim()
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => decodeRequestLog(line));
+      const handshake = recorded.find((entry) => entry.command.type === "get_commands");
+      assert.isDefined(handshake);
+      assert.include(handshake?.args ?? [], "--no-extensions");
+      const extensionPaths = (handshake?.args ?? []).flatMap((arg, index, args) =>
+        arg === "--extension" && args[index + 1] ? [args[index + 1]!] : [],
+      );
+      assert.include(extensionPaths, xaiExtension);
+      assert.isTrue(extensionPaths.some((value) => value.endsWith("t3-approval-v1.ts")));
+      assert.isTrue(extensionPaths.some((value) => value.endsWith("t3-openrouter-catalog.ts")));
+      assert.isTrue(extensionPaths.some((value) => value.endsWith("t3-nous-portal-catalog.ts")));
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("reports assistant errors as failed turns", () =>
     Effect.gen(function* () {
       const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
@@ -1534,6 +1599,72 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       );
       const completedIndex = runtimeEvents.findIndex((event) => event.type === "turn.completed");
       assert.isTrue(verdictIndex >= 0 && completedIndex > verdictIndex);
+
+      yield* adapter.stopSession(threadId);
+      yield* Fiber.interrupt(eventFiber);
+    }),
+  );
+
+  it.effect("keeps the original turn open for a hidden terminal-child wake", () =>
+    Effect.gen(function* () {
+      const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
+      const adapter = yield* makeTestAdapter(binaryPath);
+      const threadId = ThreadId.make("prime-late-report-thread");
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const finalTurnCompleted = yield* Deferred.make<void>();
+      const eventFiber = yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            runtimeEvents.push(event);
+            const hasVerdict = runtimeEvents.some(
+              (entry) =>
+                entry.type === "content.delta" &&
+                entry.payload.streamKind === "assistant_text" &&
+                entry.payload.delta.includes("## Late verdict"),
+            );
+            if (event.type === "turn.completed" && hasVerdict) {
+              yield* Deferred.succeed(finalTurnCompleted, undefined);
+            }
+          }),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "late child report",
+        attachments: [],
+      });
+      yield* Deferred.await(finalTurnCompleted);
+
+      const startedTurnIds = runtimeEvents
+        .filter((event) => event.type === "turn.started")
+        .map((event) => event.turnId);
+      assert.deepEqual(startedTurnIds, [turn.turnId]);
+
+      const completedTurnIds = runtimeEvents
+        .filter((event) => event.type === "turn.completed")
+        .map((event) => event.turnId);
+      assert.deepEqual(completedTurnIds, [turn.turnId]);
+
+      const verdictDelta = runtimeEvents.find(
+        (event) =>
+          event.type === "content.delta" &&
+          event.payload.streamKind === "assistant_text" &&
+          event.payload.delta.includes("## Late verdict"),
+      );
+      assert.isDefined(verdictDelta);
+      assert.equal(verdictDelta?.turnId, turn.turnId);
+      const verdictIndex = runtimeEvents.indexOf(verdictDelta!);
+      const completionIndex = runtimeEvents.findIndex((event) => event.type === "turn.completed");
+      assert.isAbove(completionIndex, verdictIndex);
 
       yield* adapter.stopSession(threadId);
       yield* Fiber.interrupt(eventFiber);
