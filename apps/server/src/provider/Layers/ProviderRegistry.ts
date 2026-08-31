@@ -79,6 +79,19 @@ const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean 
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
 
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
+  if (provider.driver === ProviderDriverKind.make("primeAgent")) {
+    // Prime's authenticated and unauthenticated snapshots are authoritative:
+    // they contain exactly the models from providers currently present in
+    // auth.json. Unknown auth means the isolated model probe did not finish,
+    // so keep the last good catalog while the installed provider recovers.
+    return (
+      provider.enabled &&
+      provider.installed &&
+      provider.auth.status === "unknown" &&
+      provider.status !== "ready"
+    );
+  }
+
   if (provider.driver !== ProviderDriverKind.make("opencode")) {
     return true;
   }
