@@ -24,7 +24,10 @@ import { ProviderValidationError } from "../Errors.ts";
 import { ProviderSessionReaper } from "../Services/ProviderSessionReaper.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
-import { makeProviderSessionReaperLive } from "./ProviderSessionReaper.ts";
+import {
+  makeProviderSessionReaperLive,
+  type ProviderSessionReaperLiveOptions,
+} from "./ProviderSessionReaper.ts";
 
 const defaultModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -62,7 +65,7 @@ function makeReadModel(
     readonly session: {
       readonly threadId: ThreadId;
       readonly status: "starting" | "running" | "ready" | "interrupted" | "stopped" | "error";
-      readonly providerName: "codex" | "claudeAgent";
+      readonly providerName: "codex" | "claudeAgent" | "primeAgent";
       readonly runtimeMode: "approval-required" | "full-access" | "auto-accept-edits";
       readonly activeTurnId: TurnId | null;
       readonly lastError: string | null;
@@ -147,6 +150,7 @@ describe("ProviderSessionReaper", () => {
 
   async function createHarness(input: {
     readonly readModel: ReturnType<typeof makeReadModel>;
+    readonly reaperOptions?: ProviderSessionReaperLiveOptions | "defaults";
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
     }) => ReturnType<ProviderServiceShape["stopSession"]>;
@@ -196,10 +200,15 @@ describe("ProviderSessionReaper", () => {
     const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
       Layer.provide(runtimeRepositoryLayer),
     );
-    const layer = makeProviderSessionReaperLive({
-      inactivityThresholdMs: 1_000,
-      sweepIntervalMs: 60_000,
-    }).pipe(
+    const reaperLayer =
+      input.reaperOptions === "defaults"
+        ? makeProviderSessionReaperLive()
+        : makeProviderSessionReaperLive({
+            inactivityThresholdMs: 1_000,
+            sweepIntervalMs: 60_000,
+            ...input.reaperOptions,
+          });
+    const layer = reaperLayer.pipe(
       Layer.provideMerge(providerSessionDirectoryLayer),
       Layer.provideMerge(runtimeRepositoryLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, providerService)),
@@ -284,6 +293,73 @@ describe("ProviderSessionReaper", () => {
 
     expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId });
     expect(harness.stoppedThreadIds.has(threadId)).toBe(true);
+  });
+
+  it("uses a 10-minute Prime threshold while other providers remain at 30 minutes", async () => {
+    const primeThreadId = ThreadId.make("thread-reaper-prime-short-threshold");
+    const codexThreadId = ThreadId.make("thread-reaper-codex-default-threshold");
+    const now = await Effect.runPromise(DateTime.now);
+    const lastSeenAt = DateTime.formatIso(DateTime.subtract(now, { minutes: 15 }));
+    const readModelTimestamp = DateTime.formatIso(now);
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: primeThreadId,
+          session: {
+            threadId: primeThreadId,
+            status: "ready",
+            providerName: "primeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: readModelTimestamp,
+          },
+        },
+        {
+          id: codexThreadId,
+          session: {
+            threadId: codexThreadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: readModelTimestamp,
+          },
+        },
+      ]),
+      reaperOptions: "defaults",
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+
+    for (const [threadId, providerName] of [
+      [primeThreadId, "primeAgent"],
+      [codexThreadId, "codex"],
+    ] as const) {
+      await runtime!.runPromise(
+        repository.upsert({
+          threadId,
+          providerName,
+          providerInstanceId: null,
+          adapterKey: providerName,
+          runtimeMode: "full-access",
+          status: "running",
+          lastSeenAt,
+          resumeCursor: null,
+          runtimePayload: null,
+        }),
+      );
+    }
+
+    await startReaper();
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await Effect.runPromise(drainFibers);
+
+    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+      primeThreadId,
+    ]);
   });
 
   it("skips stale sessions when the thread still has an active turn", async () => {
