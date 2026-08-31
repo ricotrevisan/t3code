@@ -2,12 +2,16 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { beforeEach, vi } from "vite-plus/test";
 
-const { openExternalMock, writeTextMock } = vi.hoisted(() => ({
+const { getApplicationNameForProtocolMock, openExternalMock, writeTextMock } = vi.hoisted(() => ({
+  getApplicationNameForProtocolMock: vi.fn(),
   openExternalMock: vi.fn(),
   writeTextMock: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
+  app: {
+    getApplicationNameForProtocol: getApplicationNameForProtocolMock,
+  },
   shell: {
     openExternal: openExternalMock,
   },
@@ -20,9 +24,22 @@ import * as ElectronShell from "./ElectronShell.ts";
 
 describe("ElectronShell", () => {
   beforeEach(() => {
+    getApplicationNameForProtocolMock.mockReset();
     openExternalMock.mockReset();
     writeTextMock.mockReset();
   });
+
+  it.effect("detects registered editor protocol handlers", () =>
+    Effect.gen(function* () {
+      getApplicationNameForProtocolMock.mockImplementation((url: string) =>
+        url === "zed://" ? "Zed" : "",
+      );
+
+      const electronShell = yield* ElectronShell.ElectronShell;
+      assert.equal(yield* electronShell.hasProtocolHandler("zed"), true);
+      assert.equal(yield* electronShell.hasProtocolHandler("vscode"), false);
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
 
   it.effect("opens safe external URLs", () =>
     Effect.gen(function* () {
@@ -48,6 +65,22 @@ describe("ElectronShell", () => {
       assert.equal(result, true);
       assert.deepEqual(openExternalMock.mock.calls, [
         ["vscode://vscode-remote/ssh-remote+example.com/home/user/project"],
+      ]);
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
+
+  it.effect("opens Zed remote SSH editor URLs", () =>
+    Effect.gen(function* () {
+      openExternalMock.mockResolvedValue(undefined);
+
+      const electronShell = yield* ElectronShell.ElectronShell;
+      const result = yield* electronShell.openExternal(
+        "zed://ssh/example.com/home/user/my%20project",
+      );
+
+      assert.equal(result, true);
+      assert.deepEqual(openExternalMock.mock.calls, [
+        ["zed://ssh/example.com/home/user/my%20project"],
       ]);
     }).pipe(Effect.provide(ElectronShell.layer)),
   );
@@ -91,6 +124,22 @@ describe("ElectronShell", () => {
       );
 
       assert.equal(result, false);
+      assert.equal(openExternalMock.mock.calls.length, 0);
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
+
+  it.effect("does not open non-SSH or malformed Zed URLs", () =>
+    Effect.gen(function* () {
+      openExternalMock.mockResolvedValue(undefined);
+
+      const electronShell = yield* ElectronShell.ElectronShell;
+      const results = yield* Effect.all([
+        electronShell.openExternal("zed://file/example.com/home/user/project"),
+        electronShell.openExternal("zed://user@ssh/example.com/home/user/project"),
+        electronShell.openExternal("zed://ssh/example.com"),
+      ]);
+
+      assert.deepEqual(results, [false, false, false]);
       assert.equal(openExternalMock.mock.calls.length, 0);
     }).pipe(Effect.provide(ElectronShell.layer)),
   );
