@@ -3,6 +3,7 @@ import {
   remoteSchemeForEditor,
   type SystemSettingsPane,
 } from "@t3tools/contracts";
+import { REMOTE_CAPABLE_EDITOR_IDS, remoteOpenDefinitionForEditor } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -26,21 +27,31 @@ const SYSTEM_SETTINGS_URLS: Record<SystemSettingsPane, string> = {
 
 // Remote open-in-editor deep links (`vscode://vscode-remote/ssh-remote+…`)
 // must reach the OS handler; every other non-web scheme stays blocked.
+// Remote open-in-editor deep links must reach the OS handler; every other
+// non-web scheme stays blocked.
 const SAFE_WEB_PROTOCOLS = new Set(["http:", "https:"]);
-const REMOTE_EDITOR_PROTOCOLS = new Set(
-  REMOTE_CAPABLE_EDITOR_IDS.flatMap((id) => {
-    const scheme = remoteSchemeForEditor(id);
-    return scheme === undefined ? [] : [`${scheme}:`];
-  }),
-);
+const REMOTE_EDITOR_OPEN_DEFINITIONS = REMOTE_CAPABLE_EDITOR_IDS.flatMap((id) => {
+  const definition = remoteOpenDefinitionForEditor(id);
+  return definition === undefined ? [] : [definition];
+});
+
+const hasNoUrlCredentials = (url: URL) => url.username.length === 0 && url.password.length === 0;
 
 const isRemoteEditorUrl = (url: URL) =>
-  REMOTE_EDITOR_PROTOCOLS.has(url.protocol) &&
-  url.username.length === 0 &&
-  url.password.length === 0 &&
-  url.host === "vscode-remote" &&
-  url.pathname.startsWith("/ssh-remote+") &&
-  url.pathname.length > "/ssh-remote+".length;
+  hasNoUrlCredentials(url) &&
+  REMOTE_EDITOR_OPEN_DEFINITIONS.some((definition) => {
+    if (url.protocol !== `${definition.scheme}:` || url.host !== definition.urlHost) {
+      return false;
+    }
+
+    const pathPrefix = `/${definition.sshPathPrefix}`;
+    if (!url.pathname.startsWith(pathPrefix)) {
+      return false;
+    }
+
+    const sshTargetAndPath = url.pathname.slice(pathPrefix.length);
+    return sshTargetAndPath.indexOf("/") > 0;
+  });
 
 export function parseSafeExternalUrl(rawUrl: unknown): Option.Option<string> {
   if (typeof rawUrl !== "string") {
@@ -63,6 +74,7 @@ export class ElectronShell extends Context.Service<
     readonly openExternal: (rawUrl: unknown) => Effect.Effect<boolean>;
     /** Opens a known System Settings pane by identifier, not by URL. */
     readonly openSystemSettings: (pane: SystemSettingsPane) => Effect.Effect<boolean>;
+    readonly hasProtocolHandler: (scheme: string) => Effect.Effect<boolean>;
     readonly copyText: (text: string) => Effect.Effect<void>;
   }
 >()("@t3tools/desktop/electron/ElectronShell") {}
@@ -86,6 +98,14 @@ export const make = ElectronShell.of({
         () => false,
       ),
     ),
+  hasProtocolHandler: (scheme) =>
+    Effect.sync(() => {
+      try {
+        return Electron.app.getApplicationNameForProtocol(`${scheme}://`) !== "";
+      } catch {
+        return false;
+      }
+    }),
   copyText: (text) =>
     Effect.sync(() => {
       Electron.clipboard.writeText(text);

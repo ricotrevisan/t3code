@@ -90,6 +90,22 @@ If that port is already in use, choose another with
 `--tailscale-serve-port`. See `npx t3 pair --help` for other pairing options.
 
 ### Hosted web app
+#### Opening a Remote Project in an Editor
+
+When a remote environment has an SSH route, **Open in VS Code** and **Open in Zed** launch the
+editor on the device viewing T3 Code and connect it to the project over SSH. The project files,
+terminals, language servers, and other remote tooling continue to run on the environment machine.
+
+For desktop-managed SSH environments, T3 Code reuses the saved SSH configuration alias. For other
+remote environments, the server can advertise a Tailscale MagicDNS or local mDNS hostname when an
+SSH server is listening. The viewing device must be able to SSH to that target with its own keys or
+SSH agent.
+
+VS Code requires the Remote - SSH extension. Zed handles SSH projects directly. Browser clients
+cannot detect which editors are installed, so they offer both and hand the selected link to the
+operating system. T3 Connect carries T3 Code traffic but does not expose an SSH route by itself.
+
+#### SSH Launch Troubleshooting
 
 [app.t3.codes](https://app.t3.codes) needs an HTTPS endpoint. It connects directly
 to your server; a hosted pairing link does not make an unreachable backend
