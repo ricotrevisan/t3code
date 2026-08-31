@@ -168,6 +168,7 @@ const PrimeRlmChildUpdate = Schema.Struct({
     model: Schema.optional(Schema.String),
     label: Schema.String,
     status: Schema.Literals(["queued", "running", "done", "error", "cancelled"]),
+    repliedSinceTask: Schema.optional(Schema.Boolean),
     answerPreview: Schema.optional(Schema.String),
     recap: Schema.optional(Schema.String),
     activity: Schema.optional(
@@ -926,6 +927,12 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           if (state.terminal) {
             return;
           }
+          // Prime emits the terminal roster update before it admits the hidden
+          // parent action that delivers a child result. Reserve that wake now
+          // so this T3 turn cannot settle in between those events.
+          if (child.repliedSinceTask === false) {
+            ctx.pendingParentWake = true;
+          }
           state.terminal = true;
           const summary =
             terminalStatus === "completed"
@@ -1310,7 +1317,6 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           }
           ctx.latestAgentEndMessages = messages;
           ctx.parentCycleOpen = false;
-          ctx.pendingParentWake = false;
           // Prime RLM children reply after this agent_end and start a new
           // parent cycle. Keep the T3 turn open until that work drains.
           if (isAbortedTurn(messages) || primeFailureFromMessages(messages) !== undefined) {
