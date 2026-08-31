@@ -116,18 +116,21 @@ const listPrimeModels = (
 > =>
   Effect.scoped(
     Effect.gen(function* () {
-      const catalogExtensionPath = extensionBaseDir
-        ? yield* preparePrimeOpenRouterCatalogExtension(extensionBaseDir).pipe(
-            Effect.mapError(
-              (cause) =>
-                new PrimeRpcError({
-                  operation: "get_available_models",
-                  detail: "Could not prepare the OpenRouter catalog extension.",
-                  cause,
-                }),
+      const ownedCatalogExtensionArgs = extensionBaseDir
+        ? [
+            "--extension",
+            yield* preparePrimeOpenRouterCatalogExtension(extensionBaseDir).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new PrimeRpcError({
+                    operation: "get_available_models",
+                    detail: "Could not prepare the OpenRouter catalog extension.",
+                    cause,
+                  }),
+              ),
             ),
-          )
-        : undefined;
+          ]
+        : [];
       const packageCatalogExtensionArgs = primePackageCatalogExtensionArgs(
         resolvePrimeAgentDir(environment),
       );
@@ -139,7 +142,7 @@ const listPrimeModels = (
           "--no-session",
           "--no-tools",
           "--no-extensions",
-          ...(catalogExtensionPath ? ["--extension", catalogExtensionPath] : []),
+          ...ownedCatalogExtensionArgs,
           ...packageCatalogExtensionArgs,
         ],
         cwd: process.cwd(),

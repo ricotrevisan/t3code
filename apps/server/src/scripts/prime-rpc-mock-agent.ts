@@ -576,6 +576,99 @@ function handle(command: Record<string, unknown>): void {
         });
         return;
       }
+      if (message === "late child report") {
+        send({ type: "agent_start" });
+        send({
+          type: "rlm_child_update",
+          child: {
+            id: "prime-sub-late",
+            sessionName: "late-reporter",
+            model: "openrouter/ox-alpha",
+            label: "Report after settling",
+            status: "running",
+            sessionDir: "/tmp/prime-sub-late",
+            activity: { kind: "executing", toolName: "ipython" },
+          },
+        });
+        send({
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "text_delta",
+            contentIndex: 0,
+            delta: "delegated",
+          },
+        });
+        setImmediate(() => {
+          if (!stillCurrent()) {
+            return;
+          }
+          // A terminal roster update can land before the current parent
+          // cycle ends and before Prime admits the hidden parent wake. T3 must
+          // preserve that reservation across agent_end, including failures.
+          send({
+            type: "rlm_child_update",
+            child: {
+              id: "prime-sub-late",
+              sessionName: "late-reporter",
+              model: "openrouter/ox-alpha",
+              label: "Report after settling",
+              status: "error",
+              repliedSinceTask: false,
+              error: "Late child failed with findings",
+              tokenCount: 5200,
+              toolUseCount: 2,
+              durationMs: 1800,
+              sessionDir: "/tmp/prime-sub-late",
+            },
+          });
+          finishTurn(() => {
+            send({
+              type: "agent_end",
+              messages: [{ role: "assistant", content: [{ type: "text", text: "delegated" }] }],
+            });
+          });
+          setImmediate(() => {
+            send({
+              type: "message_end",
+              message: {
+                role: "custom",
+                customType: "agent_message",
+                content:
+                  "[from child:late-reporter]\nAgent-to-agent message received.\n\nLate findings",
+                display: true,
+                details: {
+                  id: "agentmsg_late1",
+                  message: "Late findings",
+                  from: { sessionName: "late-reporter", sessionId: "prime-sub-late" },
+                  fromRelationship: "child",
+                },
+              },
+            });
+            streaming = true;
+            send({ type: "agent_start" });
+            send({
+              type: "message_update",
+              assistantMessageEvent: {
+                type: "text_delta",
+                contentIndex: 0,
+                delta: "## Late verdict",
+              },
+            });
+            finishTurn(() => {
+              send({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "## Late verdict" }],
+                  },
+                ],
+              });
+            });
+          });
+        });
+        return;
+      }
       if (message === "hold split unicode") {
         const prefix =
           '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"';
