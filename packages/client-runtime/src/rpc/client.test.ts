@@ -35,6 +35,10 @@ import {
   runStream,
   subscribe,
   subscribeDynamicWithSession,
+  EnvironmentRpcUnavailableError,
+  request,
+  runStream,
+  subscribe,
 } from "./client.ts";
 
 const TARGET = new PrimaryConnectionTarget({
@@ -152,6 +156,59 @@ describe("environment RPC", () => {
         `start:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
         `finish:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
       ]);
+    }),
+  );
+
+  it.effect("aborts an in-flight unary request when the session becomes none", () =>
+    Effect.gen(function* () {
+      const client = {
+        [WS_METHODS.cloudGetRelayClientStatus]: () => Effect.never,
+      } as unknown as WsRpcProtocolClient;
+      const { activeSession, supervisor } = yield* makeHarness();
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+
+      const fiber = yield* request(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      yield* SubscriptionRef.set(activeSession, Option.none());
+      const error = yield* Effect.flip(Fiber.join(fiber));
+
+      expect(error).toBeInstanceOf(EnvironmentRpcUnavailableError);
+      expect(error).toMatchObject({
+        message: "Test environment is not connected.",
+      });
+    }),
+  );
+
+  it.effect("aborts a unary request when the session changes before its watcher starts", () =>
+    Effect.gen(function* () {
+      const firstClient = {
+        [WS_METHODS.cloudGetRelayClientStatus]: () => Effect.never,
+      } as unknown as WsRpcProtocolClient;
+      const secondClient = {} as WsRpcProtocolClient;
+      const { activeSession, supervisor } = yield* makeHarness();
+      yield* SubscriptionRef.set(activeSession, Option.some(session(firstClient)));
+
+      const error = yield* request(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(
+          EnvironmentRpcRequestObserver,
+          EnvironmentRpcRequestObserver.of({
+            observe: () =>
+              SubscriptionRef.set(activeSession, Option.some(session(secondClient))).pipe(
+                Effect.as(Effect.void),
+              ),
+          }),
+        ),
+        Effect.flip,
+      );
+
+      expect(error).toBeInstanceOf(EnvironmentRpcUnavailableError);
+      expect(error).toMatchObject({
+        message: "Test environment is not connected.",
+      });
     }),
   );
 

@@ -165,12 +165,15 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
 
     const connected = yield* Deferred.make<void>();
     const disconnected = yield* Deferred.make<never, ConnectionTransientError>();
+    // Complete-once: Effect RPC ping timeout races socket close, and both
+    // hooks may run. Native WebSocket ping frames are intentionally unused.
+    const failClosed = (error: ConnectionTransientErrorClass) =>
+      Deferred.complete(disconnected, Effect.fail(error)).pipe(Effect.asVoid);
     const hooks = RpcClient.ConnectionHooks.of({
       onConnect: Deferred.succeed(connected, undefined).pipe(Effect.asVoid),
       onDisconnect: Deferred.isDone(connected).pipe(
         Effect.flatMap((wasConnected) =>
-          Deferred.fail(
-            disconnected,
+          failClosed(
             new ConnectionTransientErrorClass({
               reason: "transport",
               detail: `${
@@ -181,7 +184,12 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
             }),
           ),
         ),
-        Effect.asVoid,
+      ),
+      onPingTimeout: failClosed(
+        new ConnectionTransientErrorClass({
+          reason: "timeout",
+          detail: `${connection.label} did not respond to RPC ping.`,
+        }),
       ),
     });
     const socketLayer = Socket.layerWebSocket(connection.socketUrl, {
