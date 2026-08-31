@@ -37,6 +37,11 @@ Two registries separate configuration from live processes:
 [`ProviderService`][service] sits on top. It combines the adapter registry with the provider session
 directory to route session and turn operations for a thread, so callers name a thread, not an agent.
 
+The server reaps inactive provider sessions while preserving their persisted resume state. The
+default inactivity threshold is 30 minutes; Prime sessions use 10 minutes because each retained
+worker can also hold Python kernels and RLM children. Active turns and reported background work are
+never reaped. A later turn starts the provider again from the saved cursor.
+
 Adding a driver means writing the driver plus adapter and adding it to `BUILT_IN_DRIVERS`. No
 orchestration, contract, or client change is required for the common case.
 
