@@ -108,6 +108,7 @@ import {
 } from "../composer-logic";
 import {
   createMessageAttachmentPreviewProjector,
+  deriveAgentSessionLive,
   derivePhase,
   deriveTimelineEntriesWithState,
   deriveActiveWorkStartedAt,
@@ -1840,8 +1841,8 @@ export default function ChatView(props: ChatViewProps) {
         : null,
     [activeThreadEnvironmentId, activeThreadId],
   );
-  const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const activeThreadShell = useThreadShell(isServerThread ? activeThreadRef : null);
+  const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
     readonly messageId: MessageId | null;
@@ -2569,7 +2570,7 @@ export default function ChatView(props: ChatViewProps) {
   // Agents surface, live strip, and workflow cards. v2Projection is null
   // until orchestration-v2 lands (source precedence lives in the derive).
   // sessionLive derives interruption for agents orphaned by session death.
-  const agentSessionLive = phase !== "disconnected";
+  const agentSessionLive = deriveAgentSessionLive(phase, activeThreadShell?.backgroundLiveness);
   const agentPanelModel = useMemo(
     () =>
       deriveAgentPanelModel({
