@@ -2073,3 +2073,18 @@ export function derivePhase(session: ThreadSession | null): SessionPhase {
   if (session.status === "running") return "running";
   return "ready";
 }
+
+export function deriveAgentSessionLive(
+  phase: SessionPhase,
+  backgroundLiveness: "working" | "monitoring" | null | undefined,
+): boolean {
+  if (phase === "disconnected") {
+    return false;
+  }
+  if (phase !== "ready") {
+    return true;
+  }
+  // Missing means an older server that cannot provide the authoritative
+  // background-work signal. Preserve its previous session-based behavior.
+  return backgroundLiveness === undefined || backgroundLiveness !== null;
+}
