@@ -203,6 +203,101 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-import-shell-")
     );
   },
 );
+it.layer(BaseTestLayer)("OrchestrationProjectionPipeline activity ordering", (it) => {
+  it.effect("uses event sequence when equal timestamps would reopen a completed task", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-equal-timestamp-task-order");
+      const createdAt = "2026-08-31T17:24:54.286Z";
+
+      const progress = yield* eventStore.append({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-equal-timestamp-progress"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: createdAt,
+        commandId: CommandId.make("cmd-equal-timestamp-progress"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-equal-timestamp-progress"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make(`task-progress:${threadId}:task-1`),
+            tone: "info",
+            kind: "task.progress",
+            summary: "Working",
+            payload: {
+              taskId: "task-1",
+              status: "running",
+              agentKind: "agent",
+            },
+            turnId: null,
+            createdAt,
+          },
+        },
+      });
+      const completed = yield* eventStore.append({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-equal-timestamp-completed"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: createdAt,
+        commandId: CommandId.make("cmd-equal-timestamp-completed"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-equal-timestamp-completed"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("000-terminal-task-1"),
+            tone: "info",
+            kind: "task.completed",
+            summary: "Task completed",
+            payload: {
+              taskId: "task-1",
+              status: "completed",
+              agentKind: "agent",
+            },
+            turnId: null,
+            createdAt,
+          },
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const rows = yield* sql<{
+        readonly activityId: string;
+        readonly sequence: number | null;
+      }>`
+        SELECT
+          activity_id AS "activityId",
+          sequence
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+        ORDER BY
+          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
+          sequence ASC,
+          created_at ASC,
+          activity_id ASC
+      `;
+
+      assert.deepEqual(rows, [
+        {
+          activityId: `task-progress:${threadId}:task-1`,
+          sequence: progress.sequence,
+        },
+        {
+          activityId: "000-terminal-task-1",
+          sequence: completed.sequence,
+        },
+      ]);
+    }),
+  );
+});
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("bootstraps all projection states and writes projection rows", () =>

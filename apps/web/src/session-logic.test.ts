@@ -11,6 +11,7 @@ import { resolveWorkEntryToolPresentation } from "@t3tools/client-runtime/work-l
 
 import {
   createMessageAttachmentPreviewProjector,
+  deriveAgentSessionLive,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
   derivePendingApprovals,
@@ -2496,6 +2497,27 @@ describe("isLatestTurnSettled", () => {
         null,
       ),
     ).toBe(false);
+  });
+});
+
+describe("deriveAgentSessionLive", () => {
+  it("treats restart-orphaned agents as dead when a ready thread has no background liveness", () => {
+    expect(deriveAgentSessionLive("ready", null)).toBe(false);
+  });
+
+  it("keeps agents live while a ready thread reports background work", () => {
+    expect(deriveAgentSessionLive("ready", "working")).toBe(true);
+    expect(deriveAgentSessionLive("ready", "monitoring")).toBe(true);
+  });
+
+  it("keeps older servers compatible when background liveness is absent", () => {
+    expect(deriveAgentSessionLive("ready", undefined)).toBe(true);
+  });
+
+  it("uses the foreground session lifecycle while a turn starts or runs", () => {
+    expect(deriveAgentSessionLive("connecting", null)).toBe(true);
+    expect(deriveAgentSessionLive("running", null)).toBe(true);
+    expect(deriveAgentSessionLive("disconnected", "working")).toBe(false);
   });
 });
 
