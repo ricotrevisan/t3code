@@ -15,10 +15,12 @@ import { forkParked } from "../../serverActivation.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
 
 const DEFAULT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000;
+const DEFAULT_PRIME_INACTIVITY_THRESHOLD_MS = 10 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 export interface ProviderSessionReaperLiveOptions {
   readonly inactivityThresholdMs?: number;
+  readonly primeInactivityThresholdMs?: number;
   readonly sweepIntervalMs?: number;
 }
 
@@ -31,6 +33,10 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     const inactivityThresholdMs = Math.max(
       1,
       options?.inactivityThresholdMs ?? DEFAULT_INACTIVITY_THRESHOLD_MS,
+    );
+    const primeInactivityThresholdMs = Math.max(
+      1,
+      options?.primeInactivityThresholdMs ?? DEFAULT_PRIME_INACTIVITY_THRESHOLD_MS,
     );
     const sweepIntervalMs = Math.max(1, options?.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
 
@@ -55,7 +61,9 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         }
 
         const idleDurationMs = now - lastSeenMs;
-        if (idleDurationMs < inactivityThresholdMs) {
+        const bindingInactivityThresholdMs =
+          binding.provider === "primeAgent" ? primeInactivityThresholdMs : inactivityThresholdMs;
+        if (idleDurationMs < bindingInactivityThresholdMs) {
           continue;
         }
 
@@ -90,6 +98,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
               threadId: binding.threadId,
               provider: binding.provider,
               idleDurationMs,
+              inactivityThresholdMs: bindingInactivityThresholdMs,
               reason: "inactivity_threshold",
             }),
           ),
@@ -137,6 +146,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
 
         yield* Effect.logInfo("provider.session.reaper.started", {
           inactivityThresholdMs,
+          primeInactivityThresholdMs,
           sweepIntervalMs,
         });
       });
