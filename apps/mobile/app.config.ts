@@ -77,7 +77,7 @@ const VARIANT_CONFIG = {
   preview: {
     appName: "T3 Code Preview",
     scheme: "t3code-preview",
-    iosBundleIdentifier: "com.t3tools.t3code.preview",
+    iosBundleIdentifier: "com.ricotrevisan.t3code.preview",
     androidPackage: "com.t3tools.t3code.preview",
     relyingParty: "clerk.t3.codes",
     assets: PREVIEW_ASSETS,
@@ -181,7 +181,7 @@ const config: ExpoConfig = {
   userInterfaceStyle: "automatic",
   updates: {
     enabled: true,
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+    url: "https://u.expo.dev/ebf05d3d-bbe5-4612-871f-6f1c76d5ed03",
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
   },
@@ -195,7 +195,7 @@ const config: ExpoConfig = {
     // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
     // does not fall back to a personal team (which cannot sign app groups,
     // Sign in with Apple, or push notification entitlements).
-    appleTeamId: "ARK85ZXQ4Z",
+    appleTeamId: "B3VB4EPWT9",
     associatedDomains: [
       `applinks:${variant.relyingParty}`,
       `webcredentials:${variant.relyingParty}`,
@@ -383,10 +383,10 @@ const config: ExpoConfig = {
       tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN ?? null,
     },
     eas: {
-      projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+      projectId: "ebf05d3d-bbe5-4612-871f-6f1c76d5ed03",
     },
   },
-  owner: "pingdotgg",
+  owner: "ricotrevisan",
 };
 
 export default config;
