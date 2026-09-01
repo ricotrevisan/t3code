@@ -49,6 +49,15 @@ let delayedTimer: ReturnType<typeof setTimeout> | undefined;
 let pendingApprovalId: string | undefined;
 let pendingUserInputId: string | undefined;
 const steerQueue: string[] = [];
+let heartbeats: Array<{
+  job: {
+    id: string;
+    status: string;
+    source?: string;
+    label?: string;
+    prompt?: string;
+  };
+}> = [];
 let currentModel: { id: string; name: string; provider: string } = {
   id: "gpt-5.6-sol",
   name: "GPT-5.6 Sol",
@@ -263,6 +272,11 @@ function handle(command: Record<string, unknown>): void {
         },
       });
       return;
+    case "list_heartbeats":
+      respond(id, "list_heartbeats", true, {
+        data: { heartbeats },
+      });
+      return;
     case "get_commands": {
       const extensionPath =
         valuesAfter("--extension").find((value) => value.endsWith("/t3-approval-v1.ts")) ??
@@ -432,6 +446,60 @@ function handle(command: Record<string, unknown>): void {
           method: "confirm",
           title: "Allow Prime Agent tool?",
           message: 'ipython\n\n{"code":"write approval sentinel"}',
+        });
+        return;
+      }
+      if (message === "arm heartbeat") {
+        heartbeats = [
+          {
+            job: {
+              id: "hb-1",
+              status: "active",
+              source: "rlm_heartbeat",
+              label: "ci-watch",
+              prompt: "Check CI",
+            },
+          },
+        ];
+        send({ type: "agent_start" });
+        finishTurn(() => {
+          send({
+            type: "message_update",
+            assistantMessageEvent: {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: "Heartbeat armed",
+            },
+          });
+          send({
+            type: "agent_end",
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "Heartbeat armed" }],
+              },
+            ],
+          });
+          delayedTimer = setTimeout(() => {
+            send({ type: "agent_start" });
+            send({
+              type: "message_update",
+              assistantMessageEvent: {
+                type: "text_delta",
+                contentIndex: 0,
+                delta: "Heartbeat tick",
+              },
+            });
+            send({
+              type: "agent_end",
+              messages: [
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "Heartbeat tick" }],
+                },
+              ],
+            });
+          }, 80);
         });
         return;
       }

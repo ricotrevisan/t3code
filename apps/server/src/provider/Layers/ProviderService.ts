@@ -83,6 +83,17 @@ interface PendingCompaction {
   compactedEventObserved: boolean;
   expectedTurnId: TurnId | undefined;
 }
+const SESSION_ACTIVITY_EVENT_TYPES: ReadonlySet<ProviderRuntimeEvent["type"]> = new Set([
+  "session.started",
+  "turn.started",
+  "turn.completed",
+  "turn.aborted",
+  "task.started",
+  "task.progress",
+  "task.updated",
+  "task.completed",
+  "user-input.requested",
+]);
 
 /**
  * Hook for tests that want to override the canonical event logger pulled
@@ -925,6 +936,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
       yield* processFallbackCompactionEvent(pendingCompaction, canonicalEvent);
     });
+    Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
+      Effect.flatMap((canonicalEvent) =>
+        increment(providerRuntimeEventsTotal, {
+          provider: canonicalEvent.provider,
+          eventType: canonicalEvent.type,
+        }).pipe(
+          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+          Effect.tap(() =>
+            SESSION_ACTIVITY_EVENT_TYPES.has(canonicalEvent.type)
+              ? directory.touchLastSeenAt(canonicalEvent.threadId).pipe(
+                  Effect.catch(() =>
+                    Effect.logWarning("provider.session.touch-last-seen-failed", {
+                      threadId: canonicalEvent.threadId,
+                      eventType: canonicalEvent.type,
+                    }),
+                  ),
+                )
+              : Effect.void,
+          ),
+        ),
+      ),
+    );
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
   // are currently wired into the runtime event bus". It both tracks the set

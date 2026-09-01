@@ -148,6 +148,17 @@ directory to route session and turn operations for a thread, so callers name a t
 reference data before dispatching to any adapter. Bound user comments remain distinct from the quoted
 assistant text. Persisted messages keep their serialized links.
 
+The server reaps inactive provider sessions while preserving their persisted resume state. The
+inactivity threshold is 30 minutes. `lastSeenAt` advances when a turn is sent and when the session
+emits turn, task, or user-input lifecycle events, so a long-running turn is not treated as idle
+from the user prompt. Active turns, pending user input, and reported background work (subagents,
+monitor loops, Prime heartbeat jobs) are never reaped. A later turn starts the provider again from the saved cursor.
+
+Prime Agent can start a new cycle after T3 has already settled the user turn
+(scheduled heartbeats, late child reports). The Prime adapter opens a new T3 turn
+on that `agent_start` and publishes active heartbeat cron jobs as `monitor`
+tasks so the reaper treats them as live background work.
+
 Adding a driver means writing the driver plus adapter and adding it to `BUILT_IN_DRIVERS`. No
 orchestration, contract, or client change is required for the common case.
 
