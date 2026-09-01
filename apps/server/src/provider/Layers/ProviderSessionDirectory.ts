@@ -182,12 +182,21 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       ),
     );
 
+  const touchLastSeenAt: ProviderSessionDirectoryShape["touchLastSeenAt"] = (threadId) =>
+    Effect.gen(function* () {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      yield* repository
+        .touchLastSeenAt({ threadId, lastSeenAt: now })
+        .pipe(Effect.mapError(toPersistenceError("ProviderSessionDirectory.touchLastSeenAt")));
+    });
+
   return {
     upsert,
     getProvider,
     getBinding,
     listThreadIds,
     listBindings,
+    touchLastSeenAt,
   } satisfies ProviderSessionDirectoryShape;
 });
 

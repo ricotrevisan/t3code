@@ -62,6 +62,18 @@ import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
+const SESSION_ACTIVITY_EVENT_TYPES: ReadonlySet<ProviderRuntimeEvent["type"]> = new Set([
+  "session.started",
+  "turn.started",
+  "turn.completed",
+  "turn.aborted",
+  "task.started",
+  "task.progress",
+  "task.updated",
+  "task.completed",
+  "user-input.requested",
+]);
+
 /**
  * Hook for tests that want to override the canonical event logger pulled
  * from `ProviderEventLoggers`. Production wiring leaves this undefined and
@@ -350,7 +362,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         increment(providerRuntimeEventsTotal, {
           provider: canonicalEvent.provider,
           eventType: canonicalEvent.type,
-        }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
+        }).pipe(
+          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+          Effect.tap(() =>
+            SESSION_ACTIVITY_EVENT_TYPES.has(canonicalEvent.type)
+              ? directory.touchLastSeenAt(canonicalEvent.threadId).pipe(
+                  Effect.catch(() =>
+                    Effect.logWarning("provider.session.touch-last-seen-failed", {
+                      threadId: canonicalEvent.threadId,
+                      eventType: canonicalEvent.type,
+                    }),
+                  ),
+                )
+              : Effect.void,
+          ),
+        ),
       ),
     );
 
