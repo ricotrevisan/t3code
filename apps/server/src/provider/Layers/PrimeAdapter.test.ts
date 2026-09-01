@@ -1668,4 +1668,76 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       yield* Fiber.interrupt(eventFiber);
     }),
   );
+
+  it.effect(
+    "opens a new turn for a post-settle heartbeat cycle and maps jobs to monitor tasks",
+    () =>
+      Effect.gen(function* () {
+        const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
+        const adapter = yield* makeTestAdapter(binaryPath);
+        const threadId = ThreadId.make("prime-heartbeat-thread");
+        const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+        const heartbeatTickCompleted = yield* Deferred.make<void>();
+        const eventFiber = yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              runtimeEvents.push(event);
+              const hasTick = runtimeEvents.some(
+                (entry) =>
+                  entry.type === "content.delta" &&
+                  entry.payload.streamKind === "assistant_text" &&
+                  entry.payload.delta.includes("Heartbeat tick"),
+              );
+              if (event.type === "turn.completed" && hasTick) {
+                yield* Deferred.succeed(heartbeatTickCompleted, undefined).pipe(Effect.ignore);
+              }
+            }),
+          ),
+          Effect.forkChild,
+        );
+
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("primeAgent"),
+          providerInstanceId: ProviderInstanceId.make("primeAgent"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId,
+          input: "arm heartbeat",
+          attachments: [],
+        });
+        yield* Deferred.await(heartbeatTickCompleted);
+
+        const startedTurnIds = runtimeEvents
+          .filter((event) => event.type === "turn.started")
+          .map((event) => event.turnId);
+        assert.lengthOf(startedTurnIds, 2);
+        assert.equal(startedTurnIds[0], turn.turnId);
+        assert.notEqual(startedTurnIds[1], turn.turnId);
+
+        const monitorStarted = runtimeEvents.find(
+          (event): event is Extract<ProviderRuntimeEvent, { type: "task.started" }> =>
+            event.type === "task.started" &&
+            event.payload.taskType === "monitor" &&
+            event.payload.taskId === "prime-heartbeat:hb-1",
+        );
+        assert.isDefined(monitorStarted);
+        assert.equal(monitorStarted?.payload.title, "ci-watch");
+        assert.equal(monitorStarted?.payload.description, "Check CI");
+
+        const tickDelta = runtimeEvents.find(
+          (event) =>
+            event.type === "content.delta" &&
+            event.payload.streamKind === "assistant_text" &&
+            event.payload.delta.includes("Heartbeat tick"),
+        );
+        assert.isDefined(tickDelta);
+        assert.equal(tickDelta?.turnId, startedTurnIds[1]);
+
+        yield* adapter.stopSession(threadId);
+        yield* Fiber.interrupt(eventFiber);
+      }),
+  );
 });

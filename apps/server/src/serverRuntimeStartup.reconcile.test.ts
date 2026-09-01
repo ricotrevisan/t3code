@@ -155,6 +155,8 @@ it.effect("marks active running sessions that have persisted resume state", () =
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.succeed([]),
+      listBindings: () => Effect.die("unused"),
+      touchLastSeenAt: () => Effect.void,
     }),
     Effect.tap((marked) =>
       Effect.sync(() => {
@@ -278,6 +280,18 @@ it.effect.each(["marked update", "opt-in restart"] as const)(
       });
       yield* Deferred.await(continuationSent);
       yield* Deferred.await(continuationCleared);
+        getProvider: () => Effect.die("unused"),
+        listThreadIds: () => Effect.die("unused"),
+        listBindings: () => Effect.die("unused"),
+        touchLastSeenAt: () => Effect.void,
+      },
+      dispatch: (command) =>
+        Effect.sync(() => dispatched.push(command)).pipe(
+          Effect.as({ sequence: dispatched.length }),
+        ),
+    });
+    yield* Deferred.await(continuationSent);
+    yield* Deferred.await(continuationCleared);
 
       assert.deepStrictEqual(
         sends.toSorted((left, right) =>
@@ -397,6 +411,8 @@ it.effect("does not continue archived or deleted marked sessions", () => {
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.succeed([]),
+      listBindings: () => Effect.die("unused"),
+      touchLastSeenAt: () => Effect.void,
     },
     dispatch: (command) =>
       Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: dispatched.length })),
@@ -453,6 +469,8 @@ it.effect("retries continuation preparation before settling a persistent failure
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.succeed([]),
+      listBindings: () => Effect.die("unused"),
+      touchLastSeenAt: () => Effect.void,
     },
     dispatch: (command) => {
       if (command.type !== "thread.session.set") {
@@ -525,6 +543,8 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.succeed([]),
+      listBindings: () => Effect.die("unused"),
+      touchLastSeenAt: () => Effect.die("unused"),
     },
     dispatch: (command) =>
       Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: dispatched.length })),
@@ -605,6 +625,8 @@ it.effect(
         getProvider: () => Effect.die("unused"),
         listThreadIds: () => Effect.die("unused"),
         listBindings: () => Effect.succeed([]),
+        listBindings: () => Effect.die("unused"),
+        touchLastSeenAt: () => Effect.die("unused"),
       },
       dispatch: (command) =>
         Effect.sync(() => dispatched.push(command)).pipe(
@@ -643,6 +665,8 @@ it.effect("retries failed projections and continues after a persistent failure",
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.succeed([]),
+      listBindings: () => Effect.die("unused"),
+      touchLastSeenAt: () => Effect.die("unused"),
     },
     dispatch: (command) => {
       if (command.type !== "thread.session.set") {
@@ -693,6 +717,8 @@ it.effect("does not fail startup when the live provider session inventory cannot
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.succeed([]),
+      listBindings: () => Effect.die("unused"),
+      touchLastSeenAt: () => Effect.die("unused"),
     }),
     Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
       readEvents: () => Stream.empty,

@@ -72,6 +72,7 @@ function makeReadModel(
       readonly updatedAt: string;
     } | null;
     readonly backgroundLiveness?: "working" | "monitoring" | null;
+    readonly hasPendingUserInput?: boolean;
   }>,
 ) {
   const now = "2026-01-01T00:00:00.000Z";
@@ -108,7 +109,7 @@ function makeReadModel(
       settledAt: null,
       latestUserMessageAt: null,
       hasPendingApprovals: false,
-      hasPendingUserInput: false,
+      hasPendingUserInput: thread.hasPendingUserInput ?? false,
       hasActionableProposedPlan: false,
       latestTurn: null,
       messages: [],
@@ -295,9 +296,8 @@ describe("ProviderSessionReaper", () => {
     expect(harness.stoppedThreadIds.has(threadId)).toBe(true);
   });
 
-  it("uses a 10-minute Prime threshold while other providers remain at 30 minutes", async () => {
-    const primeThreadId = ThreadId.make("thread-reaper-prime-short-threshold");
-    const codexThreadId = ThreadId.make("thread-reaper-codex-default-threshold");
+  it("keeps Prime sessions on the same 30-minute threshold as other providers", async () => {
+    const primeThreadId = ThreadId.make("thread-reaper-prime-default-threshold");
     const now = await Effect.runPromise(DateTime.now);
     const lastSeenAt = DateTime.formatIso(DateTime.subtract(now, { minutes: 15 }));
     const readModelTimestamp = DateTime.formatIso(now);
@@ -315,18 +315,6 @@ describe("ProviderSessionReaper", () => {
             updatedAt: readModelTimestamp,
           },
         },
-        {
-          id: codexThreadId,
-          session: {
-            threadId: codexThreadId,
-            status: "ready",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: readModelTimestamp,
-          },
-        },
       ]),
       reaperOptions: "defaults",
     });
@@ -334,32 +322,24 @@ describe("ProviderSessionReaper", () => {
       Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
     );
 
-    for (const [threadId, providerName] of [
-      [primeThreadId, "primeAgent"],
-      [codexThreadId, "codex"],
-    ] as const) {
-      await runtime!.runPromise(
-        repository.upsert({
-          threadId,
-          providerName,
-          providerInstanceId: null,
-          adapterKey: providerName,
-          runtimeMode: "full-access",
-          status: "running",
-          lastSeenAt,
-          resumeCursor: null,
-          runtimePayload: null,
-        }),
-      );
-    }
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: primeThreadId,
+        providerName: "primeAgent",
+        providerInstanceId: null,
+        adapterKey: "primeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt,
+        resumeCursor: null,
+        runtimePayload: null,
+      }),
+    );
 
     await startReaper();
-    await waitFor(() => harness.stopSession.mock.calls.length === 1);
     await Effect.runPromise(drainFibers);
 
-    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
-      primeThreadId,
-    ]);
+    expect(harness.stopSession).not.toHaveBeenCalled();
   });
 
   it("skips stale sessions when the thread still has an active turn", async () => {
@@ -397,6 +377,54 @@ describe("ProviderSessionReaper", () => {
         lastSeenAt: "2026-04-14T00:00:00.000Z",
         resumeCursor: {
           opaque: "resume-active-turn",
+        },
+        runtimePayload: null,
+      }),
+    );
+
+    await startReaper();
+    await Effect.runPromise(drainFibers);
+
+    expect(harness.stopSession).not.toHaveBeenCalled();
+    const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
+    expect(Option.isSome(remaining)).toBe(true);
+  });
+
+  it("skips stale sessions while the thread is waiting for user input", async () => {
+    const threadId = ThreadId.make("thread-reaper-pending-user-input");
+    const now = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "primeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          hasPendingUserInput: true,
+        },
+      ]),
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId,
+        providerName: "primeAgent",
+        providerInstanceId: null,
+        adapterKey: "primeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: "2026-04-14T00:00:00.000Z",
+        resumeCursor: {
+          opaque: "resume-pending-user-input",
         },
         runtimePayload: null,
       }),

@@ -74,6 +74,14 @@ export interface ProviderSessionDirectoryShape {
     ReadonlyArray<ProviderRuntimeBindingWithMetadata>,
     ProviderSessionDirectoryPersistenceError
   >;
+
+  /**
+   * Mark a session as recently active. Used by runtime event fan-out so the
+   * reaper measures idle time from last provider activity, not last user send.
+   */
+  readonly touchLastSeenAt: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void, ProviderSessionDirectoryPersistenceError>;
 }
 
 export class ProviderSessionDirectory extends Context.Service<
