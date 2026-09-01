@@ -292,6 +292,8 @@ interface PrimeSessionContext {
   readonly seenAgentMessageIds: Set<string>;
   /** Last emitted Prime RLM child state, used to dedupe streaming snapshots. */
   readonly subagents: Map<string, PrimeSubagentState>;
+  /** Active Prime heartbeat cron jobs currently published as monitor tasks. */
+  readonly heartbeatTaskIds: Map<string, string>;
 }
 
 function hasLiveRlmChildren(ctx: PrimeSessionContext): boolean {
@@ -308,12 +310,61 @@ function turnIsQuiescent(ctx: PrimeSessionContext): boolean {
     !ctx.parentCycleOpen &&
     !ctx.pendingParentWake &&
     ctx.queuedActionCount === 0 &&
+    ctx.pendingUserInputs.size === 0 &&
+    ctx.pendingApprovals.size === 0 &&
     !hasLiveRlmChildren(ctx)
   );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const PrimeCronJob = Schema.Struct({
+  id: Schema.String,
+  status: Schema.String,
+  source: Schema.optional(Schema.String),
+  label: Schema.optional(Schema.String),
+  prompt: Schema.optional(Schema.String),
+  nextRunAt: Schema.optional(Schema.String),
+});
+const PrimeHeartbeatList = Schema.Struct({
+  heartbeats: Schema.Array(Schema.Unknown),
+});
+const decodeHeartbeatList = Schema.decodeUnknownExit(PrimeHeartbeatList);
+const decodeCronJob = Schema.decodeUnknownExit(PrimeCronJob);
+
+function heartbeatTaskId(jobId: string): string {
+  return `prime-heartbeat:${jobId}`;
+}
+
+function heartbeatJobsFromListData(data: unknown): Array<typeof PrimeCronJob.Type> {
+  const list = decodeHeartbeatList(data);
+  if (Exit.isFailure(list)) {
+    return [];
+  }
+  const jobs: Array<typeof PrimeCronJob.Type> = [];
+  for (const entry of list.value.heartbeats) {
+    const rawJob = isRecord(entry) && isRecord(entry.job) ? entry.job : entry;
+    const decoded = decodeCronJob(rawJob);
+    if (Exit.isSuccess(decoded)) {
+      jobs.push(decoded.value);
+    }
+  }
+  return jobs;
+}
+
+function heartbeatTaskTitle(job: typeof PrimeCronJob.Type): string {
+  return nonEmptyTrimmed(job.label) ?? "Heartbeat";
+}
+
+function heartbeatTaskDescription(job: typeof PrimeCronJob.Type): string {
+  const prompt = nonEmptyTrimmed(job.prompt);
+  if (prompt !== undefined) {
+    return prompt.length > 200 ? `${prompt.slice(0, 197)}...` : prompt;
+  }
+  const nextRunAt = nonEmptyTrimmed(job.nextRunAt);
+  return nextRunAt !== undefined ? `Next run ${nextRunAt}` : "Scheduled Prime heartbeat";
 }
 
 function customContentText(content: unknown): string | undefined {
@@ -817,6 +868,105 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
       return lastTurnId;
     };
 
+    const syncHeartbeatTasks = (ctx: PrimeSessionContext) =>
+      Effect.gen(function* () {
+        if (ctx.stopped || sessions.get(ctx.threadId) !== ctx) {
+          return;
+        }
+        const activeJobs = yield* ctx.rpc
+          .request({ type: "list_heartbeats" }, { timeoutMs: 5_000 })
+          .pipe(
+            Effect.map((response) =>
+              heartbeatJobsFromListData(response.data).filter((job) => job.status === "active"),
+            ),
+            Effect.catch(() => Effect.succeed(Array.of<typeof PrimeCronJob.Type>())),
+          );
+        const activeIds = new Set(activeJobs.map((job) => job.id));
+        for (const [jobId, taskId] of [...ctx.heartbeatTaskIds.entries()]) {
+          if (activeIds.has(jobId)) {
+            continue;
+          }
+          ctx.heartbeatTaskIds.delete(jobId);
+          yield* publish({
+            type: "task.completed",
+            ...(yield* stamp),
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            threadId: ctx.threadId,
+            payload: {
+              taskId: RuntimeTaskId.make(taskId),
+              taskType: "monitor",
+              title: "Heartbeat",
+              status: "stopped",
+              summary: "Heartbeat stopped",
+            },
+          });
+        }
+        for (const job of activeJobs) {
+          if (ctx.heartbeatTaskIds.has(job.id)) {
+            continue;
+          }
+          const taskId = heartbeatTaskId(job.id);
+          ctx.heartbeatTaskIds.set(job.id, taskId);
+          const title = heartbeatTaskTitle(job);
+          const description = heartbeatTaskDescription(job);
+          yield* publish({
+            type: "task.started",
+            ...(yield* stamp),
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            threadId: ctx.threadId,
+            payload: {
+              taskId: RuntimeTaskId.make(taskId),
+              taskType: "monitor",
+              title,
+              description,
+            },
+          });
+        }
+      });
+
+    const openIncomingCycle = (ctx: PrimeSessionContext) =>
+      Effect.gen(function* () {
+        const existingTurnId = ctx.activeTurnId ?? lastOpenTurnId(ctx);
+        if (existingTurnId !== undefined) {
+          ctx.activeTurnId = existingTurnId;
+          ctx.parentCycleOpen = true;
+          ctx.pendingParentWake = false;
+          ctx.session = {
+            ...ctx.session,
+            status: "running",
+            activeTurnId: existingTurnId,
+            updatedAt: yield* nowIso,
+          };
+          return existingTurnId;
+        }
+        const turnId = TurnId.make(yield* randomUUIDv4);
+        ctx.activeTurnId = turnId;
+        ctx.settledTurnId = undefined;
+        ctx.latestAgentEndMessages = undefined;
+        ctx.turnStarted = true;
+        ctx.parentCycleOpen = true;
+        ctx.pendingParentWake = false;
+        ctx.turns.push({ id: turnId, items: [] });
+        ctx.session = {
+          ...ctx.session,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: yield* nowIso,
+        };
+        yield* publish({
+          type: "turn.started",
+          ...(yield* stamp),
+          provider: PROVIDER,
+          providerInstanceId: boundInstanceId,
+          threadId: ctx.threadId,
+          turnId,
+          payload: ctx.session.model ? { model: ctx.session.model } : {},
+        });
+        return turnId;
+      });
+
     const finalizeActiveTurn = (ctx: PrimeSessionContext, messages: ReadonlyArray<unknown>) =>
       Effect.gen(function* () {
         const turnId = ctx.activeTurnId;
@@ -1070,19 +1220,10 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
 
         const started = decodeAgentStart(raw);
         if (Exit.isSuccess(started)) {
-          const turnId = ctx.activeTurnId ?? lastOpenTurnId(ctx);
-          if (turnId === undefined) {
-            return;
-          }
-          ctx.activeTurnId = turnId;
-          ctx.parentCycleOpen = true;
-          ctx.pendingParentWake = false;
-          ctx.session = {
-            ...ctx.session,
-            status: "running",
-            activeTurnId: turnId,
-            updatedAt: yield* nowIso,
-          };
+          // Heartbeats and other daemon-scheduled prompts start a Prime cycle
+          // after T3 has already settled the user turn. Open a new T3 turn
+          // rather than dropping the cycle.
+          yield* openIncomingCycle(ctx);
           return;
         }
 
@@ -1321,9 +1462,11 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           // parent cycle. Keep the T3 turn open until that work drains.
           if (isAbortedTurn(messages) || primeFailureFromMessages(messages) !== undefined) {
             yield* finalizeActiveTurn(ctx, messages);
+            yield* syncHeartbeatTasks(ctx);
             return;
           }
           yield* settleActiveTurnIfQuiescent(ctx);
+          yield* syncHeartbeatTasks(ctx);
         }
       });
 
@@ -1615,6 +1758,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           queuedActionCount: 0,
           seenAgentMessageIds: new Set(),
           subagents: new Map(),
+          heartbeatTaskIds: new Map(),
         };
         sessions.set(input.threadId, ctx);
         sessionScopeTransferred = true;
@@ -1648,6 +1792,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           threadId: input.threadId,
           payload: { providerThreadId: state.sessionId },
         });
+        yield* syncHeartbeatTasks(ctx);
         return session;
       }).pipe(Effect.scoped);
 
