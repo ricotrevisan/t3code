@@ -53,6 +53,7 @@ import {
   parsePrimeModelSlug,
   primeModelSlug,
   PRIME_THINKING_LEVEL_OPTION_ID,
+  resolvePrimeSessionThinkingLevel,
 } from "../prime/primeModels.ts";
 import { type PrimeAdapterShape } from "../Services/PrimeAdapter.ts";
 
@@ -816,10 +817,11 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
             .pipe(Effect.mapError((cause) => toRpcRequestError("set_model", cause)));
           slug = nextSlug;
         }
-        const nextThinking = getModelSelectionStringOptionValue(
-          requested,
-          PRIME_THINKING_LEVEL_OPTION_ID,
-        );
+        const nextThinking = resolvePrimeSessionThinkingLevel({
+          modelId: parsed.modelId,
+          requested: getModelSelectionStringOptionValue(requested, PRIME_THINKING_LEVEL_OPTION_ID),
+          current: thinking,
+        });
         if (nextThinking !== undefined && nextThinking !== thinking) {
           yield* input.rpc
             .request({
