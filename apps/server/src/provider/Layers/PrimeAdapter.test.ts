@@ -1492,6 +1492,56 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
     }),
   );
 
+  it.effect("enables GLM-5.3-Flash thinking at high when the client omits a level", () =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const requestLogPath = NodePath.join(
+        NodeOS.tmpdir(),
+        `t3-prime-adapter-glm-thinking-${process.pid}-${now}.log`,
+      );
+      const binaryPath = yield* Effect.promise(() =>
+        makeMockPrimeWrapper({ T3_PRIME_MOCK_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(binaryPath, {
+        instanceId: ProviderInstanceId.make("primeAgent"),
+      });
+      const threadId = ThreadId.make("prime-glm-thinking-thread");
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("primeAgent"),
+          "opencode-go/glm-5.3-flash",
+        ),
+      });
+      assert.equal(session.model, "opencode-go/glm-5.3-flash");
+
+      const log = yield* waitForFileContent(requestLogPath, 80, "set_thinking_level");
+      const commands = log
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => decodeRequestLog(line).command);
+      assert.isTrue(
+        commands.some(
+          (command) =>
+            command.type === "set_model" &&
+            command.provider === "opencode-go" &&
+            command.modelId === "glm-5.3-flash",
+        ),
+      );
+      assert.isTrue(
+        commands.some(
+          (command) => command.type === "set_thinking_level" && command.level === "high",
+        ),
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("maps Prime RLM child updates to task activities", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig;
