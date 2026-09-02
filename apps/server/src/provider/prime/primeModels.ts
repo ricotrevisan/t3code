@@ -25,6 +25,21 @@ const PRIME_THINKING_LEVEL_LABELS: Readonly<Record<string, string>> = {
 
 const DEFAULT_THINKING_LEVEL_PREFERENCE = ["medium", "high", "low"] as const;
 
+/**
+ * GLM-5.3-Flash (Console Go / opencode-go) always thinks. Sending off/none
+ * fails with: "This model always engages in thinking and cannot be disabled;
+ * please use low, high, or max".
+ */
+const GLM_53_FLASH_THINKING_LEVEL_MAP: { readonly [x: string]: string | null } = {
+  off: null,
+  minimal: null,
+  low: "low",
+  medium: null,
+  high: "high",
+  xhigh: null,
+  max: "max",
+};
+
 export interface PrimeListedModel {
   readonly id: string;
   readonly name?: string | undefined;
@@ -75,6 +90,11 @@ export function primeModelSlug(input: { readonly provider: string; readonly id: 
   return `${input.provider}/${input.id}`;
 }
 
+export function isPrimeGlm53FlashModelId(modelId: string): boolean {
+  const id = modelId.trim().toLowerCase();
+  return id === "glm-5.3-flash" || id.endsWith("/glm-5.3-flash");
+}
+
 function thinkingLevelLabel(level: string): string {
   return PRIME_THINKING_LEVEL_LABELS[level] ?? level;
 }
@@ -99,6 +119,43 @@ function orderedThinkingLevels(thinkingLevelMap: {
   return [...available, ...extra];
 }
 
+export function resolvePrimeListedThinkingLevelMap(
+  model: PrimeListedModel,
+): { readonly [x: string]: string | null } | undefined {
+  return isPrimeGlm53FlashModelId(model.id)
+    ? GLM_53_FLASH_THINKING_LEVEL_MAP
+    : model.thinkingLevelMap;
+}
+
+function defaultThinkingLevel(
+  thinkingLevelMap: { readonly [x: string]: string | null } | undefined,
+): string | undefined {
+  if (thinkingLevelMap === undefined) {
+    return undefined;
+  }
+  const levels = orderedThinkingLevels(thinkingLevelMap);
+  if (levels.length === 0) {
+    return undefined;
+  }
+  return DEFAULT_THINKING_LEVEL_PREFERENCE.find((level) => levels.includes(level)) ?? levels[0];
+}
+
+export function resolvePrimeSessionThinkingLevel(input: {
+  readonly modelId: string;
+  readonly requested?: string | undefined;
+  readonly current?: string | undefined;
+}): string | undefined {
+  if (!isPrimeGlm53FlashModelId(input.modelId)) {
+    return input.requested;
+  }
+  const levels = orderedThinkingLevels(GLM_53_FLASH_THINKING_LEVEL_MAP);
+  const candidate = input.requested ?? input.current;
+  if (candidate !== undefined && levels.includes(candidate)) {
+    return candidate;
+  }
+  return defaultThinkingLevel(GLM_53_FLASH_THINKING_LEVEL_MAP);
+}
+
 export function primeThinkingCapabilities(
   thinkingLevelMap: { readonly [x: string]: string | null } | undefined,
 ): ModelCapabilities {
@@ -109,8 +166,7 @@ export function primeThinkingCapabilities(
   if (levels.length === 0) {
     return createModelCapabilities({ optionDescriptors: [] });
   }
-  const defaultLevel =
-    DEFAULT_THINKING_LEVEL_PREFERENCE.find((level) => levels.includes(level)) ?? levels[0];
+  const defaultLevel = defaultThinkingLevel(thinkingLevelMap) ?? levels[0];
   return createModelCapabilities({
     optionDescriptors: [
       {
@@ -149,7 +205,7 @@ export function mapPrimeAvailableModels(
       name,
       subProvider: provider,
       isCustom: false,
-      capabilities: primeThinkingCapabilities(model.thinkingLevelMap),
+      capabilities: primeThinkingCapabilities(resolvePrimeListedThinkingLevelMap(model)),
     });
   }
   return mapped.toSorted((left, right) => left.name.localeCompare(right.name));
