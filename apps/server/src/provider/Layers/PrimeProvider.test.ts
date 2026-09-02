@@ -13,6 +13,7 @@ import * as Schema from "effect/Schema";
 import {
   loggedInPrimeProvidersFromAuthData,
   mapPrimeAvailableModels,
+  resolvePrimeSessionThinkingLevel,
 } from "../prime/primeModels.ts";
 import { buildInitialPrimeProviderSnapshot, checkPrimeProviderStatus } from "./PrimeProvider.ts";
 
@@ -87,6 +88,59 @@ describe("mapPrimeAvailableModels", () => {
     expect(
       descriptor?.type === "select" ? descriptor.options.map((option) => option.id) : [],
     ).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("forces GLM-5.3-Flash onto low/high/max thinking because the model cannot disable it", () => {
+    const models = mapPrimeAvailableModels([
+      {
+        id: "glm-5.3-flash",
+        name: "GLM-5.3-Flash (2x usage)",
+        provider: "opencode-go",
+      },
+    ]);
+    expect(models).toHaveLength(1);
+    expect(models[0]?.slug).toBe("opencode-go/glm-5.3-flash");
+    const descriptor = models[0]?.capabilities?.optionDescriptors?.[0];
+    expect(descriptor?.id).toBe("thinkingLevel");
+    expect(
+      descriptor?.type === "select" ? descriptor.options.map((option) => option.id) : [],
+    ).toEqual(["low", "high", "max"]);
+    expect(
+      descriptor?.type === "select"
+        ? descriptor.options.find((option) => option.isDefault)?.id
+        : undefined,
+    ).toBe("high");
+    expect(descriptor?.type === "select" ? descriptor.currentValue : undefined).toBe("high");
+  });
+
+  it("clamps GLM-5.3-Flash session thinking off/medium to high and keeps low", () => {
+    expect(
+      resolvePrimeSessionThinkingLevel({
+        modelId: "glm-5.3-flash",
+        current: "medium",
+      }),
+    ).toBe("high");
+    expect(
+      resolvePrimeSessionThinkingLevel({
+        modelId: "glm-5.3-flash",
+        requested: "off",
+        current: "medium",
+      }),
+    ).toBe("high");
+    expect(
+      resolvePrimeSessionThinkingLevel({
+        modelId: "glm-5.3-flash",
+        requested: "low",
+        current: "off",
+      }),
+    ).toBe("low");
+    expect(
+      resolvePrimeSessionThinkingLevel({
+        modelId: "gpt-5.6-sol",
+        requested: undefined,
+        current: "medium",
+      }),
+    ).toBeUndefined();
   });
 
   it("hides models whose Prime provider is not logged in", () => {
