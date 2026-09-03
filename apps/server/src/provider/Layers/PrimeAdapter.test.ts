@@ -1719,6 +1719,107 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
     }),
   );
 
+  it.effect("settles after same-cycle parent work following a child report", () =>
+    Effect.gen(function* () {
+      const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
+      const adapter = yield* makeTestAdapter(binaryPath);
+      const threadId = ThreadId.make("prime-same-cycle-thread");
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const eventFiber = yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            runtimeEvents.push(event);
+            if (event.type === "turn.completed") {
+              yield* Deferred.succeed(turnCompleted, undefined);
+            }
+          }),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "same-cycle after children",
+        attachments: [],
+      });
+      yield* Deferred.await(turnCompleted);
+
+      const assistantDeltas = runtimeEvents.flatMap((event) =>
+        event.type === "content.delta" && event.payload.streamKind === "assistant_text"
+          ? [event.payload.delta]
+          : [],
+      );
+      assert.deepEqual(assistantDeltas, ["## Same-cycle verdict"]);
+      const completedEvents = runtimeEvents.filter((event) => event.type === "turn.completed");
+      assert.lengthOf(completedEvents, 1);
+      assert.equal(completedEvents[0]?.turnId, turn.turnId);
+      const verdictIndex = runtimeEvents.findIndex(
+        (event) =>
+          event.type === "content.delta" &&
+          event.payload.streamKind === "assistant_text" &&
+          event.payload.delta.includes("## Same-cycle verdict"),
+      );
+      const completedIndex = runtimeEvents.findIndex((event) => event.type === "turn.completed");
+      assert.isTrue(verdictIndex >= 0 && completedIndex > verdictIndex);
+
+      yield* adapter.stopSession(threadId);
+      yield* Fiber.interrupt(eventFiber);
+    }),
+  );
+
+  it.effect("flushes assistant text from agent_end when Prime skipped deltas", () =>
+    Effect.gen(function* () {
+      const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
+      const adapter = yield* makeTestAdapter(binaryPath);
+      const threadId = ThreadId.make("prime-agent-end-text-thread");
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const eventFiber = yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            runtimeEvents.push(event);
+            if (event.type === "turn.completed") {
+              yield* Deferred.succeed(turnCompleted, undefined);
+            }
+          }),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "message in agent_end only",
+        attachments: [],
+      });
+      yield* Deferred.await(turnCompleted);
+
+      const assistantDeltas = runtimeEvents.flatMap((event) =>
+        event.type === "content.delta" && event.payload.streamKind === "assistant_text"
+          ? [event.payload.delta]
+          : [],
+      );
+      assert.deepEqual(assistantDeltas, ["Final report without deltas"]);
+
+      yield* adapter.stopSession(threadId);
+      yield* Fiber.interrupt(eventFiber);
+    }),
+  );
+
   it.effect(
     "opens a new turn for a post-settle heartbeat cycle and maps jobs to monitor tasks",
     () =>
