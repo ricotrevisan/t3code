@@ -45,6 +45,7 @@ import * as Stream from "effect/Stream";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 
+import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 
@@ -66,6 +67,10 @@ export const defaultLabBrowserCommand = (): string => {
   if (NodeFs.existsSync(local)) return local;
   return "t3-browser";
 };
+
+export const isLabChromiumAutomationEnabled = (
+  config: Pick<ServerConfig.ServerConfig["Service"], "mode" | "startupPresentation">,
+): boolean => config.mode === "web" && config.startupPresentation === "headless";
 
 export const resolveLabNavigationUrl = (input: {
   readonly url?: string | undefined;
@@ -162,6 +167,20 @@ export interface LabBrowserRuntime {
   viewportSetting: PreviewViewportSetting;
 }
 
+export const spawnLabBrowser = async (command: string): Promise<NodeChildProcess.ChildProcess> => {
+  const child = NodeChildProcess.spawn(command, [], {
+    stdio: "ignore",
+    env: process.env,
+    detached: false,
+  });
+  await new Promise<void>((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
+  child.unref?.();
+  return child;
+};
+
 const bindPage = (
   runtime: LabBrowserRuntime,
   page: Page,
@@ -210,12 +229,7 @@ export const ensureLabChromium = async (options?: {
     // not up yet
   }
   const command = options?.command ?? defaultLabBrowserCommand();
-  const child = NodeChildProcess.spawn(command, [], {
-    stdio: "ignore",
-    env: process.env,
-    detached: false,
-  });
-  child.unref?.();
+  const child = await spawnLabBrowser(command);
   try {
     await waitForCdp(origin, 20_000);
   } catch (cause) {
@@ -608,10 +622,16 @@ export const runLabPreviewAutomationHost = (options?: {
     );
   }).pipe(Effect.withSpan("LabChromiumAutomationHost.run"));
 
-export const layer = Layer.effectDiscard(
+const liveLayer = Layer.effectDiscard(
   runLabPreviewAutomationHost().pipe(
     Effect.catchCause((cause) => Effect.logError("Lab Chromium preview host stopped", { cause })),
     Effect.forkScoped,
     Effect.asVoid,
+  ),
+);
+
+export const layer = Layer.unwrap(
+  ServerConfig.ServerConfig.pipe(
+    Effect.map((config) => (isLabChromiumAutomationEnabled(config) ? liveLayer : Layer.empty)),
   ),
 );
