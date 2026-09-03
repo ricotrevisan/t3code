@@ -290,6 +290,8 @@ interface PrimeSessionContext {
   /** Inbound child report that will start another parent cycle. */
   pendingParentWake: boolean;
   queuedActionCount: number;
+  /** Assistant text already streamed as content.delta for the active T3 turn. */
+  streamedAssistantText: string;
   readonly seenAgentMessageIds: Set<string>;
   /** Last emitted Prime RLM child state, used to dedupe streaming snapshots. */
   readonly subagents: Map<string, PrimeSubagentState>;
@@ -315,6 +317,34 @@ function turnIsQuiescent(ctx: PrimeSessionContext): boolean {
     ctx.pendingApprovals.size === 0 &&
     !hasLiveRlmChildren(ctx)
   );
+}
+
+function assistantTextFromPrimeMessages(messages: ReadonlyArray<unknown>): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (!isRecord(message) || message.role !== "assistant") {
+      continue;
+    }
+    const text = customContentText(message.content);
+    if (text !== undefined) {
+      parts.push(text);
+    }
+  }
+  return parts.join("");
+}
+
+function unreadAssistantText(already: string, full: string): string {
+  if (full.length === 0 || already === full || already.endsWith(full)) {
+    return "";
+  }
+  return full.startsWith(already) ? full.slice(already.length) : full;
+}
+
+function noteParentCycleActivity(ctx: PrimeSessionContext): void {
+  // pendingParentWake only covers the silent gap before a hidden parent
+  // wake. Parent tokens or tools mean that wake already started, including
+  // same-cycle work after children finish.
+  ctx.pendingParentWake = false;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -950,6 +980,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         ctx.turnStarted = true;
         ctx.parentCycleOpen = true;
         ctx.pendingParentWake = false;
+        ctx.streamedAssistantText = "";
         ctx.turns.push({ id: turnId, items: [] });
         ctx.session = {
           ...ctx.session,
@@ -1329,6 +1360,8 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           if (text.length === 0) {
             return;
           }
+          noteParentCycleActivity(ctx);
+          ctx.streamedAssistantText += text;
           const turn = ctx.turns.find((entry) => entry.id === turnId);
           if (turn) {
             turn.items.push({ type: "assistant_text", text });
@@ -1357,6 +1390,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           if (text.length === 0) {
             return;
           }
+          noteParentCycleActivity(ctx);
           yield* publish({
             type: "content.delta",
             ...(yield* stamp),
@@ -1377,6 +1411,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
 
         const toolStarted = decodeToolExecutionStart(raw);
         if (Exit.isSuccess(toolStarted)) {
+          noteParentCycleActivity(ctx);
           const detail = toolResultDetail(toolStarted.value.args);
           yield* publish({
             type: "item.started",
@@ -1399,6 +1434,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
 
         const toolUpdated = decodeToolExecutionUpdate(raw);
         if (Exit.isSuccess(toolUpdated)) {
+          noteParentCycleActivity(ctx);
           // Prime's partialResult is cumulative. Replace the previous result;
           // never append, or the T3 websocket balloons.
           const detail = toolResultDetail(toolUpdated.value.partialResult);
@@ -1426,6 +1462,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
 
         const toolEnded = decodeToolExecutionEnd(raw);
         if (Exit.isSuccess(toolEnded)) {
+          noteParentCycleActivity(ctx);
           const detail = toolResultDetail(toolEnded.value.result);
           yield* publish({
             type: "item.completed",
@@ -1460,6 +1497,28 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           }
           ctx.latestAgentEndMessages = messages;
           ctx.parentCycleOpen = false;
+          const unreadText = unreadAssistantText(
+            ctx.streamedAssistantText,
+            assistantTextFromPrimeMessages(messages),
+          );
+          if (unreadText.length > 0) {
+            ctx.streamedAssistantText += unreadText;
+            if (turn) {
+              turn.items.push({ type: "assistant_text", text: unreadText });
+            }
+            yield* publish({
+              type: "content.delta",
+              ...(yield* stamp),
+              provider: PROVIDER,
+              providerInstanceId: boundInstanceId,
+              threadId: ctx.threadId,
+              turnId,
+              payload: {
+                streamKind: "assistant_text",
+                delta: unreadText,
+              },
+            });
+          }
           // Prime RLM children reply after this agent_end and start a new
           // parent cycle. Keep the T3 turn open until that work drains.
           if (isAbortedTurn(messages) || primeFailureFromMessages(messages) !== undefined) {
@@ -1758,6 +1817,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           parentCycleOpen: false,
           pendingParentWake: false,
           queuedActionCount: 0,
+          streamedAssistantText: "",
           seenAgentMessageIds: new Set(),
           subagents: new Map(),
           heartbeatTaskIds: new Map(),
@@ -1952,6 +2012,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         ctx.settledTurnId = undefined;
         ctx.parentCycleOpen = true;
         ctx.pendingParentWake = false;
+        ctx.streamedAssistantText = "";
         ctx.turns.push({
           id: turnId,
           items: [

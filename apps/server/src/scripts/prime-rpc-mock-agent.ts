@@ -644,6 +644,74 @@ function handle(command: Record<string, unknown>): void {
         });
         return;
       }
+      if (message === "same-cycle after children") {
+        send({ type: "agent_start" });
+        send({
+          type: "rlm_child_update",
+          child: {
+            id: "prime-sub-same",
+            sessionName: "same-cycle-child",
+            model: "openrouter/ox-alpha",
+            label: "Scan deps",
+            status: "running",
+            sessionDir: "/tmp/prime-sub-same",
+            activity: { kind: "executing", toolName: "ipython" },
+          },
+        });
+        send({
+          type: "rlm_child_update",
+          child: {
+            id: "prime-sub-same",
+            sessionName: "same-cycle-child",
+            model: "openrouter/ox-alpha",
+            label: "Scan deps",
+            status: "done",
+            repliedSinceTask: false,
+            answerPreview: "Unused iconify stack",
+            sessionDir: "/tmp/prime-sub-same",
+          },
+        });
+        send({
+          type: "tool_execution_start",
+          toolCallId: "prime-same-1",
+          toolName: "ipython",
+          args: { code: "delete subagents" },
+        });
+        send({
+          type: "tool_execution_end",
+          toolCallId: "prime-same-1",
+          toolName: "ipython",
+          result: { content: [{ type: "text", text: "deleting RLMSubagent" }] },
+          isError: false,
+        });
+        finishTurn(() => {
+          send({
+            type: "agent_end",
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "## Same-cycle verdict" }],
+              },
+            ],
+          });
+        });
+        return;
+      }
+      if (message === "message in agent_end only") {
+        send({ type: "agent_start" });
+        finishTurn(() => {
+          send({
+            type: "agent_end",
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "Final report without deltas" }],
+              },
+            ],
+          });
+        });
+        return;
+      }
       if (message === "late child report") {
         send({ type: "agent_start" });
         send({
