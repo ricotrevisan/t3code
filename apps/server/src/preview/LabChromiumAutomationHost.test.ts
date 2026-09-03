@@ -9,9 +9,11 @@ import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 import {
   LAB_CHROMIUM_CLIENT_ID,
   executeLabPreviewOperation,
+  isLabChromiumAutomationEnabled,
   makeLabPreviewAutomationHost,
   resolveLabNavigationUrl,
   serializeLabHostError,
+  spawnLabBrowser,
 } from "./LabChromiumAutomationHost.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
@@ -44,6 +46,21 @@ it("serializes unknown failures as execution errors", () => {
     timeoutMs: 15_000,
   });
   expect(serialized._tag).toBe("PreviewAutomationExecutionError");
+});
+
+it.each([
+  [{ mode: "web", startupPresentation: "headless" }, true],
+  [{ mode: "web", startupPresentation: "browser" }, false],
+  [{ mode: "desktop", startupPresentation: "headless" }, false],
+  [{ mode: "desktop", startupPresentation: "browser" }, false],
+] as const)("enables the lab Chromium host only for headless web startup", (config, expected) => {
+  expect(isLabChromiumAutomationEnabled(config)).toBe(expected);
+});
+
+it("reports a missing browser command without an unhandled child-process error", async () => {
+  await expect(
+    spawnLabBrowser(`t3-browser-command-that-does-not-exist-${process.pid}`),
+  ).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it.effect("lab host identity lets the broker route preview open and status", () =>
