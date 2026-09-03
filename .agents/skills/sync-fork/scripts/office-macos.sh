@@ -40,8 +40,7 @@ SHA="$(git -C "$WT" rev-parse --short HEAD)"
 VP="$REPO/node_modules/.bin/vp"
 [[ -x "$VP" ]] || { echo "error: vp not found at $VP" >&2; exit 3; }
 (cd "$WT" && "$MISE" x node@24.19.0 -- "$VP" i)
-export PATH="$WT/node_modules/.bin:$PATH"
-(cd "$WT" && "$MISE" x node@24.19.0 -- node scripts/build-desktop-artifact.ts --platform mac --target dmg --arch arm64)
+(cd "$WT" && "$MISE" x node@24.19.0 -- /bin/bash -c 'export PATH="/opt/homebrew/bin:'"$WT"'/node_modules/.bin:$PATH"; node scripts/build-desktop-artifact.ts --platform mac --target dmg --arch arm64')
 
 DMG="$(ls -t "$WT"/release/*.dmg 2>/dev/null | head -n 1 || true)"
 if [[ -z "$DMG" ]]; then
