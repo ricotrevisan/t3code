@@ -888,6 +888,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         provider: canonicalEvent.provider,
         eventType: canonicalEvent.type,
       });
+      if (SESSION_ACTIVITY_EVENT_TYPES.has(canonicalEvent.type)) {
+        yield* directory.touchLastSeenAt(canonicalEvent.threadId).pipe(
+          Effect.catch(() =>
+            Effect.logWarning("provider.session.touch-last-seen-failed", {
+              threadId: canonicalEvent.threadId,
+              eventType: canonicalEvent.type,
+            }),
+          ),
+        );
+      }
       if (canonicalEvent.type === "turn.started") {
         yield* observeTurnStartedForAnalytics(source, canonicalEvent);
       } else if (canonicalEvent.type === "model.rerouted") {
@@ -936,28 +946,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
       yield* processFallbackCompactionEvent(pendingCompaction, canonicalEvent);
     });
-    Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
-      Effect.flatMap((canonicalEvent) =>
-        increment(providerRuntimeEventsTotal, {
-          provider: canonicalEvent.provider,
-          eventType: canonicalEvent.type,
-        }).pipe(
-          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
-          Effect.tap(() =>
-            SESSION_ACTIVITY_EVENT_TYPES.has(canonicalEvent.type)
-              ? directory.touchLastSeenAt(canonicalEvent.threadId).pipe(
-                  Effect.catch(() =>
-                    Effect.logWarning("provider.session.touch-last-seen-failed", {
-                      threadId: canonicalEvent.threadId,
-                      eventType: canonicalEvent.type,
-                    }),
-                  ),
-                )
-              : Effect.void,
-          ),
-        ),
-      ),
-    );
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
   // are currently wired into the runtime event bus". It both tracks the set

@@ -881,7 +881,6 @@ export function NewTaskDraftScreen(props: {
     const selectedWorktreePath =
       draft.workspaceSelection?.worktreePath ?? flow.selectedWorktreePath;
     const startFromOrigin = draft.workspaceSelection?.startFromOrigin ?? flow.startFromOrigin;
-    const runtimeMode = draft.runtimeMode ?? flow.runtimeMode;
     const interactionMode = resolveProviderInteractionMode(
       selectedEnvironmentServerConfig?.providers.find(
         (provider) => provider.instanceId === modelSelection?.instanceId,
@@ -894,9 +893,6 @@ export function NewTaskDraftScreen(props: {
         (provider) => provider.instanceId === modelSelection?.instanceId,
       )?.supportedRuntimeModes,
     );
-    const interactionMode = flow.planModeEnabled
-      ? (draft.interactionMode ?? flow.interactionMode)
-      : "default";
     const initialMessageText = draft.text.trim();
 
     if (

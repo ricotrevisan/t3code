@@ -671,7 +671,6 @@ export function useThreadOutboxDrain(): void {
           "Antigravity model unavailable. Set it up on web or desktop, or choose another model.",
         );
       }
-      const settings = resolveQueuedThreadSettings(queuedMessage, thread);
       const runtimeMode = runtimeModeForDelivery(
         queuedMessage,
         settings.modelSelection,
@@ -787,11 +786,8 @@ export function useThreadOutboxDrain(): void {
             attachments: prepared.attachments,
           },
           modelSelection: sendSettings.modelSelection,
-          runtimeMode: sendSettings.runtimeMode,
-          interactionMode: sendSettings.interactionMode,
-          modelSelection: settings.modelSelection,
           runtimeMode,
-          interactionMode: settings.interactionMode,
+          interactionMode: sendSettings.interactionMode,
           createdAt: queuedMessage.createdAt,
         },
       });
@@ -898,10 +894,11 @@ export function useThreadOutboxDrain(): void {
         queuedMessage,
         settings,
         currentConfig.providers,
+      );
       const runtimeMode = runtimeModeForDelivery(
         queuedMessage,
-        modelSelection,
-        queuedMessage.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+        sendSettings.modelSelection,
+        sendSettings.runtimeMode,
       );
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
@@ -915,11 +912,8 @@ export function useThreadOutboxDrain(): void {
           text: queuedMessage.text.trim(),
           uploadedAttachments: prepared.attachments,
           modelSelection: sendSettings.modelSelection,
-          runtimeMode: sendSettings.runtimeMode,
-          interactionMode: sendSettings.interactionMode,
-          modelSelection,
           runtimeMode,
-          interactionMode: queuedMessage.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+          interactionMode: sendSettings.interactionMode,
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,
           worktreePath: creation.worktreePath,
@@ -949,7 +943,6 @@ export function useThreadOutboxDrain(): void {
       }
       return outcome === "removed";
     },
-    [makeDeliveryHelpers, restoreQueuedMessage, startTurn],
     [makeDeliveryHelpers, restoreQueuedMessage, runtimeModeForDelivery, serverConfigs, startTurn],
   );
 

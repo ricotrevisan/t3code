@@ -90,6 +90,7 @@ If that port is already in use, choose another with
 `--tailscale-serve-port`. See `npx t3 pair --help` for other pairing options.
 
 ### Hosted web app
+
 #### Opening a Remote Project in an Editor
 
 When a remote environment has an SSH route, **Open in VS Code** and **Open in Zed** launch the

@@ -7,8 +7,8 @@ import {
   Icon,
   OpenAI,
   OpenCodeIcon,
+  PrimeAgentIcon,
 } from "../Icons";
-import { ClaudeAI, CursorIcon, GrokIcon, Icon, OpenAI, OpenCodeIcon, PrimeAgentIcon } from "../Icons";
 
 export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
   [ProviderDriverKind.make("codex")]: OpenAI,

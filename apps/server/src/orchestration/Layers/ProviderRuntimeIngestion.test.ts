@@ -619,6 +619,8 @@ describe("ProviderRuntimeIngestion", () => {
       state: "running",
       requestedAt: pendingAt,
     });
+  });
+
   it("recovers an orphaned session when fresh activity proves its turn is still running", async () => {
     const harness = await createHarness();
     const turnId = asTurnId("turn-survived-restart");

@@ -426,10 +426,6 @@ export const make = (
         ),
       );
 
-    const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
-      ...(options.spawn.env ? { env: options.spawn.env } : {}),
-      extendEnv: options.spawn.extendEnv ?? true,
-    });
     const direnvEnv = loadDirenvExportedEnv(options.spawn.cwd, {
       env: options.spawn.env ?? process.env,
     });

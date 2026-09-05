@@ -105,6 +105,7 @@ current client support.
 
 Model classification has its own [manifest constraints](./model-manifest.md). Assistant-reference
 handling is documented under [citations](./assistant-citations.md).
+
 # Provider architecture
 
 > For maintainers. Using T3 Code? See [docs/user](../user/).

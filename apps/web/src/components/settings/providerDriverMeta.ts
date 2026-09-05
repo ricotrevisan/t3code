@@ -83,6 +83,8 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Antigravity",
     icon: AntigravityIcon,
     settingsSchema: AntigravitySettings,
+  },
+  {
     value: ProviderDriverKind.make("primeAgent"),
     label: "Prime Agent",
     icon: PrimeAgentIcon,

@@ -59,6 +59,11 @@ export type GetProviderSessionRuntimeInput = typeof GetProviderSessionRuntimeInp
 export const DeleteProviderSessionRuntimeInput = Schema.Struct({ threadId: ThreadId });
 export type DeleteProviderSessionRuntimeInput = typeof DeleteProviderSessionRuntimeInput.Type;
 
+export const TouchProviderSessionRuntimeInput = Schema.Struct({
+  threadId: ThreadId,
+  lastSeenAt: IsoDateTime,
+});
+export type TouchProviderSessionRuntimeInput = typeof TouchProviderSessionRuntimeInput.Type;
 export const RecordImportedTranscriptInput = Schema.Struct({
   threadId: ThreadId,
   source: AgentSessionImportSource,
@@ -68,11 +73,6 @@ export type RecordImportedTranscriptInput = typeof RecordImportedTranscriptInput
 export interface ProviderSessionRuntimeUpsertOptions {
   readonly onConflict?: "update" | "ignore";
 }
-export const TouchProviderSessionRuntimeInput = Schema.Struct({
-  threadId: ThreadId,
-  lastSeenAt: IsoDateTime,
-});
-export type TouchProviderSessionRuntimeInput = typeof TouchProviderSessionRuntimeInput.Type;
 
 /**
  * ProviderSessionRuntimeRepository - Service tag for provider runtime persistence.
@@ -160,13 +160,13 @@ const GetRuntimeRequestSchema = Schema.Struct({
 
 const DeleteRuntimeRequestSchema = GetRuntimeRequestSchema;
 
-const RecordImportedTranscriptRequestSchema = RecordImportedTranscriptInput.mapFields(
-  Struct.assign({ source: Schema.fromJsonString(AgentSessionImportSource) }),
-);
 const TouchRuntimeRequestSchema = Schema.Struct({
   threadId: ThreadId,
   lastSeenAt: IsoDateTime,
 });
+const RecordImportedTranscriptRequestSchema = RecordImportedTranscriptInput.mapFields(
+  Struct.assign({ source: Schema.fromJsonString(AgentSessionImportSource) }),
+);
 
 function toPersistenceSqlOrDecodeError(
   sqlOperation: string,
@@ -380,8 +380,6 @@ export const make = Effect.gen(function* () {
       `,
   });
 
-  const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) =>
-    (options?.onConflict === "ignore" ? insertRuntimeRow(runtime) : upsertRuntimeRow(runtime)).pipe(
   const touchRuntimeLastSeenAt = SqlSchema.void({
     Request: TouchRuntimeRequestSchema,
     execute: ({ threadId, lastSeenAt }) =>
@@ -392,8 +390,8 @@ export const make = Effect.gen(function* () {
       `,
   });
 
-  const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime) =>
-    upsertRuntimeRow(runtime).pipe(
+  const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) =>
+    (options?.onConflict === "ignore" ? insertRuntimeRow(runtime) : upsertRuntimeRow(runtime)).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProviderSessionRuntimeRepository.upsert:query",

@@ -592,7 +592,7 @@ export type CursorSettings = typeof CursorSettings.Type;
 
 export const GrokSettings = makeProviderSettingsSchema(
   {
-    // Off by default (like OpenCode): the binding is not yet
+    // Off by default (like Cursor and OpenCode): the binding is not yet
     // stable enough to probe on every install. Users opt in from Settings.
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
@@ -634,10 +634,6 @@ export type AntigravityAuthMethod = typeof AntigravityAuthMethod.Type;
 
 export const AntigravitySettings = makeProviderSettingsSchema(
   {
-export const PrimeSettings = makeProviderSettingsSchema(
-  {
-    // Off by default (like Grok and OpenCode): the binding is not
-    // yet stable enough to probe on every install. Users opt in from Settings.
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
@@ -664,20 +660,6 @@ export const PrimeSettings = makeProviderSettingsSchema(
         providerSettingsForm: {
           control: "password",
           placeholder: "Optional",
-    binaryPath: makeBinaryPathSetting("prime-agent").pipe(
-      Schema.annotateKey({
-        title: "Binary path",
-        description: "Path to the Prime Agent binary used by this instance.",
-        providerSettingsForm: { placeholder: "prime-agent", clearWhenEmpty: "omit" },
-      }),
-    ),
-    launchArgs: TrimmedString.pipe(
-      Schema.withDecodingDefault(Effect.succeed("")),
-      Schema.annotateKey({
-        title: "Launch arguments",
-        description: "Additional CLI arguments passed on session start.",
-        providerSettingsForm: {
-          placeholder: "e.g. --thinking high",
           clearWhenEmpty: "omit",
         },
       }),
@@ -716,16 +698,40 @@ export const PrimeSettings = makeProviderSettingsSchema(
   { order: ["authMethod", "apiKey", "gcpProject", "gcpLocation", "binaryPath"] },
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
-  },
+
+export const PrimeSettings = makeProviderSettingsSchema(
   {
-    order: ["binaryPath", "launchArgs"],
+    // Off by default: users opt in from Settings.
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("prime-agent").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the Prime Agent binary used by this instance.",
+        providerSettingsForm: { placeholder: "prime-agent", clearWhenEmpty: "omit" },
+      }),
+    ),
+    launchArgs: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Launch arguments",
+        description: "Additional CLI arguments passed on session start.",
+        providerSettingsForm: {
+          placeholder: "e.g. --thinking high",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
   },
+  { order: ["binaryPath", "launchArgs"] },
 );
 export type PrimeSettings = typeof PrimeSettings.Type;
 
 export const OpenCodeSettings = makeProviderSettingsSchema(
   {
-    // Off by default (like Grok): the binding is not yet stable
+    // Off by default (like Cursor and Grok): the binding is not yet stable
     // enough to probe on every install. Users opt in from Settings.
     enabled: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
@@ -1007,7 +1013,7 @@ export const providerInstanceConfigEnabledFlag = (config: unknown): boolean | un
  * through `DEFAULT_SERVER_SETTINGS`, so the schema's decoding default stays
  * the single source of truth. Unknown (fork) drivers default to enabled.
  */
-const defaultEnabledForDriver = (driver: ProviderDriverKind): boolean => {
+export const defaultEnabledForDriver = (driver: ProviderDriverKind): boolean => {
   const legacyDefaults = DEFAULT_SERVER_SETTINGS.providers as Record<
     string,
     { readonly enabled?: boolean } | undefined

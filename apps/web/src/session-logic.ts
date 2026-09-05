@@ -11,6 +11,7 @@ import {
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
   ApprovalRequestId,
+  ProviderDriverKind,
   isToolLifecycleItemType,
   type AssetResource,
   type OrchestrationLatestTurn,

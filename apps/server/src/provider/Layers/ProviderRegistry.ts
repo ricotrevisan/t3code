@@ -101,14 +101,7 @@ export function upsertProviderWorkspaceSnapshot(
 }
 
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
-  const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
-  const isCodex = provider.driver === ProviderDriverKind.make("codex");
-  if (!isAntigravity && !isCodex && provider.driver !== ProviderDriverKind.make("opencode")) {
   if (provider.driver === ProviderDriverKind.make("primeAgent")) {
-    // Prime's authenticated and unauthenticated snapshots are authoritative:
-    // they contain exactly the models from providers currently present in
-    // auth.json. Unknown auth means the isolated model probe did not finish,
-    // so keep the last good catalog while the installed provider recovers.
     return (
       provider.enabled &&
       provider.installed &&
@@ -117,7 +110,9 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
     );
   }
 
-  if (provider.driver !== ProviderDriverKind.make("opencode")) {
+  const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
+  const isCodex = provider.driver === ProviderDriverKind.make("codex");
+  if (!isAntigravity && !isCodex && provider.driver !== ProviderDriverKind.make("opencode")) {
     return true;
   }
 
