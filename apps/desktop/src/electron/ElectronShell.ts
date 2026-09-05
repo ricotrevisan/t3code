@@ -1,9 +1,8 @@
 import {
   REMOTE_CAPABLE_EDITOR_IDS,
-  remoteSchemeForEditor,
+  remoteOpenDefinitionForEditor,
   type SystemSettingsPane,
 } from "@t3tools/contracts";
-import { REMOTE_CAPABLE_EDITOR_IDS, remoteOpenDefinitionForEditor } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";

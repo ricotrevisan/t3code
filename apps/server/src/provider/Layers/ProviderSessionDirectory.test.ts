@@ -379,45 +379,6 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
         const directory = yield* ProviderSessionDirectory;
         const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
         const threadId = ThreadId.make("thread-provider-change");
-  it("touches lastSeenAt without rewriting resume state", () =>
-    Effect.gen(function* () {
-      const directory = yield* ProviderSessionDirectory;
-      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
-      const threadId = ThreadId.make("thread-touch-last-seen");
-
-      yield* runtimeRepository.upsert({
-        threadId,
-        providerName: "primeAgent",
-        providerInstanceId: null,
-        adapterKey: "primeAgent",
-        runtimeMode: "full-access",
-        status: "running",
-        lastSeenAt: "2026-04-14T12:00:00.000Z",
-        resumeCursor: {
-          opaque: "resume-touch",
-        },
-        runtimePayload: {
-          cwd: "/tmp/touch",
-        },
-      });
-
-      yield* directory.touchLastSeenAt(threadId);
-
-      const runtime = yield* runtimeRepository.getByThreadId({ threadId });
-      assert.equal(Option.isSome(runtime), true);
-      if (Option.isSome(runtime)) {
-        assert.notEqual(runtime.value.lastSeenAt, "2026-04-14T12:00:00.000Z");
-        assert.match(runtime.value.lastSeenAt, /^\d{4}-\d{2}-\d{2}T/);
-        assert.deepEqual(runtime.value.resumeCursor, { opaque: "resume-touch" });
-        assert.deepEqual(runtime.value.runtimePayload, { cwd: "/tmp/touch" });
-      }
-    }));
-
-  it("resets adapterKey to the new provider when provider changes without an explicit adapter key", () =>
-    Effect.gen(function* () {
-      const directory = yield* ProviderSessionDirectory;
-      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
-      const threadId = ThreadId.make("thread-provider-change");
 
         yield* runtimeRepository.upsert({
           threadId,
