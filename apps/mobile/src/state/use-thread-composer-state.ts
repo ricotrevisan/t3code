@@ -340,14 +340,11 @@ export function useThreadComposerState() {
       text,
       attachments,
       modelSelection,
-      runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
+      runtimeMode: runtimeModeForSend,
       interactionMode: resolveProviderInteractionMode(
         provider,
         draft.interactionMode ?? thread.interactionMode,
       ),
-      modelSelection: draft.modelSelection ?? thread.modelSelection,
-      runtimeMode: runtimeModeForSend,
-      interactionMode: draft.interactionMode ?? thread.interactionMode,
       createdAt: metadata.createdAt,
     });
     clearComposerDraftContent(threadKey, { deferAttachmentCleanup: true });

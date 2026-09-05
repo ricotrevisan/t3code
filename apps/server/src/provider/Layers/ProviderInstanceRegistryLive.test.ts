@@ -216,6 +216,8 @@ const makeTildeProviderFixtures = Effect.fn(
     claudeHomePath,
     codexScriptPath,
   };
+});
+
 const makePrimeConfig = (overrides: Partial<PrimeSettings>): PrimeSettings => ({
   enabled: false,
   binaryPath: "prime-agent",
