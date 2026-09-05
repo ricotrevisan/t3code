@@ -36,9 +36,6 @@ import {
   subscribe,
   subscribeDynamicWithSession,
   EnvironmentRpcUnavailableError,
-  request,
-  runStream,
-  subscribe,
 } from "./client.ts";
 
 const TARGET = new PrimaryConnectionTarget({

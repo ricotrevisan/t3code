@@ -6950,10 +6950,8 @@ export default function ChatView(props: ChatViewProps) {
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
-        runtimeMode,
-        interactionMode: sendInteractionMode,
         runtimeMode: runtimeModeForSend,
-        interactionMode,
+        interactionMode: sendInteractionMode,
       });
       if (settingsResult._tag === "Failure") {
         failure = settingsResult;
@@ -6983,10 +6981,8 @@ export default function ChatView(props: ChatViewProps) {
                       projectId: activeProject.id,
                       title,
                       modelSelection: threadCreateModelSelection,
-                      runtimeMode,
-                      interactionMode: sendInteractionMode,
                       runtimeMode: runtimeModeForSend,
-                      interactionMode,
+                      interactionMode: sendInteractionMode,
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
@@ -7025,10 +7021,8 @@ export default function ChatView(props: ChatViewProps) {
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: title,
-          runtimeMode,
-          interactionMode: sendInteractionMode,
           runtimeMode: runtimeModeForSend,
-          interactionMode,
+          interactionMode: sendInteractionMode,
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
         },

@@ -7,6 +7,7 @@ import {
   ClientSettingsPatch,
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
+  defaultEnabledForDriver,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
