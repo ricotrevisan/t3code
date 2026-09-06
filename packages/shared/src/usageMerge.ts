@@ -10,6 +10,7 @@ import {
   USAGE_MERGE_COMPATIBLE_SINCE,
   type EnvironmentId,
   type UsageBucket,
+  type UsageHarnessKind,
   type UsageProviderKind,
   type UsageSourceFingerprint,
   type UsageSummary,
@@ -27,6 +28,8 @@ export interface ProviderTotals {
   readonly totalTokens: number;
   readonly records: number;
   readonly sessions: number;
+  readonly nativeSessions: number;
+  readonly primeAgentSessions: number;
   readonly costShare: number;
   readonly tokenShare: number;
 }
@@ -83,18 +86,34 @@ export interface MergedUsage {
   readonly staleEnvironments: readonly EnvironmentId[];
 }
 
+/** Older servers omit `harness`; that is native CLI usage. */
+export function usageHarnessOf(harness: UsageHarnessKind | undefined): UsageHarnessKind {
+  return harness ?? "native";
+}
+
+type ProviderHarnessKey = `${UsageProviderKind}\0${UsageHarnessKind}`;
+
+function providerHarnessKey(
+  provider: UsageProviderKind,
+  harness: UsageHarnessKind,
+): ProviderHarnessKey {
+  return `${provider}\0${harness}`;
+}
+
 /**
  * Two sources are the same physical transcript directory only when host,
- * provider, path and filesystem identity all agree.
+ * provider, harness, path and filesystem identity all agree.
  *
  * `volumeId` is what stops two machines that happen to share a hostname and a
  * home path, which is every Mac in a fleet, from collapsing into one source and
- * having one of them silently dropped.
+ * having one of them silently dropped. `harness` keeps an environment-local
+ * Prime Agent directory from collapsing into a native provider home.
  */
 function fingerprintKey(fingerprint: UsageSourceFingerprint): string {
   return [
     fingerprint.hostId,
     fingerprint.provider,
+    usageHarnessOf(fingerprint.harness),
     fingerprint.resolvedHomePath,
     fingerprint.volumeId,
   ].join(" ");
@@ -140,26 +159,45 @@ function ownedContribution(
 ): {
   readonly buckets: readonly UsageBucket[];
   readonly sessionsByProvider: ReadonlyMap<UsageProviderKind, number>;
+  readonly sessionsByProviderHarness: ReadonlyMap<
+    UsageProviderKind,
+    { native: number; primeAgent: number }
+  >;
 } {
-  const ownedProviders = new Set<UsageProviderKind>();
+  const ownedKeys = new Set<ProviderHarnessKey>();
   const sessionsByProvider = new Map<UsageProviderKind, number>();
+  const sessionsByProviderHarness = new Map<
+    UsageProviderKind,
+    { native: number; primeAgent: number }
+  >();
   for (const source of environment.summary.sources) {
     if (source.status === "missing") continue;
     const key = fingerprintKey(source.fingerprint);
     if (ownerByFingerprint.get(key) === environment.environmentId) {
       const provider = source.fingerprint.provider;
-      ownedProviders.add(provider);
+      const harness = usageHarnessOf(source.fingerprint.harness);
+      ownedKeys.add(providerHarnessKey(provider, harness));
       // Distinct within a directory. Summing per-bucket session counts instead
       // would count a session once per day and model it spans.
       sessionsByProvider.set(
         provider,
         (sessionsByProvider.get(provider) ?? 0) + source.distinctSessions,
       );
+      const harnessSessions = sessionsByProviderHarness.get(provider) ?? {
+        native: 0,
+        primeAgent: 0,
+      };
+      if (harness === "primeAgent") harnessSessions.primeAgent += source.distinctSessions;
+      else harnessSessions.native += source.distinctSessions;
+      sessionsByProviderHarness.set(provider, harnessSessions);
     }
   }
   return {
-    buckets: environment.summary.buckets.filter((bucket) => ownedProviders.has(bucket.provider)),
+    buckets: environment.summary.buckets.filter((bucket) =>
+      ownedKeys.has(providerHarnessKey(bucket.provider, usageHarnessOf(bucket.harness))),
+    ),
     sessionsByProvider,
+    sessionsByProviderHarness,
   };
 }
 
@@ -245,7 +283,14 @@ export function mergeUsage(
 
   const providerAccumulator = new Map<
     UsageProviderKind,
-    { costUsd: number; totalTokens: number; records: number; sessions: number }
+    {
+      costUsd: number;
+      totalTokens: number;
+      records: number;
+      sessions: number;
+      nativeSessions: number;
+      primeAgentSessions: number;
+    }
   >();
   const modelAccumulator = new Map<
     string,
@@ -272,19 +317,27 @@ export function mergeUsage(
   const contributingEnvironments: EnvironmentId[] = [];
 
   for (const environment of current) {
-    const { buckets, sessionsByProvider } = ownedContribution(environment, ownerByFingerprint);
+    const { buckets, sessionsByProvider, sessionsByProviderHarness } = ownedContribution(
+      environment,
+      ownerByFingerprint,
+    );
     if (buckets.length > 0) contributingEnvironments.push(environment.environmentId);
 
     for (const [providerKind, providerSessions] of sessionsByProvider) {
       sessions += providerSessions;
       if (providerSessions === 0) continue;
+      const harnessSessions = sessionsByProviderHarness.get(providerKind);
       const provider = providerAccumulator.get(providerKind) ?? {
         costUsd: 0,
         totalTokens: 0,
         records: 0,
         sessions: 0,
+        nativeSessions: 0,
+        primeAgentSessions: 0,
       };
       provider.sessions += providerSessions;
+      provider.nativeSessions += harnessSessions?.native ?? 0;
+      provider.primeAgentSessions += harnessSessions?.primeAgent ?? 0;
       providerAccumulator.set(providerKind, provider);
     }
 
@@ -307,6 +360,8 @@ export function mergeUsage(
         totalTokens: 0,
         records: 0,
         sessions: 0,
+        nativeSessions: 0,
+        primeAgentSessions: 0,
       };
       provider.costUsd += bucket.costUsd;
       provider.totalTokens += tokens;
@@ -369,6 +424,8 @@ export function mergeUsage(
       totalTokens: totals.totalTokens,
       records: totals.records,
       sessions: totals.sessions,
+      nativeSessions: totals.nativeSessions,
+      primeAgentSessions: totals.primeAgentSessions,
       costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
       tokenShare: totalTokens === 0 ? 0 : totals.totalTokens / totalTokens,
     }))
