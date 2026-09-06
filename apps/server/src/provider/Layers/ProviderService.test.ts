@@ -2839,10 +2839,12 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
         lastSeenAt: "2026-01-01T00:00:00.000Z",
       });
 
-      const consumer = yield* Stream.runForEach(provider.streamEvents, () => Effect.void).pipe(
-        Effect.forkChild,
+      const consumer = yield* provider.streamEvents.pipe(
+        Stream.filter((event) => event.eventId === asEventId("evt-last-seen")),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild({ startImmediately: true }),
       );
-      yield* advanceTestClock(50);
 
       fanout.codex.emit({
         type: "turn.completed",
@@ -2851,12 +2853,11 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
         createdAt: "2026-01-01T00:00:00.000Z",
         threadId: session.threadId,
         turnId: asTurnId("turn-last-seen"),
-        status: "completed",
+        payload: { state: "completed" },
       });
-      yield* advanceTestClock(50);
+      yield* Fiber.join(consumer);
 
       const touched = yield* repository.getByThreadId({ threadId: session.threadId });
-      yield* Fiber.interrupt(consumer);
       assert.equal(Option.isSome(touched), true);
       if (Option.isSome(touched)) {
         assert.notEqual(touched.value.lastSeenAt, "2026-01-01T00:00:00.000Z");
