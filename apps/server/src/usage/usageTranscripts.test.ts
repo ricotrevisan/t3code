@@ -3,9 +3,12 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   GROK_COST_USD_TICKS_PER_DOLLAR,
   initialCodexScanState,
+  initialPrimeAgentScanState,
   parseClaudeLine,
   parseCodexLine,
   parseGrokLine,
+  parsePrimeAgentLine,
+  resolvePrimeAgentUsageProvider,
   totalTokens,
 } from "./usageTranscripts.ts";
 
@@ -562,5 +565,145 @@ describe("parseGrokLine", () => {
 
     const records = parseGrokLine(line);
     expect(records[0]?.timestampMs).toBe(1_786_372_566_000);
+  });
+});
+
+describe("resolvePrimeAgentUsageProvider", () => {
+  it("maps Codex, Grok, and OpenCode Go from explicit provider names", () => {
+    expect(resolvePrimeAgentUsageProvider("openai-codex", "gpt-5.6-sol")).toBe("codex");
+    expect(resolvePrimeAgentUsageProvider("xai", "grok-4.6")).toBe("grok");
+    expect(resolvePrimeAgentUsageProvider("opencode-go", "glm-5.3-flash")).toBe("opencode");
+  });
+
+  it("falls back to a provider/model slug when the provider field is missing", () => {
+    expect(resolvePrimeAgentUsageProvider(undefined, "openai-codex/gpt-5.6-sol")).toBe("codex");
+    expect(resolvePrimeAgentUsageProvider("", "opencode-go/glm-5.3-flash")).toBe("opencode");
+  });
+
+  it("keeps unrecognised providers as unknown instead of dropping them", () => {
+    expect(resolvePrimeAgentUsageProvider("ollama", "llama3.1:8b")).toBe("unknown");
+  });
+});
+
+describe("parsePrimeAgentLine", () => {
+  function assistantLine(overrides: {
+    id?: string;
+    provider?: string;
+    model?: string;
+    usage?: Record<string, unknown>;
+    timestamp?: string;
+  }): string {
+    return JSON.stringify({
+      type: "message",
+      id: overrides.id ?? "a1b2c3d4",
+      parentId: "prev1234",
+      timestamp: overrides.timestamp ?? "2026-08-07T10:00:02.000Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Hi" }],
+        provider: overrides.provider ?? "openai-codex",
+        model: overrides.model ?? "gpt-5.6-sol",
+        usage: {
+          input: 100,
+          output: 20,
+          cacheRead: 40,
+          cacheWrite: 10,
+          totalTokens: 170,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          ...overrides.usage,
+        },
+        stopReason: "stop",
+      },
+    });
+  }
+
+  it("normalizes cache tokens and attributes Codex via Prime Agent", () => {
+    const state = initialPrimeAgentScanState();
+    parsePrimeAgentLine(
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "session-1",
+        timestamp: "2026-08-07T10:00:00.000Z",
+        cwd: "/tmp",
+      }),
+      state,
+    );
+    const record = parsePrimeAgentLine(assistantLine({}), state);
+
+    expect(record).toMatchObject({
+      provider: "codex",
+      harness: "primeAgent",
+      model: "gpt-5.6-sol",
+      sessionId: "session-1",
+      totals: {
+        uncachedInputTokens: 100,
+        cachedInputTokens: 40,
+        cacheCreationTokens: 10,
+        outputTokens: 20,
+        reasoningTokens: 0,
+      },
+      reportedCostUsd: null,
+    });
+    expect(record?.dedupeKey).toContain("a1b2c3d4");
+  });
+
+  it("attributes Grok and OpenCode Go from transcript metadata", () => {
+    const grok = parsePrimeAgentLine(
+      assistantLine({ id: "g1", provider: "xai", model: "grok-4.6" }),
+      initialPrimeAgentScanState(),
+    );
+    const opencode = parsePrimeAgentLine(
+      assistantLine({ id: "o1", provider: "opencode-go", model: "glm-5.3-flash" }),
+      initialPrimeAgentScanState(),
+    );
+
+    expect(grok?.provider).toBe("grok");
+    expect(opencode?.provider).toBe("opencode");
+    expect(grok?.harness).toBe("primeAgent");
+  });
+
+  it("prefers a persisted provider-reported cost", () => {
+    const record = parsePrimeAgentLine(
+      assistantLine({ usage: { cost: { total: 1.25 } } }),
+      initialPrimeAgentScanState(),
+    );
+
+    expect(record?.reportedCostUsd).toBe(1.25);
+  });
+
+  it("keeps unknown-model tokens and does not invent a cost", () => {
+    const record = parsePrimeAgentLine(
+      assistantLine({ provider: "ollama", model: "llama3.1:8b" }),
+      initialPrimeAgentScanState(),
+    );
+
+    expect(record?.provider).toBe("unknown");
+    expect(record?.totals.outputTokens).toBe(20);
+    expect(record?.reportedCostUsd).toBeNull();
+  });
+
+  it("ignores child usage attribution bookkeeping", () => {
+    const record = parsePrimeAgentLine(
+      JSON.stringify({
+        type: "child_usage_attributed",
+        id: "attr1",
+        parentId: "a1b2c3d4",
+        timestamp: "2026-08-07T10:00:03.000Z",
+        targetId: "a1b2c3d4",
+        childUsage: { input: 50, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 60 },
+        aggregateUsage: { input: 150, output: 30, cacheRead: 40, cacheWrite: 10, totalTokens: 230 },
+      }),
+      initialPrimeAgentScanState(),
+    );
+
+    expect(record).toBeNull();
+  });
+
+  it("gives copied fork entries the same dedupe key", () => {
+    const first = parsePrimeAgentLine(assistantLine({}), initialPrimeAgentScanState());
+    const copy = parsePrimeAgentLine(assistantLine({}), initialPrimeAgentScanState());
+
+    expect(first?.dedupeKey).toBe(copy?.dedupeKey);
   });
 });

@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - the suite seeds and grows real
 // transcript trees on disk, outside the service's Effect FileSystem.
+// @effect-diagnostics preferSchemaOverJson:off - JSONL transcript fixtures.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -370,6 +371,248 @@ describe("UsageService", () => {
       assert.isUndefined(
         orphanedAt,
         `interruption left the next matching request pending at scheduler check ${orphanedAt}`,
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  function primeAgentSession(lines: readonly string[]): string {
+    return `${[
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "prime-session-1",
+        timestamp: "2026-08-01T10:00:00.000Z",
+        cwd: "/tmp",
+      }),
+      ...lines,
+    ].join("\n")}\n`;
+  }
+
+  function primeAgentAssistant(overrides: {
+    id: string;
+    provider: string;
+    model: string;
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    costTotal?: number;
+  }): string {
+    return JSON.stringify({
+      type: "message",
+      id: overrides.id,
+      parentId: null,
+      timestamp: "2026-08-01T10:00:02.000Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        provider: overrides.provider,
+        model: overrides.model,
+        usage: {
+          input: overrides.input ?? 100,
+          output: overrides.output ?? 20,
+          cacheRead: overrides.cacheRead ?? 40,
+          cacheWrite: overrides.cacheWrite ?? 10,
+          totalTokens: 170,
+          cost: { total: overrides.costTotal ?? 0 },
+        },
+        stopReason: "stop",
+      },
+    });
+  }
+
+  it.live("attributes Prime Agent Codex, Grok, and OpenCode usage to the upstream provider", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const threadDir = NodePath.join(config.baseDir, "prime-agent", "sessions", "thread-1");
+        yield* Effect.promise(() => NodeFSP.mkdir(threadDir, { recursive: true }));
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            NodePath.join(threadDir, "session.jsonl"),
+            primeAgentSession([
+              primeAgentAssistant({ id: "codex1", provider: "openai-codex", model: "gpt-5.6-sol" }),
+              primeAgentAssistant({ id: "grok1", provider: "xai", model: "grok-4.6" }),
+              primeAgentAssistant({
+                id: "oc1",
+                provider: "opencode-go",
+                model: "glm-5.3-flash",
+              }),
+            ]),
+          ),
+        );
+
+        const service = yield* UsageService.make;
+        const summary = yield* service.readSummary(WINDOW);
+        const byProvider = Object.fromEntries(
+          summary.buckets.map((bucket) => [bucket.provider, bucket]),
+        );
+
+        assert.strictEqual(byProvider.codex?.harness, "primeAgent");
+        assert.strictEqual(byProvider.codex?.model, "gpt-5.6-sol");
+        assert.strictEqual(byProvider.codex?.totals.cachedInputTokens, 40);
+        assert.strictEqual(byProvider.codex?.totals.cacheCreationTokens, 10);
+        assert.strictEqual(byProvider.grok?.harness, "primeAgent");
+        assert.strictEqual(byProvider.opencode?.harness, "primeAgent");
+        assert.strictEqual(byProvider.opencode?.model, "glm-5.3-flash");
+        assert.ok(summary.sources.some((source) => source.fingerprint.harness === "primeAgent"));
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-prime-agent-providers-test", home, settings }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("counts unknown Prime Agent models as tokens without estimated cost", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const threadDir = NodePath.join(config.baseDir, "prime-agent", "sessions", "thread-1");
+        yield* Effect.promise(() => NodeFSP.mkdir(threadDir, { recursive: true }));
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            NodePath.join(threadDir, "session.jsonl"),
+            primeAgentSession([
+              primeAgentAssistant({ id: "u1", provider: "ollama", model: "llama3.1:8b" }),
+            ]),
+          ),
+        );
+
+        const service = yield* UsageService.make;
+        const summary = yield* service.readSummary(WINDOW);
+        const bucket = summary.buckets.find((entry) => entry.provider === "unknown");
+        assert.isDefined(bucket);
+        assert.strictEqual(bucket.costUsd, 0);
+        assert.strictEqual(bucket.costSource, "unpriced");
+        assert.strictEqual(bucket.totals.outputTokens, 20);
+        assert.strictEqual(bucket.unpricedRecords, 1);
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-prime-agent-unknown-test", home, settings }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("does not double-count a resumed Prime Agent session or its subagent child", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const threadDir = NodePath.join(config.baseDir, "prime-agent", "sessions", "thread-1");
+        yield* Effect.promise(() => NodeFSP.mkdir(threadDir, { recursive: true }));
+        const parentPath = NodePath.join(threadDir, "parent.jsonl");
+        const parentUsage = primeAgentAssistant({
+          id: "parent1",
+          provider: "openai-codex",
+          model: "gpt-5.6-sol",
+          output: 20,
+        });
+        const attribution = JSON.stringify({
+          type: "child_usage_attributed",
+          id: "attr1",
+          parentId: "parent1",
+          timestamp: "2026-08-01T10:00:03.000Z",
+          targetId: "parent1",
+          childUsage: {
+            input: 50,
+            output: 8,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 58,
+          },
+          aggregateUsage: {
+            input: 150,
+            output: 28,
+            cacheRead: 40,
+            cacheWrite: 10,
+            totalTokens: 228,
+          },
+        });
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(parentPath, primeAgentSession([parentUsage, attribution])),
+        );
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            NodePath.join(threadDir, "child.jsonl"),
+            primeAgentSession([
+              primeAgentAssistant({
+                id: "child1",
+                provider: "openai-codex",
+                model: "gpt-5.6-sol",
+                input: 50,
+                output: 8,
+                cacheRead: 0,
+                cacheWrite: 0,
+              }),
+            ]),
+          ),
+        );
+
+        const service = yield* UsageService.make;
+        const first = yield* service.readSummary(WINDOW);
+        const second = yield* service.readSummary(WINDOW);
+        const bucket = first.buckets.find((entry) => entry.provider === "codex");
+        assert.strictEqual(bucket?.totals.outputTokens, 28);
+        assert.strictEqual(bucket?.records, 2);
+        assert.deepStrictEqual(second.buckets, first.buckets);
+
+        yield* Effect.promise(() => NodeFSP.appendFile(parentPath, `${parentUsage}\n`));
+        const resumed = yield* service.readSummary(WINDOW);
+        assert.strictEqual(resumed.buckets.find((entry) => entry.provider === "codex")?.records, 2);
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-prime-agent-dedupe-test", home, settings }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("matches a full Prime Agent rescan after an incremental append", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const threadDir = NodePath.join(config.baseDir, "prime-agent", "sessions", "thread-1");
+        yield* Effect.promise(() => NodeFSP.mkdir(threadDir, { recursive: true }));
+        const sessionPath = NodePath.join(threadDir, "session.jsonl");
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            sessionPath,
+            primeAgentSession([
+              primeAgentAssistant({ id: "m1", provider: "openai-codex", model: "gpt-5.6-sol" }),
+            ]),
+          ),
+        );
+
+        const service = yield* UsageService.make;
+        yield* service.readSummary(WINDOW);
+        yield* Effect.promise(() =>
+          NodeFSP.appendFile(
+            sessionPath,
+            `${primeAgentAssistant({ id: "m2", provider: "openai-codex", model: "gpt-5.6-sol" })}\n`,
+          ),
+        );
+        const incremental = yield* service.readSummary(WINDOW);
+
+        yield* Effect.promise(() =>
+          NodeFSP.rm(NodePath.join(config.stateDir, "usage-scan-cache.json"), { force: true }),
+        );
+        const fresh = yield* UsageService.make;
+        const full = yield* fresh.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(incremental), 40);
+        assert.deepStrictEqual(incremental.buckets, full.buckets);
+      }).pipe(
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-prime-agent-incremental-test", home, settings }),
+        ),
       );
     }).pipe(Effect.scoped),
   );
