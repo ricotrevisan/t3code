@@ -64,10 +64,12 @@ vi.mock("./usageProviders", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./usageProviders")>();
   return {
     ...actual,
-    PROVIDER_PRESENTATION: {
-      codex: { color: "white", label: "Codex", mark: "span" },
-      claude: { color: "orange", label: "Claude Code", mark: "span" },
-    },
+    PROVIDER_PRESENTATION: Object.fromEntries(
+      Object.entries(actual.PROVIDER_PRESENTATION).map(([provider, presentation]) => [
+        provider,
+        { ...presentation, mark: "span" },
+      ]),
+    ),
   };
 });
 
@@ -203,5 +205,37 @@ describe("UsagePage model breakdown", () => {
       "token-heavy-model",
       "token-heavy-cheaper-model",
     ]);
+  });
+});
+
+describe("UsagePage provider harness", () => {
+  it("shows Prime Agent as secondary source information under the upstream provider", () => {
+    testState.useUsage.mockReturnValue({
+      merged: {
+        ...mergeUsage([], USAGE_CONTRACT_VERSION),
+        providers: [
+          {
+            provider: "codex",
+            costUsd: 14,
+            totalTokens: 1_000,
+            records: 16,
+            sessions: 16,
+            nativeSessions: 12,
+            primeAgentSessions: 4,
+            costShare: 1,
+            tokenShare: 1,
+          },
+        ],
+      },
+      environments,
+      selectedEnvironments: environments,
+      isPending: false,
+      isPartial: false,
+      refresh: vi.fn(),
+    });
+
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).toContain("Codex");
+    expect(markup).toContain("12 native · 4 via PrimeAgent");
   });
 });

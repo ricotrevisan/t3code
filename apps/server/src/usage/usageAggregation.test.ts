@@ -19,6 +19,7 @@ const rates: RateTable = new Map([
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
     provider: "claude",
+    harness: "native",
     // 2026-08-07T04:05Z is still Aug 6 in Los Angeles.
     timestampMs: Date.parse("2026-08-07T04:05:13.944Z"),
     model: "claude-fable-5",
@@ -200,5 +201,15 @@ describe("UsageAggregator", () => {
     ]);
 
     expect(result.buckets).toHaveLength(3);
+  });
+
+  it("keeps native and Prime Agent usage in separate buckets", () => {
+    const result = aggregate([
+      record({ provider: "codex", model: "gpt-5.6-sol", harness: "native" }),
+      record({ provider: "codex", model: "gpt-5.6-sol", harness: "primeAgent" }),
+    ]);
+
+    expect(result.buckets).toHaveLength(2);
+    expect(result.buckets.map((bucket) => bucket.harness)).toEqual(["native", "primeAgent"]);
   });
 });

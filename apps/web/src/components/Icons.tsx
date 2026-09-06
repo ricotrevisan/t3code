@@ -667,6 +667,13 @@ export const AntigravityIcon: Icon = (props) => (
   </svg>
 );
 
+export const UnknownUsageIcon: Icon = (props) => (
+  <svg {...props} viewBox="0 0 16 16" fill="none">
+    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
+    <circle cx="8" cy="8" r="1.5" fill="currentColor" />
+  </svg>
+);
+
 export const OpenCodeIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 32 40" fill="none" xmlns="http://www.w3.org/2000/svg">
     <g clipPath="url(#opencode__clip0_1311_94969)">
