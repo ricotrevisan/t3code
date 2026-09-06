@@ -17,21 +17,29 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
 
-import type { UsageProviderKind } from "@t3tools/contracts";
-
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
-import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
+import {
+  isUsageHarnessKind,
+  isUsageProviderKind,
+  isUsageScanKind,
+  type CodexScanState,
+  type PrimeAgentScanState,
+  type UsageRecord,
+  type UsageScanKind,
+} from "./usageTranscripts.ts";
 
 // v2: Codex fork-copy suppression changed what a file parses to, so v1
 // entries would keep serving double-counted records forever.
 // v3: entries carry the parse position and reducer state so a grown file
 // re-parses only its appended bytes instead of starting over.
-export const USAGE_SCAN_CACHE_VERSION = 3 as const;
+// v4: records carry attributed provider and harness, and Prime Agent scan
+// state, so a Prime Agent file can contribute Codex/Grok/OpenCode rows.
+export const USAGE_SCAN_CACHE_VERSION = 4 as const;
 
 export interface CachedFile {
   readonly size: number;
   readonly mtimeMs: number;
-  readonly provider: UsageProviderKind;
+  readonly provider: UsageScanKind;
   /** Records from newline-terminated lines, up to `position.resumeOffset`. */
   readonly records: readonly UsageRecord[];
   /**
@@ -61,12 +69,14 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  attributedProvider: string,
+  harness: string,
 ];
 
 interface SerializedFile {
   readonly s: number;
   readonly m: number;
-  readonly p: UsageProviderKind;
+  readonly p: UsageScanKind;
   readonly r: readonly SerializedRecord[];
   /** Tail records; see `CachedFile.tailRecords`. */
   readonly t: readonly SerializedRecord[];
@@ -76,6 +86,8 @@ interface SerializedFile {
   readonly gh: number;
   /** Codex reducer state at `o`; `null` for stateless providers. */
   readonly cs: CodexScanState | null;
+  /** Prime Agent reducer state at `o`; `null` otherwise. */
+  readonly pas: PrimeAgentScanState | null;
 }
 
 interface SerializedCache {
@@ -112,6 +124,8 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.totals.reasoningTokens,
     record.dedupeKey,
     record.reportedCostUsd,
+    record.provider,
+    record.harness,
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -126,6 +140,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
       gl: entry.position.guardLength,
       gh: entry.position.guardHash,
       cs: entry.position.codexState,
+      pas: entry.position.primeAgentState,
     };
   }
 
@@ -162,13 +177,10 @@ export function decodeScanCache(document: unknown): ScanCache {
   // Any corrupt row disqualifies the whole entry. Keeping the survivors
   // under the original (size, mtime) would read as a valid warm hit and the
   // file would never be re-parsed, silently losing the dropped rows' usage.
-  const decodeRecords = (
-    rows: readonly unknown[],
-    provider: UsageProviderKind,
-  ): UsageRecord[] | null => {
+  const decodeRecords = (rows: readonly unknown[]): UsageRecord[] | null => {
     const records: UsageRecord[] = [];
     for (const row of rows) {
-      if (!isRecordArray(row) || row.length < 10) return null;
+      if (!isRecordArray(row) || row.length < 12) return null;
       const [
         timestampMs,
         modelIndex,
@@ -180,6 +192,8 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        attributedProvider,
+        harness,
       ] = row as SerializedRecord;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
@@ -191,13 +205,16 @@ export function decodeScanCache(document: unknown): ScanCache {
         !Number.isFinite(cached) ||
         !Number.isFinite(cacheCreation) ||
         !Number.isFinite(output) ||
-        !Number.isFinite(reasoning)
+        !Number.isFinite(reasoning) ||
+        !isUsageProviderKind(attributedProvider) ||
+        !isUsageHarnessKind(harness)
       ) {
         return null;
       }
 
       records.push({
-        provider,
+        provider: attributedProvider,
+        harness,
         timestampMs,
         model,
         sessionId: (typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined) ?? "",
@@ -219,7 +236,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as Partial<SerializedFile>;
     if (typeof entry.s !== "number" || typeof entry.m !== "number") continue;
-    if (entry.p !== "claude" && entry.p !== "codex" && entry.p !== "grok") continue;
+    if (!isUsageScanKind(entry.p)) continue;
     if (!isRecordArray(entry.r) || !isRecordArray(entry.t)) continue;
     // Position fields feed byte offsets and a Buffer allocation in the reader,
     // so anything outside their real ranges must reject the entry: a bogus
@@ -241,16 +258,17 @@ export function decodeScanCache(document: unknown): ScanCache {
     }
     const codexState = decodeCodexState(entry.cs);
     if (codexState === undefined) continue;
+    const primeAgentState = decodePrimeAgentState(entry.pas);
+    if (primeAgentState === undefined) continue;
 
-    const provider: UsageProviderKind = entry.p;
-    const records = decodeRecords(entry.r, provider);
-    const tailRecords = decodeRecords(entry.t, provider);
+    const records = decodeRecords(entry.r);
+    const tailRecords = decodeRecords(entry.t);
     if (records === null || tailRecords === null) continue;
 
     cache.set(path, {
       size: entry.s,
       mtimeMs: entry.m,
-      provider,
+      provider: entry.p,
       records,
       tailRecords,
       position: {
@@ -258,6 +276,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         guardLength: entry.gl,
         guardHash: entry.gh,
         codexState,
+        primeAgentState,
       },
     });
   }
@@ -293,6 +312,21 @@ function decodeCodexState(value: unknown): CodexScanState | null | undefined {
     suppressingForkCopies: state.suppressingForkCopies,
     forkCopyAnchorMs: state.forkCopyAnchorMs,
   };
+}
+
+function decodePrimeAgentState(value: unknown): PrimeAgentScanState | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "object") return undefined;
+  const state = value as Partial<PrimeAgentScanState>;
+  if (
+    typeof state.sessionId !== "string" ||
+    typeof state.messageIndex !== "number" ||
+    !Number.isSafeInteger(state.messageIndex) ||
+    state.messageIndex < 0
+  ) {
+    return undefined;
+  }
+  return { sessionId: state.sessionId, messageIndex: state.messageIndex };
 }
 
 export interface PruneOptions {
