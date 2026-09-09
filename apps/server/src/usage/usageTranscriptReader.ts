@@ -18,16 +18,18 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
-import type { UsageProviderKind } from "@t3tools/contracts";
-
 import {
   initialCodexScanState,
+  initialPrimeAgentScanState,
   mightCarryUsage,
   parseClaudeLine,
   parseCodexLine,
   parseGrokLine,
+  parsePrimeAgentLine,
   type CodexScanState,
+  type PrimeAgentScanState,
   type UsageRecord,
+  type UsageScanKind,
 } from "./usageTranscripts.ts";
 
 export interface TranscriptFile {
@@ -56,6 +58,8 @@ export interface TranscriptParsePosition {
   readonly guardHash: number;
   /** Codex reducer state as of `resumeOffset`; `null` for stateless providers. */
   readonly codexState: CodexScanState | null;
+  /** Prime Agent reducer state as of `resumeOffset`; `null` otherwise. */
+  readonly primeAgentState: PrimeAgentScanState | null;
 }
 
 export interface TranscriptParseResult {
@@ -192,7 +196,7 @@ async function guardMatches(
  */
 export async function readTranscriptRecords(
   filePath: string,
-  provider: UsageProviderKind,
+  scanKind: UsageScanKind,
   resumeFrom?: TranscriptParsePosition,
 ): Promise<TranscriptParseResult | null> {
   let handle: NodeFSP.FileHandle;
@@ -204,23 +208,28 @@ export async function readTranscriptRecords(
 
   try {
     let codexState = initialCodexScanState();
+    let primeAgentState = initialPrimeAgentScanState();
     let resumed = false;
     let start = 0;
     if (
       resumeFrom !== undefined &&
       resumeFrom.resumeOffset > 0 &&
-      (provider !== "codex" || resumeFrom.codexState !== null) &&
+      (scanKind !== "codex" || resumeFrom.codexState !== null) &&
+      (scanKind !== "primeAgent" || resumeFrom.primeAgentState !== null) &&
       (await guardMatches(handle, resumeFrom))
     ) {
       if (resumeFrom.codexState !== null) codexState = { ...resumeFrom.codexState };
+      if (resumeFrom.primeAgentState !== null) {
+        primeAgentState = { ...resumeFrom.primeAgentState };
+      }
       start = resumeFrom.resumeOffset;
       resumed = true;
     }
 
     const parseLine = (line: string, state: CodexScanState, out: UsageRecord[]): void => {
-      if (provider === "codex") {
+      if (scanKind === "codex") {
         if (
-          !mightCarryUsage(line, provider) &&
+          !mightCarryUsage(line, scanKind) &&
           !line.includes('"turn_context"') &&
           !line.includes('"session_meta"')
         ) {
@@ -230,8 +239,14 @@ export async function readTranscriptRecords(
         if (record !== null) out.push(record);
         return;
       }
-      if (!mightCarryUsage(line, provider)) return;
-      if (provider === "grok") {
+      if (scanKind === "primeAgent") {
+        if (!mightCarryUsage(line, scanKind)) return;
+        const record = parsePrimeAgentLine(line, primeAgentState);
+        if (record !== null) out.push(record);
+        return;
+      }
+      if (!mightCarryUsage(line, scanKind)) return;
+      if (scanKind === "grok") {
         for (const grokRecord of parseGrokLine(line)) out.push(grokRecord);
         return;
       }
@@ -283,7 +298,11 @@ export async function readTranscriptRecords(
     const tailRecords: UsageRecord[] = [];
     if (pendingChunks.length > 0) {
       const pending = pendingChunks.length === 1 ? pendingChunks[0]! : Buffer.concat(pendingChunks);
-      if (pending.length > 0) parseLine(toLineString(pending), { ...codexState }, tailRecords);
+      if (pending.length > 0) {
+        const savedPrimeAgent = { ...primeAgentState };
+        parseLine(toLineString(pending), { ...codexState }, tailRecords);
+        primeAgentState = savedPrimeAgent;
+      }
     }
 
     const guardLength = Math.min(GUARD_LENGTH, resumeOffset);
@@ -301,7 +320,8 @@ export async function readTranscriptRecords(
         resumeOffset,
         guardLength,
         guardHash,
-        codexState: provider === "codex" ? codexState : null,
+        codexState: scanKind === "codex" ? codexState : null,
+        primeAgentState: scanKind === "primeAgent" ? primeAgentState : null,
       },
       resumed,
     };

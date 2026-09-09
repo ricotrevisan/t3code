@@ -100,6 +100,48 @@ describe("readTranscriptRecords resume", () => {
     assert.strictEqual(second.records[0]?.sessionId, "codex-session-1");
   });
 
+  it("carries the Prime Agent session id across the resume boundary", async () => {
+    const path = NodePath.join(dir, "prime.jsonl");
+    const header = `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "prime-session-1",
+      timestamp: "2026-08-01T10:00:00.000Z",
+      cwd: "/tmp",
+    })}\n`;
+    const assistant = (id: string, output: number) =>
+      `${JSON.stringify({
+        type: "message",
+        id,
+        parentId: null,
+        timestamp: "2026-08-01T10:00:02.000Z",
+        message: {
+          role: "assistant",
+          provider: "openai-codex",
+          model: "gpt-5.6-sol",
+          usage: { input: 10, output, cacheRead: 0, cacheWrite: 0, totalTokens: 10 + output },
+          stopReason: "stop",
+        },
+      })}\n`;
+    await NodeFSP.writeFile(path, header + assistant("m1", 5));
+    const first = await readTranscriptRecords(path, "primeAgent");
+    assert.isNotNull(first);
+    assert.strictEqual(first.records.length, 1);
+
+    await NodeFSP.appendFile(path, assistant("m2", 7));
+    const second = await readTranscriptRecords(path, "primeAgent", first.position);
+    assert.isNotNull(second);
+    assert.isTrue(second.resumed);
+    assert.strictEqual(second.records.length, 1);
+    assert.strictEqual(second.records[0]?.sessionId, "prime-session-1");
+    assert.strictEqual(second.records[0]?.harness, "primeAgent");
+    assert.strictEqual(second.records[0]?.provider, "codex");
+
+    const full = await readTranscriptRecords(path, "primeAgent");
+    assert.isNotNull(full);
+    assert.deepStrictEqual([...first.records, ...second.records], [...full.records]);
+  });
+
   it("suppresses a Codex duplicate usage event that straddles the boundary", async () => {
     const path = NodePath.join(dir, "rollout.jsonl");
     await NodeFSP.writeFile(
