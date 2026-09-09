@@ -323,7 +323,7 @@ export function useThreadComposerState() {
     );
   }, [selectedThreadDetail, selectedThreadSessionActivity, selectedThreadShell]);
 
-  const onSendMessage = useCallback(async () => {
+  const onSendMessage = useCallback(async (runtimeModeForSend: RuntimeMode) => {
     if (!selectedThreadShell) {
       return null;
     }
@@ -445,7 +445,7 @@ export function useThreadComposerState() {
       attachments,
       context: draft.context,
       modelSelection,
-      runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
+      runtimeMode: runtimeModeForSend,
       interactionMode: resolveProviderInteractionMode(
         provider,
         draft.interactionMode ?? thread.interactionMode,
