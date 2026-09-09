@@ -1,9 +1,10 @@
 /**
  * UsageService - scans provider transcripts and returns priced usage buckets.
  *
- * The scan reads the provider CLIs' own session files (Claude Code, Codex, and
- * Grok Build) rather than T3 Code's orchestration projections, so usage covers
- * turns driven outside T3 Code too. This is the approach `ccusage` takes.
+ * The scan reads native provider CLI session files (Claude Code, Codex, and
+ * Grok Build) plus this environment's Prime Agent sessions. Native homes are
+ * shared across worktree servers; Prime Agent transcripts live under
+ * `serverConfig.baseDir` and are attributed to the upstream provider.
  *
  * Transcripts are append-only, so parsed records are memoised per file by
  * `(size, mtime)`. A cold 30-day scan of ~1.4 GB lands around 2-3 seconds; warm
@@ -20,6 +21,7 @@ import {
   type ProviderInstanceConfig,
   USAGE_CONTRACT_VERSION,
   type ServerSettings as ServerSettingsValue,
+  type UsageHarnessKind,
   type UsageProviderKind,
   type UsageSource,
   type UsagePricing,
@@ -61,7 +63,7 @@ import {
   pruneScanCache,
   type ScanCache,
 } from "./usageScanCache.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
+import type { UsageRecord, UsageScanKind } from "./usageTranscripts.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -254,7 +256,7 @@ export const make = Effect.gen(function* () {
     retentionCutoffMs: number,
   ) {
     const dirs: Array<{
-      provider: UsageProviderKind;
+      scanKind: UsageScanKind;
       dir: string;
       volumeId: string;
       fileName?: string;
@@ -326,13 +328,19 @@ export const make = Effect.gen(function* () {
         if (seen.has(key)) continue;
         seen.add(key);
         dirs.push({
-          provider,
+          scanKind: provider,
           dir,
           volumeId,
           ...(provider === "grok" ? { fileName: "updates.jsonl" } : {}),
         });
       }
     }
+    const primeDir = path.join(config.baseDir, "prime-agent", "sessions");
+    dirs.push({
+      scanKind: "primeAgent",
+      dir: primeDir,
+      volumeId: yield* Effect.promise(() => readDirectoryVolumeId(primeDir)),
+    });
     return dirs;
   });
 
@@ -388,17 +396,17 @@ export const make = Effect.gen(function* () {
     filePath: string,
     size: number,
     mtimeMs: number,
-    provider: UsageProviderKind,
+    scanKind: UsageScanKind,
   ): Effect.Effect<readonly UsageRecord[]> =>
     Effect.gen(function* () {
       const cached = fileCache.get(filePath);
-      // Provider is part of the identity: if both providers were ever pointed
+      // Scan kind is part of the identity: if two parsers were ever pointed
       // at one directory, a hit parsed by the other parser must not be reused.
       if (
         cached &&
         cached.size === size &&
         cached.mtimeMs === mtimeMs &&
-        cached.provider === provider
+        cached.provider === scanKind
       ) {
         return cached.tailRecords.length === 0
           ? cached.records
@@ -408,17 +416,17 @@ export const make = Effect.gen(function* () {
       // Only a strictly grown file may resume. Same size with a new mtime, or
       // a shrunken file, means rewritten content; re-parse it whole.
       const resumeFrom =
-        cached !== undefined && cached.provider === provider && size > cached.size
+        cached !== undefined && cached.provider === scanKind && size > cached.size
           ? cached.position
           : undefined;
 
       const parsed = yield* Effect.promise(() =>
-        readTranscriptRecords(filePath, provider, resumeFrom),
+        readTranscriptRecords(filePath, scanKind, resumeFrom),
       );
       // A read failure is not an empty transcript: caching it under this
       // (size, mtime) would silently drop the file's usage until it changes.
       if (parsed === null)
-        return cached?.provider === provider ? [...cached.records, ...cached.tailRecords] : [];
+        return cached?.provider === scanKind ? [...cached.records, ...cached.tailRecords] : [];
 
       // Stored already de-duplicated within the file, which is 99% of all
       // duplicates. The aggregator still runs the cross-file dedupe pass. One
@@ -432,7 +440,7 @@ export const make = Effect.gen(function* () {
       fileCache.set(filePath, {
         size,
         mtimeMs,
-        provider,
+        provider: scanKind,
         records,
         tailRecords,
         position: parsed.position,
@@ -441,14 +449,17 @@ export const make = Effect.gen(function* () {
       return tailRecords.length === 0 ? records : [...records, ...tailRecords];
     });
 
-  /** One provider directory's walk and parse, before rates are involved. */
+  /** One transcript directory's walk and parse, before rates are involved. */
   interface ScannedDir {
-    readonly provider: UsageProviderKind;
+    readonly scanKind: UsageScanKind;
     readonly dir: string;
     readonly volumeId: string;
     /** Parsed records per file, or `null` when the directory does not exist. */
     readonly files:
-      | readonly { readonly path: string; readonly records: readonly UsageRecord[] }[]
+      | readonly {
+          readonly path: string;
+          readonly records: readonly UsageRecord[];
+        }[]
       | null;
   }
 
@@ -463,12 +474,12 @@ export const make = Effect.gen(function* () {
       Effect.provideService(Path.Path, path),
     );
     const scanned: ScannedDir[] = [];
-    for (const { provider, dir, volumeId, fileName } of dirs) {
+    for (const { scanKind, dir, volumeId, fileName } of dirs) {
       const exists = yield* fileSystem
         .exists(dir)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
       if (!exists) {
-        scanned.push({ provider, dir, volumeId, files: null });
+        scanned.push({ scanKind, dir, volumeId, files: null });
         continue;
       }
       const files = yield* Effect.promise(() =>
@@ -476,10 +487,10 @@ export const make = Effect.gen(function* () {
       );
       const parsedFiles: { path: string; records: readonly UsageRecord[] }[] = [];
       for (const file of files) {
-        const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, provider);
+        const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, scanKind);
         parsedFiles.push({ path: file.path, records });
       }
-      scanned.push({ provider, dir, volumeId, files: parsedFiles });
+      scanned.push({ scanKind, dir, volumeId, files: parsedFiles });
     }
     return scanned;
   });
@@ -495,7 +506,10 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    let hourlyWindow: { readonly sinceTimeMs: number; readonly untilTimeMs: number } | null = null;
+    let hourlyWindow: {
+      readonly sinceTimeMs: number;
+      readonly untilTimeMs: number;
+    } | null = null;
     if (input.resolution === "hour") {
       const sinceTime =
         input.sinceTime === undefined ? Option.none() : DateTime.make(input.sinceTime);
@@ -555,14 +569,15 @@ export const make = Effect.gen(function* () {
 
     const sources: UsageSource[] = [];
 
-    for (const { provider, dir, volumeId, files } of scannedDirs) {
+    for (const { scanKind, dir, volumeId, files } of scannedDirs) {
+      const harness: UsageHarnessKind = scanKind === "primeAgent" ? "primeAgent" : "native";
       const retainedFiles = [...(files ?? [])];
       const livePaths = new Set(retainedFiles.map((file) => file.path));
       // Cleanup may remove transcripts, but the usage we already saved still
       // contributes to this source. Keep the normal aggregation and dedupe path.
       for (const [filePath, entry] of fileCache) {
         if (
-          entry.provider !== provider ||
+          entry.provider !== scanKind ||
           entry.mtimeMs < retentionCutoffMs ||
           livePaths.has(filePath) ||
           !isWithinDirectory(filePath, dir)
@@ -570,6 +585,50 @@ export const make = Effect.gen(function* () {
           continue;
         retainedFiles.push({ path: filePath, records: [...entry.records, ...entry.tailRecords] });
       }
+
+      if (scanKind === "primeAgent") {
+        if (retainedFiles.length === 0) continue;
+        const byProvider = new Map<
+          UsageProviderKind,
+          { scannedFiles: number; sessionIds: Set<string> }
+        >();
+        for (const file of retainedFiles) {
+          const contributed = new Set<UsageProviderKind>();
+          for (const record of file.records) {
+            if (!aggregator.add(record)) continue;
+            contributed.add(record.provider);
+            const group = byProvider.get(record.provider) ?? {
+              scannedFiles: 0,
+              sessionIds: new Set<string>(),
+            };
+            if (record.sessionId.length > 0) group.sessionIds.add(record.sessionId);
+            byProvider.set(record.provider, group);
+          }
+          for (const provider of contributed) {
+            const group = byProvider.get(provider);
+            if (group !== undefined) group.scannedFiles += 1;
+          }
+        }
+        for (const [provider, group] of byProvider) {
+          sources.push({
+            fingerprint: {
+              hostId,
+              provider,
+              harness,
+              resolvedHomePath: dir,
+              volumeId,
+            },
+            status: "ok",
+            scannedFiles: group.scannedFiles,
+            skippedFiles: 0,
+            malformedRecords: 0,
+            distinctSessions: group.sessionIds.size,
+            message: null,
+          });
+        }
+        continue;
+      }
+
       let scannedFiles = 0;
       let skippedFiles = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
@@ -608,7 +667,13 @@ export const make = Effect.gen(function* () {
       }
 
       sources.push({
-        fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+        fingerprint: {
+          hostId,
+          provider: scanKind,
+          harness,
+          resolvedHomePath: dir,
+          volumeId,
+        },
         // Clients exclude missing sources, so saved records remain an available source.
         status: files === null && scannedFiles === 0 ? "missing" : "ok",
         scannedFiles,

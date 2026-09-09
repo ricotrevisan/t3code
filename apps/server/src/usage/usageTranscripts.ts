@@ -6,10 +6,33 @@
  *
  * @module usageTranscripts
  */
-import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
+import type { UsageHarnessKind, UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
+
+/** Which on-disk tree a scan is walking. Distinct from the attributed provider. */
+const USAGE_SCAN_KINDS = ["claude", "codex", "grok", "primeAgent"] as const;
+export type UsageScanKind = (typeof USAGE_SCAN_KINDS)[number];
+
+export function isUsageScanKind(value: unknown): value is UsageScanKind {
+  return value === "claude" || value === "codex" || value === "grok" || value === "primeAgent";
+}
+
+export function isUsageProviderKind(value: unknown): value is UsageProviderKind {
+  return (
+    value === "claude" ||
+    value === "codex" ||
+    value === "grok" ||
+    value === "opencode" ||
+    value === "unknown"
+  );
+}
+
+export function isUsageHarnessKind(value: unknown): value is UsageHarnessKind {
+  return value === "native" || value === "primeAgent";
+}
 
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
+  readonly harness: UsageHarnessKind;
   readonly timestampMs: number;
   readonly model: string;
   readonly sessionId: string;
@@ -67,9 +90,16 @@ export function totalTokens(totals: UsageTokenTotals): number {
  * a 30-day window this skips roughly half the lines outright and is worth about
  * an order of magnitude.
  */
-export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
-  if (provider === "claude") return line.includes('"usage"');
-  if (provider === "grok") return line.includes('"turn_completed"');
+export function mightCarryUsage(line: string, scanKind: UsageScanKind): boolean {
+  if (scanKind === "claude") return line.includes('"usage"');
+  if (scanKind === "grok") return line.includes('"turn_completed"');
+  if (scanKind === "primeAgent") {
+    return (
+      line.includes('"usage"') ||
+      line.includes('"type":"session"') ||
+      line.includes('"type": "session"')
+    );
+  }
   return line.includes('"token_count"');
 }
 
@@ -133,6 +163,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
 
   return {
     provider: "claude",
+    harness: "native",
     timestampMs,
     model,
     sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : "",
@@ -298,6 +329,7 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
 
   return {
     provider: "codex",
+    harness: "native",
     timestampMs,
     model: state.model,
     sessionId: state.sessionId,
@@ -428,6 +460,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
     return [
       {
         provider: "grok",
+        harness: "native",
         timestampMs,
         model: "grok",
         sessionId,
@@ -474,6 +507,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
 
     results.push({
       provider: "grok",
+      harness: "native",
       timestampMs,
       model: entry.model,
       sessionId,
@@ -483,6 +517,157 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
     });
   }
   return results;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Prime Agent                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Rolling state for one Prime Agent session file.
+ *
+ * The session id lives on the header line, and a fallback identity needs the
+ * assistant-message position when an entry has no stable id.
+ */
+export interface PrimeAgentScanState {
+  sessionId: string;
+  messageIndex: number;
+}
+
+export function initialPrimeAgentScanState(): PrimeAgentScanState {
+  return { sessionId: "", messageIndex: 0 };
+}
+
+const PRIME_AGENT_PROVIDER_ALIASES: Readonly<Record<string, UsageProviderKind>> = {
+  "openai-codex": "codex",
+  openai: "codex",
+  codex: "codex",
+  xai: "grok",
+  "xai-auth": "grok",
+  grok: "grok",
+  "opencode-go": "opencode",
+  opencode: "opencode",
+  anthropic: "claude",
+  claude: "claude",
+};
+
+/**
+ * Maps a Prime Agent provider name, then a `provider/model` slug, onto a usage
+ * provider. Unrecognised names stay `unknown` so the tokens are kept and left
+ * unpriced rather than dropped.
+ */
+export function resolvePrimeAgentUsageProvider(
+  provider: string | undefined,
+  model: string,
+): UsageProviderKind {
+  const fromProvider = provider?.trim().toLowerCase() ?? "";
+  if (fromProvider.length > 0) {
+    const aliased = PRIME_AGENT_PROVIDER_ALIASES[fromProvider];
+    if (aliased !== undefined) return aliased;
+  }
+  const separator = model.indexOf("/");
+  if (separator > 0) {
+    const fromSlug = PRIME_AGENT_PROVIDER_ALIASES[model.slice(0, separator).trim().toLowerCase()];
+    if (fromSlug !== undefined) return fromSlug;
+  }
+  return "unknown";
+}
+
+function primeAgentReportedCostUsd(usage: Record<string, unknown>): number | null {
+  const cost = usage["cost"];
+  if (typeof cost !== "object" || cost === null) return null;
+  const total = (cost as Record<string, unknown>)["total"];
+  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0) return null;
+  return total;
+}
+
+function primeAgentTimestampMs(
+  record: Record<string, unknown>,
+  message: Record<string, unknown>,
+): number | null {
+  const fromEntry = parseTimestampMs(record["timestamp"]);
+  if (fromEntry !== null) return fromEntry;
+  const messageTimestamp = message["timestamp"];
+  if (typeof messageTimestamp === "number" && Number.isFinite(messageTimestamp)) {
+    return messageTimestamp > 1e12 ? messageTimestamp : messageTimestamp * 1000;
+  }
+  return null;
+}
+
+/**
+ * Parses one line of a Prime Agent session JSONL file.
+ *
+ * Assistant messages are counted as written. `child_usage_attributed` entries
+ * fold child spend into the parent in memory on reload; on disk the parent
+ * line stays parent-only and the child session file carries the child, so
+ * counting both files once is exact. Attribution entries themselves are
+ * ignored so a parent+child pair is not counted twice.
+ */
+export function parsePrimeAgentLine(line: string, state: PrimeAgentScanState): UsageRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+
+  const record = parsed as Record<string, unknown>;
+  if (record["type"] === "session") {
+    const id = record["id"];
+    if (typeof id === "string" && id.length > 0) state.sessionId = id;
+    return null;
+  }
+
+  if (record["type"] !== "message") return null;
+  const message = record["message"];
+  if (typeof message !== "object" || message === null) return null;
+  const messageRecord = message as Record<string, unknown>;
+  if (messageRecord["role"] !== "assistant") return null;
+
+  const usage = messageRecord["usage"];
+  if (typeof usage !== "object" || usage === null) return null;
+  const usageRecord = usage as Record<string, unknown>;
+
+  const timestampMs = primeAgentTimestampMs(record, messageRecord);
+  if (timestampMs === null) return null;
+
+  const model =
+    typeof messageRecord["model"] === "string" && messageRecord["model"].trim().length > 0
+      ? messageRecord["model"].trim()
+      : "unknown";
+  const providerName =
+    typeof messageRecord["provider"] === "string" ? messageRecord["provider"] : undefined;
+
+  const totals: UsageTokenTotals = {
+    uncachedInputTokens: int(usageRecord["input"]),
+    cachedInputTokens: int(usageRecord["cacheRead"]),
+    cacheCreationTokens: int(usageRecord["cacheWrite"]),
+    outputTokens: int(usageRecord["output"]),
+    reasoningTokens: int(usageRecord["reasoning"] ?? usageRecord["reasoningTokens"]),
+  };
+  if (totalTokens(totals) === 0) return null;
+
+  state.messageIndex += 1;
+  const entryId = typeof record["id"] === "string" && record["id"].length > 0 ? record["id"] : null;
+  // Forked sessions copy parent entries with the same id, timestamp, and
+  // usage. Including those (and not the session id) drops the copies without
+  // needing a path. A fallback identity is last resort for entries with no id.
+  const dedupeKey =
+    entryId === null
+      ? `${state.sessionId}:${timestampMs}:${state.messageIndex}:${model}`
+      : `${entryId}:${timestampMs}:${totals.uncachedInputTokens}:${totals.cachedInputTokens}:${totals.cacheCreationTokens}:${totals.outputTokens}:${model}`;
+
+  return {
+    provider: resolvePrimeAgentUsageProvider(providerName, model),
+    harness: "primeAgent",
+    timestampMs,
+    model,
+    sessionId: state.sessionId,
+    totals,
+    reportedCostUsd: primeAgentReportedCostUsd(usageRecord),
+    dedupeKey,
+  };
 }
 
 export { EMPTY_TOTALS };
