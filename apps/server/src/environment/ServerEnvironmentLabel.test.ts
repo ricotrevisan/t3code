@@ -7,7 +7,11 @@ import * as PlatformError from "effect/PlatformError";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-import { HostProcessHostname, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessEnvironment,
+  HostProcessHostname,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
 import { vi } from "vite-plus/test";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -61,6 +65,49 @@ afterEach(() => {
 });
 
 describe("resolveServerEnvironmentLabel", () => {
+  it.effect("prefers T3CODE_ENVIRONMENT_LABEL over the hostname", () =>
+    Effect.gen(function* () {
+      const result = yield* ServerEnvironmentLabel.resolveServerEnvironmentLabel({
+        cwdBaseName: "t3code",
+      }).pipe(
+        Effect.provide(withHostPlatform(TestLayer, "linux", "openclaw")),
+        Effect.provideService(HostProcessEnvironment, {
+          T3CODE_ENVIRONMENT_LABEL: "Prime RPC",
+        }),
+      );
+
+      expect(result).toBe("Prime RPC");
+    }),
+  );
+
+  it.effect("prefers a configured label file over the hostname", () =>
+    Effect.gen(function* () {
+      const result = yield* ServerEnvironmentLabel.resolveServerEnvironmentLabel({
+        cwdBaseName: "t3code",
+        labelFilePath: "/tmp/environment-label",
+      }).pipe(
+        Effect.provide(
+          withHostPlatform(
+            Layer.merge(
+              ProcessRunnerTest,
+              FileSystem.layerNoop({
+                exists: (path) => Effect.succeed(path === "/tmp/environment-label"),
+                readFileString: (path) =>
+                  path === "/tmp/environment-label"
+                    ? Effect.succeed("Prime RPC\n")
+                    : Effect.succeed(""),
+              }),
+            ),
+            "linux",
+            "openclaw",
+          ),
+        ),
+      );
+
+      expect(result).toBe("Prime RPC");
+    }),
+  );
+
   it.effect("uses hostname fallback regardless of launch mode", () =>
     Effect.gen(function* () {
       const result = yield* ServerEnvironmentLabel.resolveServerEnvironmentLabel({

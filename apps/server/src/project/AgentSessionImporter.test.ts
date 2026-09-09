@@ -235,6 +235,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           getBinding: () => Effect.succeed(Option.none()),
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
+          touchLastSeenAt: () => Effect.void,
         });
 
         const result = yield* runImport({
@@ -340,6 +341,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           getBinding: () => Effect.die("must not read a scanner skip binding"),
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
+          touchLastSeenAt: () => Effect.void,
         });
 
         const result = yield* runImport({
@@ -418,6 +420,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
             Effect.succeed(bindings[0] === undefined ? Option.none() : Option.some(bindings[0])),
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
+          touchLastSeenAt: () => Effect.void,
         });
         const snapshots = makeSnapshotsLayer({
           project: makeProject(),
@@ -459,6 +462,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           getBinding: () => Effect.succeed(Option.some(runningBinding)),
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
+          touchLastSeenAt: () => Effect.void,
         });
         const engine = OrchestrationEngine.OrchestrationEngineService.of({
           dispatch: () => Effect.die("must not replay history or settle active work"),
@@ -514,6 +518,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           getBinding: () => Effect.succeed(Option.none()),
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
+          touchLastSeenAt: () => Effect.void,
         });
 
         const result = yield* runImport({
