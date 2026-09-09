@@ -11,7 +11,19 @@ describe("buildModelPickerSearchText", () => {
         name: "Claude Opus 4.7",
         subProvider: "GitHub Copilot",
       }),
-    ).toBe("claude opus 4.7 github copilot opencode opencode");
+    ).toBe("claude opus 4 7 github copilot opencode opencode");
+  });
+
+  it("indexes OpenRouter slugs with punctuation folded to spaces", () => {
+    expect(
+      buildModelPickerSearchText({
+        driverKind: "primeAgent",
+        providerDisplayName: "Prime Agent",
+        slug: "openrouter/z-ai/glm-5.3-flash",
+        name: "Z.ai: GLM 5.3 Flash",
+        subProvider: "openrouter",
+      }),
+    ).toBe("z ai: glm 5 3 flash openrouter z ai glm 5 3 flash openrouter primeagent prime agent");
   });
 });
 
@@ -127,5 +139,18 @@ describe("scoreModelPickerSearch", () => {
         "personal",
       ),
     ).not.toBeNull();
+  });
+
+  it("matches hyphenated OpenRouter model ids to spaced display names", () => {
+    const model = {
+      driverKind: "primeAgent",
+      providerDisplayName: "Prime Agent",
+      slug: "openrouter/z-ai/glm-5.3-flash",
+      name: "Z.ai: GLM 5.3 Flash",
+      subProvider: "openrouter",
+    };
+    expect(scoreModelPickerSearch(model, "glm-5.3-flash")).not.toBeNull();
+    expect(scoreModelPickerSearch(model, "z-ai/glm-5.3-flash")).not.toBeNull();
+    expect(scoreModelPickerSearch(model, "glm 5.3 flash")).not.toBeNull();
   });
 });
