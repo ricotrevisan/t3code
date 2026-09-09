@@ -50,7 +50,9 @@ interface ProviderTransferBudget {
 // orders of magnitude. The CI report preserves exact values for review.
 const TRANSFER_BUDGET = {
   totalWireBytes: 15_500,
-  threadSnapshotWireBytes: 7_500,
+  // The fork persists activity sequence numbers for stable ordering. The history
+  // fixture is ~7.7 KB on the wire with these fields; keep the total cap unchanged.
+  threadSnapshotWireBytes: 8_000,
   measuredTurnWebSocketWireBytes: 8_000,
   measuredTurnWebSocketDecodedBytes: 68_000,
   measuredTurnWebSocketMessages: 21,
