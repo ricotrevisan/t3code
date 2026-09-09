@@ -56,6 +56,7 @@ export class ElectronShell extends Context.Service<
     readonly openExternal: (rawUrl: unknown) => Effect.Effect<boolean>;
     /** Opens a known System Settings pane by identifier, not by URL. */
     readonly openSystemSettings: (pane: SystemSettingsPane) => Effect.Effect<boolean>;
+    readonly hasProtocolHandler: (scheme: string) => Effect.Effect<boolean>;
     readonly copyText: (text: string) => Effect.Effect<void>;
   }
 >()("@t3tools/desktop/electron/ElectronShell") {}
@@ -80,6 +81,14 @@ export const make = ElectronShell.of({
         () => false,
       ),
     ),
+  hasProtocolHandler: (scheme) =>
+    Effect.sync(() => {
+      try {
+        return Electron.app.getApplicationNameForProtocol(`${scheme}://`) !== "";
+      } catch {
+        return false;
+      }
+    }),
   copyText: (text) =>
     Effect.promise(() => Electron.clipboard.writeText(text).catch(() => undefined)),
 });
