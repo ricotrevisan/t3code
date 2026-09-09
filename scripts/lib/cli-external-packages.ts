@@ -27,6 +27,7 @@
  */
 export const CLI_RUNTIME_EXTERNAL_PREFIXES = [
   "node-pty",
+  "playwright-core",
   "ffi-rs",
   "@yuuang/",
   "@ff-labs/",
