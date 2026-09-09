@@ -39,14 +39,63 @@ vi.mock("./usageProviders", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./usageProviders")>();
   return {
     ...actual,
-    PROVIDER_PRESENTATION: {
-      codex: { color: "white", label: "Codex", mark: "span" },
-      claude: { color: "orange", label: "Claude Code", mark: "span" },
-    },
+    PROVIDER_PRESENTATION: Object.fromEntries(
+      Object.entries(actual.PROVIDER_PRESENTATION).map(([provider, presentation]) => [
+        provider,
+        { ...presentation, mark: "span" },
+      ]),
+    ),
   };
 });
 
 import { UsagePage } from "./UsagePage";
+import { readUsagePagePreferences } from "./usagePagePreferences";
+
+const providerTotals = (codex: number, claude: number) =>
+  new Map([
+    ["codex", { costUsd: codex, totalTokens: codex * 1_000 }],
+    ["claude", { costUsd: claude, totalTokens: claude * 1_000 }],
+  ] as const);
+
+const modelTotals = Object.freeze([
+  {
+    model: "expensive-model",
+    provider: "claude" as const,
+    costUsd: 10,
+    totalTokens: 100,
+    records: 1,
+    unpricedRecords: 0,
+    costShare: 10 / 16,
+  },
+  {
+    model: "token-heavy-model",
+    provider: "codex" as const,
+    costUsd: 5,
+    totalTokens: 1_000,
+    records: 1,
+    unpricedRecords: 0,
+    costShare: 5 / 16,
+  },
+  {
+    model: "token-heavy-cheaper-model",
+    provider: "codex" as const,
+    costUsd: 1,
+    totalTokens: 1_000,
+    records: 1,
+    unpricedRecords: 0,
+    costShare: 1 / 16,
+  },
+  {
+    model: "unpriced-model",
+    provider: "codex" as const,
+    costUsd: 0,
+    totalTokens: 500,
+    records: 2,
+    unpricedRecords: 2,
+    costShare: 0,
+  },
+]);
+
 const environments = [
   {
     environmentId: EnvironmentId.make("test-environment"),

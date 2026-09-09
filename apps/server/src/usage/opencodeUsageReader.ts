@@ -57,6 +57,7 @@ function parseOpenCodeMessage(
   const cost = message.cost;
   return {
     provider: "opencode",
+    harness: "native",
     timestampMs,
     model,
     sessionId: fallback.sessionId || text(message.sessionID),

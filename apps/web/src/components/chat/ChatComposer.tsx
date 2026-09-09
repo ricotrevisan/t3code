@@ -55,6 +55,7 @@ import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model"
 import { USAGE_LIMITS_COMMAND } from "@t3tools/shared/usageLimits";
 import {
   memo,
+  Fragment,
   type ComponentProps,
   type ReactNode,
   useCallback,
@@ -5113,72 +5114,60 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onOpenProviderSetup={onOpenProviderSetup}
       />
 
-      {composerControlsCompact ? (
-        <CompactComposerControlsMenu
-          interactionMode={interactionMode}
-          runtimeMode={effectiveRuntimeMode}
-          runtimeModeOptions={runtimeModeOptions}
-          showInteractionModeToggle={planModeUiEnabled}
-          traitsMenuContent={providerTraitsMenuContent}
-          onToggleInteractionMode={toggleInteractionMode}
-          onRuntimeModeChange={handleRuntimeModeChange}
-        />
-      ) : (
-        <>
-          {restingBlockDefs.map((def, index) => {
-            if (!composerControlsInStrip) {
-              return <Fragment key={def.id}>{def.content}</Fragment>;
-            }
-            const hidden = index >= restingBlockDefs.length - restingHiddenBlockCount;
-            return (
-              <div
-                key={def.id}
-                data-resting-block={def.id}
-                data-composer-block-icon-only={
-                  index >= restingBlockDefs.length - iconOnlyBlockCount ? "true" : "false"
-                }
-                aria-hidden={hidden || undefined}
-                inert={hidden || undefined}
-                className={cn(
-                  "flex w-max min-w-max shrink-0 items-center gap-1",
-                  hidden && "pointer-events-none invisible absolute",
-                  index >= restingBlockDefs.length - iconOnlyBlockCount &&
-                    "[&_[data-composer-control-label]]:pointer-events-none [&_[data-composer-control-label]]:invisible [&_[data-composer-control-label]]:absolute [&_[data-composer-control-label]]:w-max [&_[data-composer-control-label]]:max-w-none [&_[data-composer-control-compact-icon]]:[visibility:inherit] [&_[data-composer-control-compact-icon]]:relative",
-                )}
-              >
-                {def.content}
-              </div>
-            );
-          })}
-          {composerControlsInStrip ? (
+      <>
+        {restingBlockDefs.map((def, index) => {
+          if (!composerControlsInStrip) {
+            return <Fragment key={def.id}>{def.content}</Fragment>;
+          }
+          const hidden = index >= restingBlockDefs.length - restingHiddenBlockCount;
+          return (
             <div
-              data-resting-controls-overflow
-              aria-hidden={hiddenRestingBlockIds.length === 0 || undefined}
-              inert={hiddenRestingBlockIds.length === 0 || undefined}
+              key={def.id}
+              data-resting-block={def.id}
+              data-composer-block-icon-only={
+                index >= restingBlockDefs.length - iconOnlyBlockCount ? "true" : "false"
+              }
+              aria-hidden={hidden || undefined}
+              inert={hidden || undefined}
               className={cn(
-                "min-w-0 shrink-0",
-                hiddenRestingBlockIds.length === 0 && "pointer-events-none invisible absolute",
+                "flex w-max min-w-max shrink-0 items-center gap-1",
+                hidden && "pointer-events-none invisible absolute",
+                index >= restingBlockDefs.length - iconOnlyBlockCount &&
+                  "[&_[data-composer-control-label]]:pointer-events-none [&_[data-composer-control-label]]:invisible [&_[data-composer-control-label]]:absolute [&_[data-composer-control-label]]:w-max [&_[data-composer-control-label]]:max-w-none [&_[data-composer-control-compact-icon]]:[visibility:inherit] [&_[data-composer-control-compact-icon]]:relative",
               )}
             >
-              <CompactComposerControlsMenu
-                interactionMode={interactionMode}
-                runtimeMode={effectiveRuntimeMode}
-                runtimeModeOptions={runtimeModeOptions}
-                size="xs"
-                hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
-                showInteractionModeToggle={
-                  planModeUiEnabled && hiddenRestingBlockIds.includes("mode")
-                }
-                traitsMenuContent={
-                  hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
-                }
-                onToggleInteractionMode={toggleInteractionMode}
-                onRuntimeModeChange={handleRuntimeModeChange}
-              />
+              {def.content}
             </div>
-          ) : null}
-        </>
-      )}
+          );
+        })}
+        {composerControlsInStrip ? (
+          <div
+            data-resting-controls-overflow
+            aria-hidden={hiddenRestingBlockIds.length === 0 || undefined}
+            inert={hiddenRestingBlockIds.length === 0 || undefined}
+            className={cn(
+              "min-w-0 shrink-0",
+              hiddenRestingBlockIds.length === 0 && "pointer-events-none invisible absolute",
+            )}
+          >
+            <CompactComposerControlsMenu
+              interactionMode={interactionMode}
+              runtimeMode={effectiveRuntimeMode}
+              runtimeModeOptions={runtimeModeOptions}
+              size="xs"
+              hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
+              showInteractionModeToggle={
+                planModeUiEnabled && hiddenRestingBlockIds.includes("mode")
+              }
+              traitsMenuContent={
+                hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
+              }
+              onToggleInteractionMode={toggleInteractionMode}
+              onRuntimeModeChange={handleRuntimeModeChange}
+            />
+          </div>
+        ) : null}
+      </>
     </>
   );
   const showTasksTab =

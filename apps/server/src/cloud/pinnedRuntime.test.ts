@@ -24,7 +24,7 @@ const version = "1.2.3";
 const archiveName = `t3-${version}-linux-x64.tar.gz`;
 const archiveBytes = new TextEncoder().encode("not really a tarball");
 const archiveHex = (bytes: Uint8Array) =>
-  Effect.promise(() => crypto.subtle.digest("SHA-256", bytes)).pipe(
+  Effect.promise(() => crypto.subtle.digest("SHA-256", Uint8Array.from(bytes))).pipe(
     Effect.map((digest) =>
       Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""),
     ),

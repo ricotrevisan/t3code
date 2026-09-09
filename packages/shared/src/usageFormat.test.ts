@@ -6,6 +6,7 @@ import {
   formatDateTimeShort,
   formatHourShort,
   formatPercent,
+  formatProviderSessionLabel,
   formatRelativeHourShort,
   makeWindow,
 } from "./usageFormat.ts";
@@ -18,6 +19,26 @@ describe("formatPercent", () => {
     expect(formatPercent(0.001)).toBe("0.1%");
     expect(formatPercent(0.023)).toBe("2.3%");
     expect(formatPercent(0.00004, 2)).toBe("<0.01%");
+  });
+});
+
+describe("formatProviderSessionLabel", () => {
+  it("keeps the session count when usage is only native", () => {
+    expect(
+      formatProviderSessionLabel({ sessions: 12, nativeSessions: 12, primeAgentSessions: 0 }),
+    ).toBe("12 sessions");
+  });
+
+  it("marks Prime Agent-only usage", () => {
+    expect(
+      formatProviderSessionLabel({ sessions: 4, nativeSessions: 0, primeAgentSessions: 4 }),
+    ).toBe("4 via PrimeAgent");
+  });
+
+  it("splits native and Prime Agent session counts", () => {
+    expect(
+      formatProviderSessionLabel({ sessions: 16, nativeSessions: 12, primeAgentSessions: 4 }),
+    ).toBe("12 native · 4 via PrimeAgent");
   });
 });
 

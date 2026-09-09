@@ -230,6 +230,7 @@ async function readDatabase(path: string, fallbackTimestamp: number): Promise<Us
           });
           const record: UsageRecord = {
             provider: "antigravity",
+            harness: "native",
             sessionId,
             timestampMs: entry.timestampMs ?? trajectoryTimestamp ?? fallbackTimestamp,
             model:

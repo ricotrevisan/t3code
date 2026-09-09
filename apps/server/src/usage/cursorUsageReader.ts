@@ -247,6 +247,7 @@ export async function readCursorAccountUsage(
         occurrences.set(key, occurrence + 1);
         records.push({
           provider: "cursor",
+          harness: "native",
           timestampMs,
           model: event.model,
           rateModel: cursorRateModel(event.model),

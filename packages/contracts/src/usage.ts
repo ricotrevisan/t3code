@@ -6,6 +6,17 @@
  *
  * Environments return pre-aggregated `(day, hourStart?, provider, model, sourcePath?)`
  * buckets. Raw transcript records never cross the wire.
+ * Each environment scans on-disk session transcripts rather than relying on
+ * T3 Code's own orchestration projections, so usage stays complete even for
+ * turns that were never driven through T3 Code. Native CLIs are read from
+ * their homes (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
+ * `~/.grok/sessions/**\/updates.jsonl`). Prime Agent sessions live under the
+ * environment's own base dir (`prime-agent/sessions/**\/*.jsonl`) and are
+ * attributed to the upstream provider while preserving Prime Agent as the
+ * harness.
+ * Environments return pre-aggregated
+ * `(day, hourStart?, provider, harness?, model)` buckets. Raw transcript
+ * records never cross the wire.
  *
  * @module usage
  */
@@ -27,6 +38,10 @@ export const USAGE_CONTRACT_VERSION = 6 as const;
  *
  * v5/v6 add providers and optional source attribution; v4 Claude/Codex
  * buckets remain valid in mixed-version environments.
+ * v6 adds `opencode`/`unknown` and an optional `harness` on buckets and
+ * source fingerprints. v5 Grok buckets and v4 Claude/Codex buckets remain
+ * valid, and a missing `harness` is native, so mixed-version environments
+ * keep those totals instead of treating every older server as stale.
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
@@ -37,8 +52,19 @@ export const UsageProviderKind = Schema.Literals([
   "cursor",
   "opencode",
   "antigravity",
+  "unknown",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
+
+/**
+ * Which runtime produced the tokens. `native` is a provider CLI's own home;
+ * `primeAgent` is a Prime Agent session attributed to an upstream provider.
+ *
+ * Omitted on summaries from servers that predate v6; clients treat that as
+ * `native`.
+ */
+export const UsageHarnessKind = Schema.Literals(["native", "primeAgent"]);
+export type UsageHarnessKind = typeof UsageHarnessKind.Type;
 
 /**
  * A calendar day in the reporting time zone, formatted `YYYY-MM-DD`.
@@ -85,8 +111,9 @@ export const UsageTokenTotals = Schema.Struct({
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
 
 /**
- * One `(day, hourStart?, provider, model)` cell. `hourStart` is the UTC start
- * instant of a rolling bucket and is present only for hourly requests.
+ * One `(day, hourStart?, provider, harness?, model)` cell. `hourStart` is the
+ * UTC start instant of a rolling bucket and is present only for hourly
+ * requests. `harness` is omitted by older servers and means `native`.
  *
  * `costUsd` is the raw API-equivalent cost of these tokens. It is not money
  * spent: subscription plans bill separately. `unpricedRecords` counts records
@@ -97,6 +124,7 @@ export const UsageBucket = Schema.Struct({
   day: UsageDay,
   hourStart: Schema.optional(TrimmedNonEmptyString),
   provider: UsageProviderKind,
+  harness: Schema.optional(UsageHarnessKind),
   model: TrimmedNonEmptyString,
   /** Source directory, so overlapping multi-home environments merge once per source. */
   sourcePath: Schema.optional(TrimmedNonEmptyString),
@@ -127,6 +155,12 @@ export type UsageBucket = typeof UsageBucket.Type;
 export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
+  /**
+   * Which runtime produced these tokens. Omitted by older servers; clients
+   * treat that as `native`. Prime Agent sessions are environment-local, so
+   * this field keeps them from collapsing into a native provider home.
+   */
+  harness: Schema.optional(UsageHarnessKind),
   resolvedHomePath: TrimmedNonEmptyString,
   /**
    * Filesystem identity of the transcript directory, as `device:inode`.

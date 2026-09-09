@@ -6,7 +6,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
 
 for (const source of ["fork48", "fork50", "upstream"] as const) {
-  it.layer(NodeSqliteClient.layerMemory())(`051 upgrade from ${source}`, (it) => {
+  it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(`051 upgrade from ${source}`, (it) => {
     it.effect("retains existing threads and installs upstream columns and pull request links", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
