@@ -70,6 +70,7 @@ import {
 } from "../observability/Metrics.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { mergeDirenvExportedEnv } from "../workspace/workspaceDirenvEnv.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
@@ -2222,7 +2223,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.andThen(
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
-            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
+            const terminalEnv = mergeDirenvExportedEnv(
+              session.cwd,
+              createTerminalSpawnEnv(baseEnv, session.runtimeEnv),
+              { env: baseEnv },
+            );
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
