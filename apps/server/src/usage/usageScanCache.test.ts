@@ -13,6 +13,7 @@ import type { UsageRecord } from "./usageTranscripts.ts";
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
     provider: "claude",
+    harness: "native",
     timestampMs: 1_786_000_000_000,
     model: "claude-fable-5",
     sessionId: "session-a",
@@ -35,6 +36,7 @@ function position(overrides: Partial<CachedFile["position"]> = {}): CachedFile["
     guardLength: 64,
     guardHash: 0xdeadbeef,
     codexState: null,
+    primeAgentState: null,
     ...overrides,
   };
 }
@@ -95,6 +97,36 @@ describe("scan cache round trip", () => {
     expect(restored.get("/b.jsonl")).toEqual(original.get("/b.jsonl"));
     expect(restored.get("/grok.jsonl")).toEqual(original.get("/grok.jsonl"));
     expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
+  });
+
+  it("restores Prime Agent records with mixed upstream providers", () => {
+    const original: ScanCache = new Map();
+    original.set("/prime.jsonl", {
+      size: 80,
+      mtimeMs: 500,
+      provider: "primeAgent",
+      records: [
+        record({
+          provider: "codex",
+          harness: "primeAgent",
+          model: "gpt-5.6-sol",
+          dedupeKey: "abc:1",
+        }),
+        record({
+          provider: "opencode",
+          harness: "primeAgent",
+          model: "glm-5.3-flash",
+          dedupeKey: "def:2",
+        }),
+      ],
+      tailRecords: [],
+      position: position({
+        primeAgentState: { sessionId: "session-p", messageIndex: 2 },
+      }),
+    });
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+    expect(restored.get("/prime.jsonl")).toEqual(original.get("/prime.jsonl"));
   });
 
   it("drops an entry whose persisted parse state is corrupt", () => {

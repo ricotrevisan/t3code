@@ -34,6 +34,7 @@ import {
   formatDayShort,
   formatHourShort,
   formatPercent,
+  formatProviderSessionLabel,
   formatTokens,
   formatUsd,
   makeWindow,
@@ -381,10 +382,11 @@ export function UsagePage() {
                       const totals = merged.providers.find((entry) => entry.provider === provider);
                       const share =
                         metric === "cost" ? (totals?.costShare ?? 0) : (totals?.tokenShare ?? 0);
-                      const providerSessions = totals?.sessions ?? 0;
-                      const sessionLabel = `${formatCount(providerSessions)} ${
-                        providerSessions === 1 ? "session" : "sessions"
-                      }`;
+                      const sessionLabel = formatProviderSessionLabel({
+                        sessions: totals?.sessions ?? 0,
+                        nativeSessions: totals?.nativeSessions ?? 0,
+                        primeAgentSessions: totals?.primeAgentSessions ?? 0,
+                      });
                       return (
                         <div key={provider} className="flex flex-col gap-1">
                           <div className="flex items-baseline justify-between gap-4">
