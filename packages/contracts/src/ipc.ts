@@ -1311,7 +1311,7 @@ export interface DesktopBridge {
   /**
    * Probe this desktop machine for installed remote-capable editor CLIs
    * (used for remote open-in-editor deep links). Optional: older desktop
-   * builds lack it; callers fall back to VS Code only.
+   * builds lack it; callers fall back to the primary supported editors.
    */
   probeRemoteEditors?: () => Promise<readonly EditorId[]>;
   /** Present when the desktop shell can perform an ordered plain-text paste. */
