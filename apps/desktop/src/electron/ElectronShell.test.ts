@@ -2,12 +2,16 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { beforeEach, vi } from "vite-plus/test";
 
-const { openExternalMock, writeTextMock } = vi.hoisted(() => ({
+const { getApplicationNameForProtocolMock, openExternalMock, writeTextMock } = vi.hoisted(() => ({
+  getApplicationNameForProtocolMock: vi.fn(),
   openExternalMock: vi.fn(),
   writeTextMock: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
+  app: {
+    getApplicationNameForProtocol: getApplicationNameForProtocolMock,
+  },
   shell: {
     openExternal: openExternalMock,
   },
@@ -20,9 +24,22 @@ import * as ElectronShell from "./ElectronShell.ts";
 
 describe("ElectronShell", () => {
   beforeEach(() => {
+    getApplicationNameForProtocolMock.mockReset();
     openExternalMock.mockReset();
     writeTextMock.mockReset();
   });
+
+  it.effect("detects registered editor protocol handlers", () =>
+    Effect.gen(function* () {
+      getApplicationNameForProtocolMock.mockImplementation((url: string) =>
+        url === "zed://" ? "Zed" : "",
+      );
+
+      const electronShell = yield* ElectronShell.ElectronShell;
+      assert.equal(yield* electronShell.hasProtocolHandler("zed"), true);
+      assert.equal(yield* electronShell.hasProtocolHandler("vscode"), false);
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
 
   it.effect("opens safe external URLs", () =>
     Effect.gen(function* () {
