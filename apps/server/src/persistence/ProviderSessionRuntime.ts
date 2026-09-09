@@ -59,6 +59,11 @@ export type GetProviderSessionRuntimeInput = typeof GetProviderSessionRuntimeInp
 export const DeleteProviderSessionRuntimeInput = Schema.Struct({ threadId: ThreadId });
 export type DeleteProviderSessionRuntimeInput = typeof DeleteProviderSessionRuntimeInput.Type;
 
+export const TouchProviderSessionRuntimeInput = Schema.Struct({
+  threadId: ThreadId,
+  lastSeenAt: IsoDateTime,
+});
+export type TouchProviderSessionRuntimeInput = typeof TouchProviderSessionRuntimeInput.Type;
 export const RecordImportedTranscriptInput = Schema.Struct({
   threadId: ThreadId,
   source: AgentSessionImportSource,
@@ -117,6 +122,14 @@ export class ProviderSessionRuntimeRepository extends Context.Service<
     readonly deleteByThreadId: (
       input: DeleteProviderSessionRuntimeInput,
     ) => Effect.Effect<void, ProviderSessionRuntimeRepositoryError>;
+
+    /**
+     * Bump `lastSeenAt` without rewriting resume/payload fields.
+     * Missing rows are a no-op so activity events can race session start.
+     */
+    readonly touchLastSeenAt: (
+      input: TouchProviderSessionRuntimeInput,
+    ) => Effect.Effect<void, ProviderSessionRuntimeRepositoryError>;
   }
 >()("t3/persistence/ProviderSessionRuntime/ProviderSessionRuntimeRepository") {}
 
@@ -147,6 +160,10 @@ const GetRuntimeRequestSchema = Schema.Struct({
 
 const DeleteRuntimeRequestSchema = GetRuntimeRequestSchema;
 
+const TouchRuntimeRequestSchema = Schema.Struct({
+  threadId: ThreadId,
+  lastSeenAt: IsoDateTime,
+});
 const RecordImportedTranscriptRequestSchema = RecordImportedTranscriptInput.mapFields(
   Struct.assign({ source: Schema.fromJsonString(AgentSessionImportSource) }),
 );
@@ -364,6 +381,16 @@ export const make = Effect.gen(function* () {
       `,
   });
 
+  const touchRuntimeLastSeenAt = SqlSchema.void({
+    Request: TouchRuntimeRequestSchema,
+    execute: ({ threadId, lastSeenAt }) =>
+      sql`
+        UPDATE provider_session_runtime
+        SET last_seen_at = ${lastSeenAt}
+        WHERE thread_id = ${threadId}
+      `,
+  });
+
   const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) =>
     (options?.onConflict === "ignore" ? insertRuntimeRow(runtime) : upsertRuntimeRow(runtime)).pipe(
       Effect.mapError(
@@ -463,12 +490,24 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const touchLastSeenAt: ProviderSessionRuntimeRepository["Service"]["touchLastSeenAt"] = (input) =>
+    touchRuntimeLastSeenAt(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProviderSessionRuntimeRepository.touchLastSeenAt:query",
+          "ProviderSessionRuntimeRepository.touchLastSeenAt:encodeRequest",
+          { threadId: input.threadId },
+        ),
+      ),
+    );
+
   return {
     upsert,
     recordImportedTranscript,
     getByThreadId,
     list,
     deleteByThreadId,
+    touchLastSeenAt,
   } satisfies ProviderSessionRuntimeRepository["Service"];
 });
 

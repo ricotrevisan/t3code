@@ -81,10 +81,19 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           continue;
         }
 
+        if (thread?.hasPendingUserInput === true) {
+          yield* Effect.logDebug("provider.session.reaper.skipped-pending-user-input", {
+            threadId: binding.threadId,
+            idleDurationMs,
+          });
+          continue;
+        }
+
         // The turn can settle while background work runs on (subagent
         // fleets, workflow runs, Monitor watch loops). Those live inside the
-        // provider process, so stopping the session would kill them silently,
-        // and nothing bumps lastSeenAt between turns.
+        // provider process, so stopping the session would kill them silently.
+        // lastSeenAt is bumped on turn/task/user-input events, not on every
+        // token, so a long turn is no longer idle from the user prompt.
         if (thread?.backgroundLiveness != null) {
           yield* Effect.logDebug("provider.session.reaper.skipped-background-work", {
             threadId: binding.threadId,
@@ -100,6 +109,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
               threadId: binding.threadId,
               provider: binding.provider,
               idleDurationMs,
+              inactivityThresholdMs,
               reason: "inactivity_threshold",
             }),
           ),
