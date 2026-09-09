@@ -1080,7 +1080,10 @@ describe("RpcSessionFactory", () => {
       yield* TestClock.adjust("5 seconds");
       const error = yield* Fiber.join(closedFiber);
       expect(error).toBeInstanceOf(ConnectionTransientError);
-      expect(error).toMatchObject({ reason: "transport" });
+      expect(error).toMatchObject({
+        reason: "timeout",
+        message: "Test environment did not respond to RPC ping.",
+      });
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
