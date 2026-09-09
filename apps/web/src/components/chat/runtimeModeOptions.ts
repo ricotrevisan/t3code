@@ -1,6 +1,6 @@
 import type { RuntimeMode, ServerProvider } from "@t3tools/contracts";
 
-export const ALL_RUNTIME_MODE_OPTIONS: ReadonlyArray<RuntimeMode> = [
+const ALL_RUNTIME_MODE_OPTIONS: ReadonlyArray<RuntimeMode> = [
   "approval-required",
   "auto-accept-edits",
   "auto",

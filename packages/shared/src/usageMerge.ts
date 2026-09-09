@@ -87,7 +87,7 @@ export interface MergedUsage {
 }
 
 /** Older servers omit `harness`; that is native CLI usage. */
-export function usageHarnessOf(harness: UsageHarnessKind | undefined): UsageHarnessKind {
+function usageHarnessOf(harness: UsageHarnessKind | undefined): UsageHarnessKind {
   return harness ?? "native";
 }
 

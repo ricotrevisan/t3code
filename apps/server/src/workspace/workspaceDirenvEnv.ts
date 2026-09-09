@@ -15,6 +15,7 @@
  *
  * @module workspaceDirenvEnv
  */
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -69,7 +70,7 @@ function envToSpawnEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return spawnEnv;
 }
 
-export function findEnvrcPath(cwd: string): string | undefined {
+function findEnvrcPath(cwd: string): string | undefined {
   let dir = NodePath.resolve(cwd);
   for (;;) {
     const candidate = NodePath.join(dir, ".envrc");
@@ -80,11 +81,12 @@ export function findEnvrcPath(cwd: string): string | undefined {
   }
 }
 
-export function resolveDirenvPath(env: NodeJS.ProcessEnv): string | undefined {
+function resolveDirenvPath(env: NodeJS.ProcessEnv): string | undefined {
   const configured = env.DIRENV_BIN?.trim();
   if (configured && NodeFS.existsSync(configured)) return configured;
 
-  const executable = process.platform === "win32" ? "direnv.exe" : "direnv";
+  const platform = HostProcessPlatform.defaultValue();
+  const executable = platform === "win32" ? "direnv.exe" : "direnv";
   const pathValue = env.PATH ?? "";
   for (const dir of pathValue.split(NodePath.delimiter)) {
     if (dir.length === 0) continue;
@@ -92,7 +94,7 @@ export function resolveDirenvPath(env: NodeJS.ProcessEnv): string | undefined {
     if (NodeFS.existsSync(candidate)) return candidate;
   }
 
-  const fallback = process.platform === "win32" ? undefined : "/usr/bin/direnv";
+  const fallback = platform === "win32" ? undefined : "/usr/bin/direnv";
   if (fallback && NodeFS.existsSync(fallback)) return fallback;
   return undefined;
 }

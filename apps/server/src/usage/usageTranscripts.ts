@@ -9,7 +9,7 @@
 import type { UsageHarnessKind, UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
 /** Which on-disk tree a scan is walking. Distinct from the attributed provider. */
-export const USAGE_SCAN_KINDS = ["claude", "codex", "grok", "primeAgent"] as const;
+const USAGE_SCAN_KINDS = ["claude", "codex", "grok", "primeAgent"] as const;
 export type UsageScanKind = (typeof USAGE_SCAN_KINDS)[number];
 
 export function isUsageScanKind(value: unknown): value is UsageScanKind {

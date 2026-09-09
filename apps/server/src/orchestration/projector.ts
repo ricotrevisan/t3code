@@ -854,12 +854,11 @@ export function projectEvent(
             payload.activity.sequence === undefined
               ? { ...payload.activity, sequence: event.sequence }
               : payload.activity;
-          const activities = [
-            ...thread.activities.filter((entry) => entry.id !== activity.id),
-            activity,
-          ]
-            .toSorted(compareThreadActivities)
-            .slice(-500);
+          const activities = retainThreadActivities(
+            [...thread.activities.filter((entry) => entry.id !== activity.id), activity].toSorted(
+              compareThreadActivities,
+            ),
+          );
 
           return {
             ...nextBase,

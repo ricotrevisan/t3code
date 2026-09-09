@@ -34,7 +34,7 @@ const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unkno
 const decodeResponse = Schema.decodeUnknownEffect(PrimeRpcResponse);
 const encodeJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
-export class PrimeRpcError extends Schema.TaggedErrorClass<PrimeRpcError>()("PrimeRpcError", {
+export class PrimeRpcError extends Schema.TaggedError<PrimeRpcError>()("PrimeRpcError", {
   operation: Schema.String,
   detail: Schema.String,
   cause: Schema.optional(Schema.Defect()),

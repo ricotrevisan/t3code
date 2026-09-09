@@ -10,9 +10,9 @@
  */
 
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFs from "node:fs";
+import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
-import * as NodeOs from "node:os";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
@@ -50,21 +50,21 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 
 export const LAB_CHROMIUM_CLIENT_ID = "lab-chromium";
-export const LAB_CDP_HOST = "127.0.0.1";
-export const LAB_CDP_PORT = 9222;
+const LAB_CDP_HOST = "127.0.0.1";
+const LAB_CDP_PORT = 9222;
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 } as const;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_INTERACTIVE_ELEMENTS = 200;
 const MAX_SCREENSHOT_WIDTH = 1280;
 
-export const defaultLabCdpOrigin = (): string =>
+const defaultLabCdpOrigin = (): string =>
   `http://${LAB_CDP_HOST}:${Number(process.env.T3_BROWSER_DEBUG_PORT ?? LAB_CDP_PORT)}`;
 
-export const defaultLabBrowserCommand = (): string => {
+const defaultLabBrowserCommand = (): string => {
   const fromEnv = process.env.T3_BROWSER_BIN;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
-  const local = NodePath.join(NodeOs.homedir(), ".local/bin/t3-browser");
-  if (NodeFs.existsSync(local)) return local;
+  const local = NodePath.join(NodeOS.homedir(), ".local/bin/t3-browser");
+  if (NodeFS.existsSync(local)) return local;
   return "t3-browser";
 };
 
@@ -193,7 +193,7 @@ const bindPage = (
   return { tabId, page };
 };
 
-export const attachLabBrowserRuntime = async (options: {
+const attachLabBrowserRuntime = async (options: {
   readonly origin: string;
   readonly spawned: NodeChildProcess.ChildProcess | null;
 }): Promise<LabBrowserRuntime> => {
@@ -217,7 +217,7 @@ export const attachLabBrowserRuntime = async (options: {
   return runtime;
 };
 
-export const ensureLabChromium = async (options?: {
+const ensureLabChromium = async (options?: {
   readonly origin?: string;
   readonly command?: string;
 }): Promise<{ origin: string; spawned: NodeChildProcess.ChildProcess | null }> => {
@@ -540,7 +540,7 @@ export const makeLabPreviewAutomationHost = (
   supportedOperations: [...PREVIEW_AUTOMATION_OPERATIONS],
 });
 
-export const runLabPreviewAutomationHost = (options?: {
+const runLabPreviewAutomationHost = (options?: {
   readonly origin?: string;
   readonly command?: string;
   readonly execute?: typeof executeLabPreviewOperation;

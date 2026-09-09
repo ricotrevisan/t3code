@@ -90,7 +90,7 @@ export function primeModelSlug(input: { readonly provider: string; readonly id: 
   return `${input.provider}/${input.id}`;
 }
 
-export function isPrimeGlm53FlashModelId(modelId: string): boolean {
+function isPrimeGlm53FlashModelId(modelId: string): boolean {
   const id = modelId.trim().toLowerCase();
   return id === "glm-5.3-flash" || id.endsWith("/glm-5.3-flash");
 }
@@ -119,7 +119,7 @@ function orderedThinkingLevels(thinkingLevelMap: {
   return [...available, ...extra];
 }
 
-export function resolvePrimeListedThinkingLevelMap(
+function resolvePrimeListedThinkingLevelMap(
   model: PrimeListedModel,
 ): { readonly [x: string]: string | null } | undefined {
   return isPrimeGlm53FlashModelId(model.id)
@@ -156,7 +156,7 @@ export function resolvePrimeSessionThinkingLevel(input: {
   return defaultThinkingLevel(GLM_53_FLASH_THINKING_LEVEL_MAP);
 }
 
-export function primeThinkingCapabilities(
+function primeThinkingCapabilities(
   thinkingLevelMap: { readonly [x: string]: string | null } | undefined,
 ): ModelCapabilities {
   if (thinkingLevelMap === undefined) {

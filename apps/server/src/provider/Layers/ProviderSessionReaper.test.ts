@@ -31,25 +31,6 @@ const defaultModelSelection = {
   model: "gpt-5-codex",
 } as const;
 
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 2_000,
-): Promise<void> {
-  const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
-  const poll = async (): Promise<void> => {
-    if (await predicate()) {
-      return;
-    }
-    if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
-      throw new Error("Timed out waiting for expectation.");
-    }
-    await Effect.runPromise(Effect.yieldNow);
-    return poll();
-  };
-
-  return poll();
-}
-
 const drainFibers = Effect.forEach(Array.from({ length: 10 }), () => Effect.yieldNow, {
   discard: true,
 });
@@ -62,7 +43,7 @@ function makeReadModel(
     readonly session: {
       readonly threadId: ThreadId;
       readonly status: "starting" | "running" | "ready" | "interrupted" | "stopped" | "error";
-      readonly providerName: "codex" | "claudeAgent";
+      readonly providerName: "codex" | "claudeAgent" | "primeAgent";
       readonly runtimeMode: "approval-required" | "full-access" | "auto-accept-edits";
       readonly activeTurnId: TurnId | null;
       readonly lastError: string | null;
@@ -175,6 +156,7 @@ describe("ProviderSessionReaper", () => {
 
   async function createHarness(input: {
     readonly readModel: ReturnType<typeof makeReadModel>;
+    readonly useDefaultThreshold?: boolean;
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
     }) => ReturnType<ProviderServiceShape["stopSession"]>;
@@ -225,7 +207,7 @@ describe("ProviderSessionReaper", () => {
       Layer.provide(runtimeRepositoryLayer),
     );
     const layer = makeProviderSessionReaperLive({
-      inactivityThresholdMs: 1_000,
+      ...(input.useDefaultThreshold ? {} : { inactivityThresholdMs: 1_000 }),
       sweepIntervalMs: 60_000,
     }).pipe(
       Layer.provideMerge(providerSessionDirectoryLayer),
@@ -307,9 +289,7 @@ describe("ProviderSessionReaper", () => {
       }),
     );
 
-    await startReaper();
-
-    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await sweepAt(Date.parse("2026-04-14T01:00:00.000Z"));
 
     expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId });
     expect(harness.stoppedThreadIds.has(threadId)).toBe(true);
@@ -317,9 +297,8 @@ describe("ProviderSessionReaper", () => {
 
   it("keeps Prime sessions on the same 30-minute threshold as other providers", async () => {
     const primeThreadId = ThreadId.make("thread-reaper-prime-default-threshold");
-    const now = await Effect.runPromise(DateTime.now);
-    const lastSeenAt = DateTime.formatIso(DateTime.subtract(now, { minutes: 15 }));
-    const readModelTimestamp = DateTime.formatIso(now);
+    const lastSeenAt = "2026-04-14T00:00:00.000Z";
+    const readModelTimestamp = lastSeenAt;
     const harness = await createHarness({
       readModel: makeReadModel([
         {
@@ -335,7 +314,7 @@ describe("ProviderSessionReaper", () => {
           },
         },
       ]),
-      reaperOptions: "defaults",
+      useDefaultThreshold: true,
     });
     const repository = await runtime!.runPromise(
       Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
@@ -355,10 +334,11 @@ describe("ProviderSessionReaper", () => {
       }),
     );
 
-    await startReaper();
-    await Effect.runPromise(drainFibers);
+    await sweepAt(Date.parse(lastSeenAt) + 30 * 60_000 - 1);
 
     expect(harness.stopSession).not.toHaveBeenCalled();
+    await sweepAt(Date.parse(lastSeenAt) + 30 * 60_000);
+    expect(harness.stopSession).toHaveBeenCalledExactlyOnceWith({ threadId: primeThreadId });
   });
 
   it("skips stale sessions when the thread still has an active turn", async () => {
@@ -734,9 +714,7 @@ describe("ProviderSessionReaper", () => {
       }),
     );
 
-    await startReaper();
-
-    await waitFor(() => harness.stopSession.mock.calls.length === 2);
+    await sweepAt(Date.parse("2026-04-14T01:00:00.000Z"));
 
     expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
       failedThreadId,
@@ -815,9 +793,7 @@ describe("ProviderSessionReaper", () => {
       }),
     );
 
-    await startReaper();
-
-    await waitFor(() => harness.stopSession.mock.calls.length === 2);
+    await sweepAt(Date.parse("2026-04-14T01:00:00.000Z"));
 
     expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
       defectThreadId,
