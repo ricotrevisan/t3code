@@ -1,5 +1,6 @@
 import {
   USAGE_CONTRACT_VERSION,
+  USAGE_MERGE_COMPATIBLE_SINCE,
   type EnvironmentId,
   type UsageBucket,
   type UsageDay,
@@ -36,6 +37,7 @@ function summary(
   buckets: readonly UsageBucket[],
   sources: readonly {
     provider: UsageProviderKind;
+    harness?: UsageBucket["harness"];
     hostId: string;
     homePath: string;
     volumeId?: string;
@@ -54,6 +56,7 @@ function summary(
       fingerprint: {
         hostId: source.hostId,
         provider: source.provider,
+        ...(source.harness === undefined ? {} : { harness: source.harness }),
         resolvedHomePath: source.homePath,
         volumeId: source.volumeId ?? `vol-${source.hostId}`,
       },
@@ -178,7 +181,7 @@ describe("mergeUsage", () => {
           summary(
             [bucket()],
             [{ provider: "claude", hostId: "linux", homePath: "/b" }],
-            USAGE_CONTRACT_VERSION - 2,
+            USAGE_MERGE_COMPATIBLE_SINCE - 1,
           ),
         ),
       ],
@@ -387,6 +390,192 @@ describe("mergeUsage", () => {
     );
 
     expect(merged.providers).toEqual([]);
+  });
+
+  it("keeps native and Prime Agent usage for the same provider without collapsing environments", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [bucket({ provider: "codex", model: "gpt-5.6-sol", costUsd: 10, sessions: 12 })],
+            [{ provider: "codex", hostId: "mac", homePath: "/Users/theo/.codex" }],
+          ),
+        ),
+        environment(
+          "env-b",
+          summary(
+            [
+              bucket({
+                provider: "codex",
+                harness: "primeAgent",
+                model: "gpt-5.6-sol",
+                costUsd: 4,
+                records: 4,
+                sessions: 4,
+              }),
+            ],
+            [
+              {
+                provider: "codex",
+                harness: "primeAgent",
+                hostId: "mac",
+                homePath: "/env-b/.t3/prime-agent/sessions",
+                distinctSessions: 4,
+              },
+            ],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(14);
+    expect(merged.providers).toHaveLength(1);
+    expect(merged.providers[0]?.provider).toBe("codex");
+    expect(merged.providers[0]?.nativeSessions).toBe(1);
+    expect(merged.providers[0]?.primeAgentSessions).toBe(4);
+    expect(merged.providers[0]?.sessions).toBe(5);
+    expect(merged.duplicateSources).toHaveLength(0);
+  });
+
+  it("does not drop one environment's Prime Agent records as a duplicate of another's", () => {
+    const primeBucket = bucket({
+      provider: "codex",
+      harness: "primeAgent",
+      model: "gpt-5.6-sol",
+      costUsd: 3,
+    });
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [primeBucket],
+            [
+              {
+                provider: "codex",
+                harness: "primeAgent",
+                hostId: "mac",
+                homePath: "/env-a/.t3/prime-agent/sessions",
+                volumeId: "1:10",
+              },
+            ],
+          ),
+        ),
+        environment(
+          "env-b",
+          summary(
+            [primeBucket],
+            [
+              {
+                provider: "codex",
+                harness: "primeAgent",
+                hostId: "mac",
+                homePath: "/env-b/.t3/prime-agent/sessions",
+                volumeId: "1:11",
+              },
+            ],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(6);
+    expect(merged.duplicateSources).toHaveLength(0);
+    expect(merged.providers[0]?.primeAgentSessions).toBe(2);
+  });
+
+  it("drops only native Codex when two environments share that home, keeping Prime Agent", () => {
+    const sharedNative = {
+      provider: "codex" as const,
+      hostId: "mac",
+      homePath: "/Users/theo/.codex",
+    };
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [bucket({ provider: "codex", model: "gpt-5.6-sol", costUsd: 10 })],
+            [sharedNative],
+          ),
+        ),
+        environment(
+          "env-b",
+          summary(
+            [
+              bucket({ provider: "codex", model: "gpt-5.6-sol", costUsd: 10 }),
+              bucket({
+                provider: "codex",
+                harness: "primeAgent",
+                model: "gpt-5.6-sol",
+                costUsd: 4,
+                records: 4,
+              }),
+            ],
+            [
+              sharedNative,
+              {
+                provider: "codex",
+                harness: "primeAgent",
+                hostId: "mac",
+                homePath: "/env-b/.t3/prime-agent/sessions",
+                distinctSessions: 4,
+              },
+            ],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(14);
+    expect(merged.providers[0]?.nativeSessions).toBe(1);
+    expect(merged.providers[0]?.primeAgentSessions).toBe(4);
+  });
+
+  it("treats older summaries that omit harness as native usage", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [bucket({ costUsd: 10 })],
+            [{ provider: "claude", hostId: "mac", homePath: "/a/.claude" }],
+            USAGE_CONTRACT_VERSION - 1,
+          ),
+        ),
+        environment(
+          "env-b",
+          summary(
+            [
+              bucket({
+                provider: "claude",
+                harness: "primeAgent",
+                costUsd: 2,
+                records: 2,
+              }),
+            ],
+            [
+              {
+                provider: "claude",
+                harness: "primeAgent",
+                hostId: "linux",
+                homePath: "/b/prime-agent/sessions",
+              },
+            ],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(12);
+    expect(merged.staleEnvironments).toEqual([]);
+    expect(merged.providers[0]?.nativeSessions).toBe(1);
+    expect(merged.providers[0]?.primeAgentSessions).toBe(1);
   });
 
   it("derives hourly totals without losing the daily rollup", () => {

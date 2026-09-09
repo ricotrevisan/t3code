@@ -14,6 +14,7 @@ import {
   formatDayShort,
   formatHourShort,
   formatPercent,
+  formatProviderSessionLabel,
   formatTokens,
   formatUsd,
   makeWindow,
@@ -441,6 +442,9 @@ function ProviderSection(props: {
               />
               <View style={{ flex: 1 - share }} />
             </View>
+            <Text className="text-sm text-foreground-muted">
+              {formatProviderSessionLabel(provider)}
+            </Text>
             <Text className="text-sm text-foreground-muted">
               {metric === "cost"
                 ? `${formatPercent(share)} of cost · ${formatTokens(provider.totalTokens)} tokens`
