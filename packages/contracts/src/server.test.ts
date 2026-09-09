@@ -50,6 +50,19 @@ describe("ServerProvider", () => {
     expect(parsed.updateState).toBeUndefined();
   });
 
+  it("preserves legacy runtime modes and decodes a provider's supported modes", () => {
+    const legacy = decodeServerProvider(baseProviderSnapshot);
+    const restricted = decodeServerProvider({
+      ...baseProviderSnapshot,
+      instanceId: "primeAgent",
+      driver: "primeAgent",
+      supportedRuntimeModes: ["approval-required", "full-access"],
+    });
+
+    expect(legacy.supportedRuntimeModes).toBeUndefined();
+    expect(restricted.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
+  });
+
   it("defaults one-click update support when decoding older advisory snapshots", () => {
     const parsed = decodeServerProvider({
       instanceId: "codex",
