@@ -3295,6 +3295,55 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
     }),
   );
 
+  it.effect("bumps lastSeenAt when a turn completes", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-last-seen");
+      const session = yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const existing = yield* repository.getByThreadId({ threadId: session.threadId });
+      assert.equal(Option.isSome(existing), true);
+      if (Option.isNone(existing)) {
+        return;
+      }
+
+      yield* repository.upsert({
+        ...existing.value,
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      const consumer = yield* provider.streamEvents.pipe(
+        Stream.filter((event) => event.eventId === asEventId("evt-last-seen")),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild({ startImmediately: true }),
+      );
+
+      fanout.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-last-seen"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: session.threadId,
+        turnId: asTurnId("turn-last-seen"),
+        payload: { state: "completed" },
+      });
+      yield* Fiber.join(consumer);
+
+      const touched = yield* repository.getByThreadId({ threadId: session.threadId });
+      assert.equal(Option.isSome(touched), true);
+      if (Option.isSome(touched)) {
+        assert.notEqual(touched.value.lastSeenAt, "2026-01-01T00:00:00.000Z");
+      }
+    }),
+  );
+
   it.effect("fans out canonical runtime events in emission order", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
@@ -4908,6 +4957,7 @@ const boundedListing = makeProviderServiceLayer({
     getBinding,
     listThreadIds,
     listBindings: () => Effect.die("ProviderService.listSessions does not use listBindings"),
+    touchLastSeenAt: () => Effect.void,
   },
 });
 

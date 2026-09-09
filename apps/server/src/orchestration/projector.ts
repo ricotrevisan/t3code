@@ -1060,11 +1060,14 @@ export function projectEvent(
             return nextBase;
           }
 
+          const activity =
+            payload.activity.sequence === undefined
+              ? { ...payload.activity, sequence: event.sequence }
+              : payload.activity;
           const activities = retainThreadActivities(
-            [
-              ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
-              payload.activity,
-            ].toSorted(compareThreadActivities),
+            [...thread.activities.filter((entry) => entry.id !== activity.id), activity].toSorted(
+              compareThreadActivities,
+            ),
           );
 
           return {
