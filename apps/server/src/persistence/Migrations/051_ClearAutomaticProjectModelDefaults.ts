@@ -1,8 +1,16 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import migrateBranchPullRequest from "./048_ProjectionThreadBranchPullRequest.ts";
+import migrateThreadPullRequests from "./050_ProjectionThreadPullRequests.ts";
+
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+
+  // Earlier fork installs used migrations 48 and 50 for clearing automatic defaults.
+  // Their migration ledger skips upstream's entries, so repair both here too.
+  yield* migrateBranchPullRequest;
+  yield* migrateThreadPullRequests;
 
   // Project creation never exposed a model choice. A later metadata event
   // containing this field is the evidence that the user set or reset one.
