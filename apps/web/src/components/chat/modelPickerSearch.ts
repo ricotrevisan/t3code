@@ -9,21 +9,31 @@ type ModelPickerSearchableModel = {
    * models directly instead of just the driver kind.
    */
   providerDisplayName: string;
+  /** Provider model id, e.g. `openrouter/z-ai/glm-5.3-flash`. */
+  slug?: string;
   name: string;
   shortName?: string;
   subProvider?: string;
   isFavorite?: boolean;
 };
 
+function normalizeModelPickerText(value: string): string {
+  return normalizeSearchQuery(value)
+    .replace(/[/_.-]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
 const MODEL_PICKER_FAVORITE_SCORE_BOOST = 24;
 
 function getModelPickerSearchFields(model: ModelPickerSearchableModel): string[] {
   return [
-    normalizeSearchQuery(model.name),
-    ...(model.shortName ? [normalizeSearchQuery(model.shortName)] : []),
-    ...(model.subProvider ? [normalizeSearchQuery(model.subProvider)] : []),
-    normalizeSearchQuery(model.driverKind),
-    normalizeSearchQuery(model.providerDisplayName),
+    normalizeModelPickerText(model.name),
+    ...(model.slug ? [normalizeModelPickerText(model.slug)] : []),
+    ...(model.shortName ? [normalizeModelPickerText(model.shortName)] : []),
+    ...(model.subProvider ? [normalizeModelPickerText(model.subProvider)] : []),
+    normalizeModelPickerText(model.driverKind),
+    normalizeModelPickerText(model.providerDisplayName),
     buildModelPickerSearchText(model),
   ];
 }
@@ -45,8 +55,15 @@ function scoreModelPickerSearchToken(
 }
 
 export function buildModelPickerSearchText(model: ModelPickerSearchableModel): string {
-  return normalizeSearchQuery(
-    [model.name, model.shortName, model.subProvider, model.driverKind, model.providerDisplayName]
+  return normalizeModelPickerText(
+    [
+      model.name,
+      model.slug,
+      model.shortName,
+      model.subProvider,
+      model.driverKind,
+      model.providerDisplayName,
+    ]
       .filter((value): value is string => typeof value === "string" && value.length > 0)
       .join(" "),
   );
@@ -56,7 +73,7 @@ export function scoreModelPickerSearch(
   model: ModelPickerSearchableModel,
   query: string,
 ): number | null {
-  const tokens = normalizeSearchQuery(query)
+  const tokens = normalizeModelPickerText(query)
     .split(/\s+/u)
     .filter((token) => token.length > 0);
 

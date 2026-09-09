@@ -15,6 +15,7 @@ import {
   hasProviderUsageLimits,
   isUsageLimitsCommand,
 } from "@t3tools/shared/usageLimits";
+import { coerceRuntimeModeToSupported } from "@t3tools/contracts";
 import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { ReactNode } from "react";
 import {
@@ -137,7 +138,7 @@ export interface ThreadComposerProps {
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
-  readonly onSendMessage: () => Promise<MessageId | null>;
+  readonly onSendMessage: (runtimeMode: RuntimeMode) => Promise<MessageId | null>;
   /** `/usage-limits` resolves locally; the host decides where the report shows. Null clears it. */
   readonly onShowUsageLimits: (report: UsageLimitsReport | null) => void;
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
@@ -338,6 +339,11 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+  const supportedRuntimeModes = selectedProviderStatus?.supportedRuntimeModes;
+  const effectiveRuntimeMode = coerceRuntimeModeToSupported(
+    currentRuntimeMode,
+    supportedRuntimeModes,
+  );
   const composerOwnerKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
   const openDraftDocument = (attachment: ComposerDocumentAttachment) => {
     Keyboard.dismiss();
@@ -493,7 +499,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     if (inFlightThreadIdsRef.current.has(threadKey)) return;
     inFlightThreadIdsRef.current.add(threadKey);
     try {
-      const messageId = await onSendMessage();
+      const messageId = await onSendMessage(effectiveRuntimeMode);
       if (messageId === null) {
         return;
       }
@@ -515,6 +521,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     onChangeDraftMessage,
     openUsageLimits,
     usageLimitsOffered,
+    effectiveRuntimeMode,
     onSendMessage,
     props.environmentId,
     props.environmentLabel,
@@ -561,16 +568,18 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       optionDescriptors: providerOptionDescriptors,
       onUpdateOptionSelections: (options) =>
         props.onUpdateModelSelection({ ...currentModelSelection, options }),
-      runtimeMode: currentRuntimeMode,
+      runtimeMode: effectiveRuntimeMode,
+      supportedRuntimeModes,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
     }),
     [
       currentModelSelection,
-      currentRuntimeMode,
+      effectiveRuntimeMode,
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
       providerOptionDescriptors,
       settingsOwnerId,
+      supportedRuntimeModes,
       threadProviderGroups,
     ],
   );
