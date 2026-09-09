@@ -1,3 +1,5 @@
+Never commit or make PRs against `pingdotgg/t3code`. We are working on a fork of that project; they don't take outside contributions.
+
 # T3 Code
 
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs and agents (Codex, Claude Code, Cursor, Grok, OpenCode, Antigravity) and serves web, desktop, and mobile clients.
@@ -82,6 +84,7 @@ The most common defect in this repo is a change that works on the path you teste
 - Sharing over the tailnet is three steps: run `vp run dev --share` in the background, wait for the `pairingUrl:` line in its output, then give that full URL to an unpaired browser. Do not wire up `tailscale serve` by hand, open the URL yourself, or consume the user's pairing link. A browser with the reusable dev cookie can use the bare origin. If a normal one-time token was consumed, mint a fresh one with `node apps/server/src/bin.ts pair`. It carries standard scopes, while the startup URL carries admin scopes needed for Connections settings.
 - To reuse web dev auth across worktrees, configure one fixed `T3CODE_DEV_AUTH_TOKEN` in the main checkout's gitignored `.env`. The `t3.json` setup links that file into worktrees. Never commit or publish the token or a startup URL. See [Reusable dev credential](docs/operations/development.md#reusable-dev-credential).
 - Stop what you started, by the PID you tracked. See rule 1.
+- Live T3 on this machine (`lab`) is systemd `t3code.service` from `~/.local/lib/t3/dist`, not `vp run dev`. Restarting it without a new pack leaves the old code running. When the user wants worktree server changes on that live T3, use `.agents/skills/deploy-t3-lab/SKILL.md`. Isolated testing still uses `vp run dev` and the worktree `.t3`.
 
 ## Test data
 
