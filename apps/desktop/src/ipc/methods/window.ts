@@ -10,6 +10,7 @@ import {
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   REMOTE_CAPABLE_EDITOR_IDS,
   SystemSettingsPaneSchema,
+  remoteSchemeForEditor,
   type DesktopEnvironmentBootstrap,
   type PickedThemeFile,
 } from "@t3tools/contracts";
@@ -334,10 +335,20 @@ export const probeRemoteEditors = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PROBE_REMOTE_EDITORS_CHANNEL,
   payload: Schema.Undefined,
   result: Schema.Array(EditorId),
+  // Probes THIS machine (where the renderer runs), unlike the server's probe
+  // which walks the environment host's PATH. Protocol handlers cover packaged
+  // editors whose optional CLI is absent from a Finder-launched app's PATH.
   handler: Effect.fn("desktop.ipc.window.probeRemoteEditors")(function* () {
+    const shell = yield* ElectronShell.ElectronShell;
     const available: Array<EditorId> = [];
     const env = yield* HostProcess.HostProcessEnvironment;
     for (const editorId of REMOTE_CAPABLE_EDITOR_IDS) {
+      const remoteScheme = remoteSchemeForEditor(editorId);
+      if (remoteScheme !== undefined && (yield* shell.hasProtocolHandler(remoteScheme))) {
+        available.push(editorId);
+        continue;
+      }
+
       const editor = EDITORS.find((editor) => editor.id === editorId);
       if (editor && Option.isSome(yield* resolveEditorCommand(editor, env))) {
         available.push(editorId);
