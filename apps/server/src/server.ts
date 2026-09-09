@@ -78,6 +78,7 @@ import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { deviceHubProxyRouteLayer } from "./device/DeviceHubProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
+import * as LabChromiumAutomationHost from "./preview/LabChromiumAutomationHost.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -612,6 +613,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     websocketRpcRouteLayer,
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
+  LabChromiumAutomationHost.layer,
   // Last, so no route layer can replace the server's one TracerDisabledWhen.
   untracedRequestsLayer,
 ).pipe(
