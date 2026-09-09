@@ -299,6 +299,7 @@ function makeTestLayer(input: {
               return true;
             }),
           openSystemSettings: () => Effect.succeed(true),
+          hasProtocolHandler: () => Effect.succeed(false),
           copyText: (text) =>
             Effect.sync(() => {
               input.copiedTexts?.push(text);
@@ -404,6 +405,7 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
           Layer.succeed(ElectronShell.ElectronShell, {
             openExternal: () => Effect.succeed(true),
             openSystemSettings: () => Effect.succeed(true),
+            hasProtocolHandler: () => Effect.succeed(false),
             copyText: () => Effect.void,
           } satisfies ElectronShell.ElectronShell["Service"]),
           electronThemeLayer,
