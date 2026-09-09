@@ -71,7 +71,7 @@ function readInstanceCustomModels(
   if (instanceId !== defaultInstanceId) {
     return [];
   }
-  const legacyProviders = settings.providers as Record<
+  const legacyProviders = settings.providers as unknown as Record<
     string,
     { readonly customModels: ReadonlyArray<unknown> } | undefined
   >;

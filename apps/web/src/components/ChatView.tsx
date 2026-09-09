@@ -22,6 +22,7 @@ import {
   type ApprovalRequestId,
   type ChatFileAttachment,
   DEFAULT_MODEL,
+  coerceRuntimeModeToSupported,
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
@@ -128,6 +129,7 @@ import {
 } from "../composer-logic";
 import {
   createMessageAttachmentPreviewProjector,
+  deriveAgentSessionLive,
   derivePhase,
   deriveTimelineEntriesWithState,
   deriveActiveWorkStartedAt,
@@ -1998,8 +2000,8 @@ export default function ChatView(props: ChatViewProps) {
         : null,
     [activeThreadEnvironmentId, activeThreadId],
   );
-  const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const activeThreadShell = useThreadShell(isServerThread ? activeThreadRef : null);
+  const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
     readonly messageId: MessageId | null;
@@ -2903,7 +2905,7 @@ export default function ChatView(props: ChatViewProps) {
   // Agents surface, live strip, and workflow cards. v2Projection is null
   // until orchestration-v2 lands (source precedence lives in the derive).
   // sessionLive derives interruption for agents orphaned by session death.
-  const agentSessionLive = phase !== "disconnected";
+  const agentSessionLive = deriveAgentSessionLive(phase, activeThreadShell?.backgroundLiveness);
   const agentPanelModel = useMemo(
     () =>
       deriveAgentPanelModel({
@@ -7441,6 +7443,7 @@ export default function ChatView(props: ChatViewProps) {
       selectedModelSelection: ctxSelectedModelSelection,
       interactionMode: sendInteractionMode,
       interactionModeEnabled: sendInteractionModeEnabled,
+      runtimeMode: runtimeModeForSend,
     } = sendCtx;
     const annotationImageAlreadyAttached =
       directAnnotation?.image !== undefined &&
@@ -8311,7 +8314,7 @@ export default function ChatView(props: ChatViewProps) {
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
-        runtimeMode,
+        runtimeMode: runtimeModeForSend,
         interactionMode: sendInteractionMode,
       });
       if (settingsResult._tag === "Failure") {
@@ -8343,7 +8346,7 @@ export default function ChatView(props: ChatViewProps) {
                       projectId: activeProject.id,
                       title,
                       modelSelection: threadCreateModelSelection,
-                      runtimeMode,
+                      runtimeMode: runtimeModeForSend,
                       interactionMode: sendInteractionMode,
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
@@ -8409,7 +8412,7 @@ export default function ChatView(props: ChatViewProps) {
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: title,
-          runtimeMode,
+          runtimeMode: runtimeModeForSend,
           interactionMode: sendInteractionMode,
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
@@ -8909,6 +8912,7 @@ export default function ChatView(props: ChatViewProps) {
         selectedProviderModels: ctxSelectedProviderModels,
         selectedPromptEffort: ctxSelectedPromptEffort,
         selectedModelSelection: ctxSelectedModelSelection,
+        runtimeMode: runtimeModeForSend,
       } = sendCtx;
 
       const threadIdForSend = activeThread.id;
@@ -8949,7 +8953,7 @@ export default function ChatView(props: ChatViewProps) {
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
-        runtimeMode,
+        runtimeMode: runtimeModeForSend,
         interactionMode: nextInteractionMode,
       });
       let failure: AtomCommandResult<unknown, unknown> | null =
@@ -8983,7 +8987,7 @@ export default function ChatView(props: ChatViewProps) {
             },
             modelSelection: ctxSelectedModelSelection,
             titleSeed: activeThread.title,
-            runtimeMode,
+            runtimeMode: runtimeModeForSend,
             interactionMode: nextInteractionMode,
             ...(nextInteractionMode === "default" && activeProposedPlan
               ? {
@@ -9068,6 +9072,11 @@ export default function ChatView(props: ChatViewProps) {
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
     } = sendCtx;
+    const runtimeModeForSend = coerceRuntimeModeToSupported(
+      defaultRuntimeMode,
+      providerStatuses.find((provider) => provider.instanceId === ctxSelectedModelSelection.instanceId)
+        ?.supportedRuntimeModes,
+    );
 
     const createdAt = new Date().toISOString();
     const nextThreadId = newThreadId();
@@ -9100,7 +9109,7 @@ export default function ChatView(props: ChatViewProps) {
         projectId: activeProject.id,
         title: nextThreadTitle,
         modelSelection: nextThreadModelSelection,
-        runtimeMode: defaultRuntimeMode,
+        runtimeMode: runtimeModeForSend,
         interactionMode: "default",
         branch: activeThreadBranch,
         worktreePath: activeThread.worktreePath,
@@ -9123,7 +9132,7 @@ export default function ChatView(props: ChatViewProps) {
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: nextThreadTitle,
-          runtimeMode: defaultRuntimeMode,
+          runtimeMode: runtimeModeForSend,
           interactionMode: "default",
           sourceProposedPlan: {
             threadId: activeThread.id,
@@ -9198,6 +9207,7 @@ export default function ChatView(props: ChatViewProps) {
     navigate,
     resetLocalDispatch,
     defaultRuntimeMode,
+    providerStatuses,
     startThreadTurn,
     environmentId,
     composerRef,

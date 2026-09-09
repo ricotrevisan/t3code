@@ -36,6 +36,16 @@ export const RUNTIME_MODE_CHOICES: ReadonlyArray<{
   },
 ];
 
+export function runtimeModeChoices(
+  supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
+): ReadonlyArray<(typeof RUNTIME_MODE_CHOICES)[number]> {
+  if (supportedRuntimeModes === undefined) {
+    return RUNTIME_MODE_CHOICES;
+  }
+  const supported = new Set(supportedRuntimeModes);
+  return RUNTIME_MODE_CHOICES.filter((choice) => supported.has(choice.mode));
+}
+
 export function selectableChoices(
   descriptor: Extract<ProviderOptionDescriptor, { type: "select" }>,
 ) {

@@ -14,6 +14,7 @@ describe("resolveGrokAcpBaseModelId", () => {
   it("normalizes empty and custom Grok model ids", () => {
     expect(resolveGrokAcpBaseModelId(undefined)).toBe("grok-build");
     expect(resolveGrokAcpBaseModelId("   ")).toBe("grok-build");
+    expect(resolveGrokAcpBaseModelId("grok-build")).toBe("grok-build");
     expect(resolveGrokAcpBaseModelId("  grok-test-custom-model  ")).toBe("grok-test-custom-model");
   });
 });
