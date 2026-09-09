@@ -24,6 +24,24 @@ export function formatCount(value: number): string {
 }
 
 /**
+ * Provider-row session caption. Prime Agent usage is attributed to the
+ * upstream provider, so the split is the only place the harness shows.
+ */
+export function formatProviderSessionLabel(totals: {
+  readonly sessions: number;
+  readonly nativeSessions: number;
+  readonly primeAgentSessions: number;
+}): string {
+  if (totals.primeAgentSessions === 0) {
+    return `${formatCount(totals.sessions)} ${totals.sessions === 1 ? "session" : "sessions"}`;
+  }
+  if (totals.nativeSessions === 0) {
+    return `${formatCount(totals.primeAgentSessions)} via PrimeAgent`;
+  }
+  return `${formatCount(totals.nativeSessions)} native · ${formatCount(totals.primeAgentSessions)} via PrimeAgent`;
+}
+
+/**
  * Compacts a token count to three significant figures with a unit suffix, so
  * columns of numbers line up at a glance (`19.9B`, `76.7M`, `804K`).
  */
