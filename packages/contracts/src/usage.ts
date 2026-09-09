@@ -3,9 +3,13 @@
  *
  * Each environment scans native session files and databases, including work
  * driven outside T3 Code. Source status describes gaps in local coverage.
+ * Prime Agent sessions live under the environment's own base dir
+ * (`prime-agent/sessions/**\/*.jsonl`) and are attributed to the upstream
+ * provider while preserving Prime Agent as the harness.
  *
- * Environments return pre-aggregated `(day, hourStart?, provider, model, sourcePath?)`
- * buckets. Raw transcript records never cross the wire.
+ * Environments return pre-aggregated
+ * `(day, hourStart?, provider, harness?, model, sourcePath?)` buckets. Raw
+ * transcript records never cross the wire.
  *
  * @module usage
  */
@@ -26,7 +30,8 @@ export const USAGE_CONTRACT_VERSION = 6 as const;
  * Oldest {@link UsageSummary} version a current client will still merge.
  *
  * v5/v6 add providers and optional source attribution; v4 Claude/Codex
- * buckets remain valid in mixed-version environments.
+ * buckets remain valid in mixed-version environments. A missing `harness`
+ * means native CLI usage.
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
@@ -37,8 +42,19 @@ export const UsageProviderKind = Schema.Literals([
   "cursor",
   "opencode",
   "antigravity",
+  "unknown",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
+
+/**
+ * Which runtime produced the tokens. `native` is a provider CLI's own home;
+ * `primeAgent` is a Prime Agent session attributed to an upstream provider.
+ *
+ * Omitted by upstream servers and older fork servers; clients treat that as
+ * `native`.
+ */
+export const UsageHarnessKind = Schema.Literals(["native", "primeAgent"]);
+export type UsageHarnessKind = typeof UsageHarnessKind.Type;
 
 /**
  * A calendar day in the reporting time zone, formatted `YYYY-MM-DD`.
@@ -85,8 +101,9 @@ export const UsageTokenTotals = Schema.Struct({
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
 
 /**
- * One `(day, hourStart?, provider, model)` cell. `hourStart` is the UTC start
- * instant of a rolling bucket and is present only for hourly requests.
+ * One `(day, hourStart?, provider, harness?, model)` cell. `hourStart` is the
+ * UTC start instant of a rolling bucket and is present only for hourly
+ * requests. `harness` is omitted by older servers and means `native`.
  *
  * `costUsd` is the raw API-equivalent cost of these tokens. It is not money
  * spent: subscription plans bill separately. `unpricedRecords` counts records
@@ -97,6 +114,7 @@ export const UsageBucket = Schema.Struct({
   day: UsageDay,
   hourStart: Schema.optional(TrimmedNonEmptyString),
   provider: UsageProviderKind,
+  harness: Schema.optional(UsageHarnessKind),
   model: TrimmedNonEmptyString,
   /** Source directory, so overlapping multi-home environments merge once per source. */
   sourcePath: Schema.optional(TrimmedNonEmptyString),
@@ -127,6 +145,12 @@ export type UsageBucket = typeof UsageBucket.Type;
 export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
+  /**
+   * Which runtime produced these tokens. Omitted by older servers; clients
+   * treat that as `native`. Prime Agent sessions are environment-local, so
+   * this field keeps them from collapsing into a native provider home.
+   */
+  harness: Schema.optional(UsageHarnessKind),
   resolvedHomePath: TrimmedNonEmptyString,
   /**
    * Filesystem identity of the transcript directory, as `device:inode`.

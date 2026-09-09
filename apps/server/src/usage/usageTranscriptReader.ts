@@ -19,12 +19,11 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeStringDecoder from "node:string_decoder";
 
-import type { UsageProviderKind } from "@t3tools/contracts";
-
 import { createTranscriptJsonReader } from "../project/AgentSessionJson.ts";
 
 import {
   initialCodexScanState,
+  initialPrimeAgentScanState,
   mightCarryUsage,
   parseClaudeLine,
   parseClaudeRecord,
@@ -32,8 +31,12 @@ import {
   parseCodexRecord,
   parseGrokLine,
   parseGrokRecord,
+  parsePrimeAgentLine,
+  parsePrimeAgentRecord,
   type CodexScanState,
+  type PrimeAgentScanState,
   type UsageRecord,
+  type UsageScanKind,
 } from "./usageTranscripts.ts";
 
 export interface TranscriptFile {
@@ -62,6 +65,8 @@ export interface TranscriptParsePosition {
   readonly guardHash: number;
   /** Codex reducer state as of `resumeOffset`; `null` for stateless providers. */
   readonly codexState: CodexScanState | null;
+  /** Prime Agent reducer state as of `resumeOffset`; `null` otherwise. */
+  readonly primeAgentState: PrimeAgentScanState | null;
 }
 
 export interface TranscriptParseResult {
@@ -91,7 +96,7 @@ type SelectedFields = { readonly [key: string]: true | SelectedFields };
 
 // Keep the fields consumed by usageTranscripts, including reducer state and
 // dedupe/cost metadata. A selected subtree (usage) keeps future token fields.
-const USAGE_FIELDS: Record<"claude" | "codex" | "grok", SelectedFields> = {
+const USAGE_FIELDS: Record<UsageScanKind, SelectedFields> = {
   claude: {
     type: true,
     timestamp: true,
@@ -121,10 +126,16 @@ const USAGE_FIELDS: Record<"claude" | "codex" | "grok", SelectedFields> = {
       update: { sessionUpdate: true, prompt_id: true, usage: true },
     },
   },
+  primeAgent: {
+    type: true,
+    id: true,
+    timestamp: true,
+    message: { role: true, model: true, provider: true, timestamp: true, usage: true },
+  },
 };
 
-function selectUsageFields(provider: UsageProviderKind) {
-  const fields = USAGE_FIELDS[provider === "codex" || provider === "grok" ? provider : "claude"];
+function selectUsageFields(scanKind: UsageScanKind) {
+  const fields = USAGE_FIELDS[scanKind];
   return (path: ReadonlyArray<string | number | null>): boolean => {
     let selected: true | SelectedFields = fields;
     for (const key of path) {
@@ -251,7 +262,7 @@ async function guardMatches(
  */
 export async function readTranscriptRecords(
   filePath: string,
-  provider: UsageProviderKind,
+  scanKind: UsageScanKind,
   resumeFrom?: TranscriptParsePosition,
   options?: { readonly streamingThresholdBytes?: number },
 ): Promise<TranscriptParseResult | null> {
@@ -265,23 +276,28 @@ export async function readTranscriptRecords(
 
   try {
     let codexState = initialCodexScanState();
+    let primeAgentState = initialPrimeAgentScanState();
     let resumed = false;
     let start = 0;
     if (
       resumeFrom !== undefined &&
       resumeFrom.resumeOffset > 0 &&
-      (provider !== "codex" || resumeFrom.codexState !== null) &&
+      (scanKind !== "codex" || resumeFrom.codexState !== null) &&
+      (scanKind !== "primeAgent" || resumeFrom.primeAgentState !== null) &&
       (await guardMatches(handle, resumeFrom))
     ) {
       if (resumeFrom.codexState !== null) codexState = { ...resumeFrom.codexState };
+      if (resumeFrom.primeAgentState !== null) {
+        primeAgentState = { ...resumeFrom.primeAgentState };
+      }
       start = resumeFrom.resumeOffset;
       resumed = true;
     }
 
     const parseLine = (line: string, state: CodexScanState, out: UsageRecord[]): void => {
-      if (provider === "codex") {
+      if (scanKind === "codex") {
         if (
-          !mightCarryUsage(line, provider) &&
+          !mightCarryUsage(line, scanKind) &&
           !line.includes('"turn_context"') &&
           !line.includes('"session_meta"')
         ) {
@@ -291,8 +307,14 @@ export async function readTranscriptRecords(
         if (record !== null) out.push(record);
         return;
       }
-      if (!mightCarryUsage(line, provider)) return;
-      if (provider === "grok") {
+      if (scanKind === "primeAgent") {
+        if (!mightCarryUsage(line, scanKind)) return;
+        const record = parsePrimeAgentLine(line, primeAgentState);
+        if (record !== null) out.push(record);
+        return;
+      }
+      if (!mightCarryUsage(line, scanKind)) return;
+      if (scanKind === "grok") {
         for (const grokRecord of parseGrokLine(line)) out.push(grokRecord);
         return;
       }
@@ -317,7 +339,7 @@ export async function readTranscriptRecords(
     let pendingBytes = 0;
     let streaming: ReturnType<typeof createTranscriptJsonReader> | undefined;
     let decoder: NodeStringDecoder.StringDecoder | undefined;
-    const selectPath = selectUsageFields(provider);
+    const selectPath = selectUsageFields(scanKind);
 
     const append = (segment: Buffer) => {
       if (!streaming && pendingBytes + segment.length <= streamingThresholdBytes) {
@@ -340,11 +362,14 @@ export async function readTranscriptRecords(
       if (streaming) {
         streaming.write(decoder!.end());
         const projected = streaming.finish();
-        if (provider === "grok") {
+        if (scanKind === "grok") {
           out.push(...parseGrokRecord(projected));
+        } else if (scanKind === "primeAgent") {
+          const record = parsePrimeAgentRecord(projected, primeAgentState);
+          if (record !== null) out.push(record);
         } else {
           const record =
-            provider === "codex"
+            scanKind === "codex"
               ? parseCodexRecord(projected, state)
               : parseClaudeRecord(projected);
           if (record !== null) out.push(record);
@@ -389,7 +414,11 @@ export async function readTranscriptRecords(
     }
 
     const tailRecords: UsageRecord[] = [];
+    // A partial tail is replayed on the next scan, so it must not advance the
+    // Prime Agent reducer state saved with the resume position.
+    const savedPrimeAgent = { ...primeAgentState };
     finish({ ...codexState }, tailRecords);
+    primeAgentState = savedPrimeAgent;
 
     const guardLength = Math.min(GUARD_LENGTH, resumeOffset);
     let guardHash = 0;
@@ -406,7 +435,8 @@ export async function readTranscriptRecords(
         resumeOffset,
         guardLength,
         guardHash,
-        codexState: provider === "codex" ? codexState : null,
+        codexState: scanKind === "codex" ? codexState : null,
+        primeAgentState: scanKind === "primeAgent" ? primeAgentState : null,
       },
       resumed,
     };
