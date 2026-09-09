@@ -35,6 +35,7 @@ import type {
   SnapShotSource,
 } from "@t3tools/contracts";
 import {
+  coerceRuntimeModeToSupported,
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -249,6 +250,7 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerImageThumbnail } from "./ComposerImageThumbnail";
+import { runtimeModeOptionsForProvider } from "./runtimeModeOptions";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -1078,6 +1080,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
+  runtimeModeOptions: ReadonlyArray<RuntimeMode>;
   size?: "sm" | "xs";
   hidden?: boolean;
   onToggleInteractionMode: () => void;
@@ -1155,7 +1158,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             <SelectValue data-composer-control-label>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-            {runtimeModeOptions.map((mode) => {
+            {props.runtimeModeOptions.map((mode) => {
               const option = runtimeModeConfig[mode];
               const OptionIcon = option.icon;
               return (
@@ -1301,6 +1304,7 @@ export interface ChatComposerHandle {
     selectedModelOptionsForDispatch: unknown;
     selectedModelSelection: ModelSelection;
     multipleModelSelections: ReadonlyArray<ModelSelection> | null;
+    runtimeMode: RuntimeMode;
     providerAvailable: boolean;
     selectedProvider: ProviderDriverKind;
     selectedModel: string;
@@ -2008,6 +2012,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
     }, retryLater);
   }, [environmentId, gitCwd, prompt, refreshProviders, selectedProviderEntry]);
+  const runtimeModeOptions = useMemo(
+    () => runtimeModeOptionsForProvider(selectedProviderStatus),
+    [selectedProviderStatus],
+  );
+  const effectiveRuntimeMode = coerceRuntimeModeToSupported(
+    runtimeMode,
+    selectedProviderStatus?.supportedRuntimeModes,
+  );
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
@@ -4980,7 +4992,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         <ComposerFooterModeControls
           showInteractionModeToggle={planModeUiEnabled}
           interactionMode={interactionMode}
-          runtimeMode={runtimeMode}
+          runtimeMode={effectiveRuntimeMode}
+          runtimeModeOptions={runtimeModeOptions}
           size={composerControlsInStrip ? "xs" : "sm"}
           hidden={composerControlsHidden || restingHiddenBlockCount > 0}
           onToggleInteractionMode={toggleInteractionMode}
@@ -5100,52 +5113,72 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onOpenProviderSetup={onOpenProviderSetup}
       />
 
-      <>
-        {restingBlockDefs.map((def, index) => {
-          const hidden = index >= restingBlockDefs.length - restingHiddenBlockCount;
-          return (
+      {composerControlsCompact ? (
+        <CompactComposerControlsMenu
+          interactionMode={interactionMode}
+          runtimeMode={effectiveRuntimeMode}
+          runtimeModeOptions={runtimeModeOptions}
+          showInteractionModeToggle={planModeUiEnabled}
+          traitsMenuContent={providerTraitsMenuContent}
+          onToggleInteractionMode={toggleInteractionMode}
+          onRuntimeModeChange={handleRuntimeModeChange}
+        />
+      ) : (
+        <>
+          {restingBlockDefs.map((def, index) => {
+            if (!composerControlsInStrip) {
+              return <Fragment key={def.id}>{def.content}</Fragment>;
+            }
+            const hidden = index >= restingBlockDefs.length - restingHiddenBlockCount;
+            return (
+              <div
+                key={def.id}
+                data-resting-block={def.id}
+                data-composer-block-icon-only={
+                  index >= restingBlockDefs.length - iconOnlyBlockCount ? "true" : "false"
+                }
+                aria-hidden={hidden || undefined}
+                inert={hidden || undefined}
+                className={cn(
+                  "flex w-max min-w-max shrink-0 items-center gap-1",
+                  hidden && "pointer-events-none invisible absolute",
+                  index >= restingBlockDefs.length - iconOnlyBlockCount &&
+                    "[&_[data-composer-control-label]]:pointer-events-none [&_[data-composer-control-label]]:invisible [&_[data-composer-control-label]]:absolute [&_[data-composer-control-label]]:w-max [&_[data-composer-control-label]]:max-w-none [&_[data-composer-control-compact-icon]]:[visibility:inherit] [&_[data-composer-control-compact-icon]]:relative",
+                )}
+              >
+                {def.content}
+              </div>
+            );
+          })}
+          {composerControlsInStrip ? (
             <div
-              key={def.id}
-              data-resting-block={def.id}
-              data-composer-block-icon-only={
-                index >= restingBlockDefs.length - iconOnlyBlockCount ? "true" : "false"
-              }
-              aria-hidden={hidden || undefined}
-              inert={hidden || undefined}
+              data-resting-controls-overflow
+              aria-hidden={hiddenRestingBlockIds.length === 0 || undefined}
+              inert={hiddenRestingBlockIds.length === 0 || undefined}
               className={cn(
-                "flex w-max min-w-max shrink-0 items-center gap-1",
-                hidden && "pointer-events-none invisible absolute",
-                index >= restingBlockDefs.length - iconOnlyBlockCount &&
-                  "[&_[data-composer-control-label]]:pointer-events-none [&_[data-composer-control-label]]:invisible [&_[data-composer-control-label]]:absolute [&_[data-composer-control-label]]:w-max [&_[data-composer-control-label]]:max-w-none [&_[data-composer-control-compact-icon]]:[visibility:inherit] [&_[data-composer-control-compact-icon]]:relative",
+                "min-w-0 shrink-0",
+                hiddenRestingBlockIds.length === 0 && "pointer-events-none invisible absolute",
               )}
             >
-              {def.content}
+              <CompactComposerControlsMenu
+                interactionMode={interactionMode}
+                runtimeMode={effectiveRuntimeMode}
+                runtimeModeOptions={runtimeModeOptions}
+                size="xs"
+                hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
+                showInteractionModeToggle={
+                  planModeUiEnabled && hiddenRestingBlockIds.includes("mode")
+                }
+                traitsMenuContent={
+                  hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
+                }
+                onToggleInteractionMode={toggleInteractionMode}
+                onRuntimeModeChange={handleRuntimeModeChange}
+              />
             </div>
-          );
-        })}
-        <div
-          data-resting-controls-overflow
-          aria-hidden={hiddenRestingBlockIds.length === 0 || undefined}
-          inert={hiddenRestingBlockIds.length === 0 || undefined}
-          className={cn(
-            "min-w-0 shrink-0",
-            hiddenRestingBlockIds.length === 0 && "pointer-events-none invisible absolute",
-          )}
-        >
-          <CompactComposerControlsMenu
-            interactionMode={interactionMode}
-            runtimeMode={runtimeMode}
-            size={composerControlsInStrip ? "xs" : "sm"}
-            hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
-            showInteractionModeToggle={planModeUiEnabled && hiddenRestingBlockIds.includes("mode")}
-            traitsMenuContent={
-              hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
-            }
-            onToggleInteractionMode={toggleInteractionMode}
-            onRuntimeModeChange={handleRuntimeModeChange}
-          />
-        </div>
-      </>
+          ) : null}
+        </>
+      )}
     </>
   );
   const showTasksTab =
@@ -6019,6 +6052,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
+        runtimeMode: effectiveRuntimeMode,
         multipleModelSelections:
           routeKind === "draft" && multipleModelSelections !== null
             ? multipleModelSelections.map((selection) =>
@@ -6085,6 +6119,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       multipleModelSelections,
       setMultipleModelSelections,
       routeKind,
+      effectiveRuntimeMode,
       noProviderAvailable,
       providerSendBlockReason,
       selectedPromptEffort,
