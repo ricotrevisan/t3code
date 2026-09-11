@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Prepare the disposable lab sync worktree at fork main.
+# Prepare the disposable office sync worktree at fork main.
 # Prints worktree= and head=.
 set -euo pipefail
 
-REPO="${1:-$HOME/t3code}"
-WT="${T3_SYNC_WORKTREE:-$HOME/t3code-sync}"
+source "$(dirname "${BASH_SOURCE[0]}")/office-env.sh"
 
 cd "$REPO"
 git fetch origin main --quiet
@@ -32,11 +31,11 @@ git -C "$WT" clean -fd -e node_modules -e .t3 -e .env
 
 # Worktree setup mirrors t3.json: .env comes from the project root.
 [[ -f "$REPO/.env" ]] && ln -sf "$REPO/.env" "$WT/.env"
+[[ -f "$REPO/infra/relay/.env" ]] && { mkdir -p "$WT/infra/relay"; ln -sf "$REPO/infra/relay/.env" "$WT/infra/relay/.env"; }
 
 VP="$REPO/node_modules/.bin/vp"
-if [[ -x "$VP" && ! -x "$WT/node_modules/.bin/vp" ]]; then
-  (cd "$WT" && "$VP" i)
-fi
+[[ -x "$VP" ]] || { echo "error: vp not found at $VP" >&2; exit 3; }
+(cd "$WT" && "$MISE" x node@24.19.0 -- "$VP" i --frozen-lockfile)
 
 echo "worktree=${WT}"
 echo "head=$(git -C "$WT" rev-parse --short HEAD)"
