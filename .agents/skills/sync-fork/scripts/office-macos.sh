@@ -1,45 +1,21 @@
 #!/bin/bash
-# Runs ON office. Build the arm64 macOS DMG from fork origin/main and serve it
+# Runs ON office. Build the arm64 macOS DMG from the prepared sync worktree and serve it
 # on the tailnet at https://office.tailedc0c1.ts.net:8443/.
 # Prints sha=, dmg=, url=. Never mutates ~/dev/t3code (the live server checkout).
 # macOS GUI Tailscale cannot serve files, so a loopback python http.server is
 # proxied through tailscale serve on a dedicated port.
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/office-env.sh"
 TS="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-MISE="/opt/homebrew/bin/mise"
-REPO="$HOME/dev/t3code"
-WT="$HOME/.t3code/worktrees/sync"
 RUN="$HOME/.t3code/run"
 HTTP_PORT=8899
 SERVE_PORT=8443
 
 mkdir -p "$RUN"
-cd "$REPO"
-git fetch origin main --quiet
-
-if [[ ! -e "$WT/.git" ]]; then
-  if git show-ref --verify --quiet refs/heads/t3-sync; then
-    git worktree add "$WT" t3-sync
-  else
-    git worktree add -b t3-sync "$WT" origin/main
-  fi
-fi
-for state in rebase-merge rebase-apply; do
-  path="$(git -C "$WT" rev-parse --git-path "$state")"
-  [[ -d "$path" ]] && rm -rf "$path"
-done
-git -C "$WT" checkout --quiet t3-sync
-git -C "$WT" reset --hard origin/main
-git -C "$WT" clean -fd -e node_modules -e .t3 -e .env
-[[ -f "$REPO/.env" ]] && ln -sf "$REPO/.env" "$WT/.env"
-[[ -f "$REPO/infra/relay/.env" ]] && { mkdir -p "$WT/infra/relay"; ln -sf "$REPO/infra/relay/.env" "$WT/infra/relay/.env"; }
-
+[[ -z "$(git -C "$WT" status --porcelain)" ]] || { echo "error: sync worktree is dirty" >&2; exit 3; }
+[[ "$(git -C "$WT" rev-parse HEAD)" == "$(git -C "$WT" rev-parse origin/main)" ]] || { echo "error: push the tested sync revision before building" >&2; exit 3; }
 SHA="$(git -C "$WT" rev-parse --short HEAD)"
-
-VP="$REPO/node_modules/.bin/vp"
-[[ -x "$VP" ]] || { echo "error: vp not found at $VP" >&2; exit 3; }
-(cd "$WT" && "$MISE" x node@24.19.0 -- "$VP" i)
 (cd "$WT" && "$MISE" x node@24.19.0 -- /bin/bash -c 'export PATH="/opt/homebrew/bin:'"$WT"'/node_modules/.bin:$PATH"; node scripts/build-desktop-artifact.ts --platform mac --target dmg --arch arm64')
 
 DMG="$(ls -t "$WT"/release/*.dmg 2>/dev/null | head -n 1 || true)"
