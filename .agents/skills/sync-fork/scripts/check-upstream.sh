@@ -3,7 +3,7 @@
 # Exit 0 = up to date. Exit 10 = new upstream commits (prints them).
 set -euo pipefail
 
-REPO="${1:-$HOME/t3code}"
+source "$(dirname "${BASH_SOURCE[0]}")/office-env.sh"
 cd "$REPO"
 
 git fetch origin main --quiet
@@ -13,7 +13,7 @@ UP="$(git rev-parse --short pingdotgg/main)"
 BEHIND="$(git rev-list --count origin/main..pingdotgg/main)"
 
 if [[ "$BEHIND" -eq 0 ]]; then
-  echo "up to date: origin/main == pingdotgg/main (${UP})"
+  echo "up to date: origin/main ($(git rev-parse --short origin/main)) contains pingdotgg/main (${UP})"
   exit 0
 fi
 
