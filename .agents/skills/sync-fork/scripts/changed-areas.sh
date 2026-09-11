@@ -3,6 +3,7 @@
 # Usage: changed-areas.sh <from> [to]
 # Prints mobile= and mac= gates, then the changed files.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/office-env.sh"
 
 FROM="$1"
 TO="${2:-HEAD}"
