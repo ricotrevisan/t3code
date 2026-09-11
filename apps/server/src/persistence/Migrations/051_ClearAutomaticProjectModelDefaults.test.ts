@@ -4,8 +4,9 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "../Migrations.ts";
+import migrateThreadPullRequests from "./050_ProjectionThreadPullRequests.ts";
 
-for (const source of ["fork48", "fork50", "upstream"] as const) {
+for (const source of ["fork48", "fork50", "fork51", "fork52", "upstream"] as const) {
   it.layer(NodeSqliteClient.layerMemory())(`051 upgrade from ${source}`, (it) => {
     it.effect("retains existing threads and installs upstream columns and pull request links", () =>
       Effect.gen(function* () {
@@ -15,6 +16,20 @@ for (const source of ["fork48", "fork50", "upstream"] as const) {
           yield* sql`
             INSERT INTO effect_sql_migrations (migration_id, name)
             VALUES (${source === "fork48" ? 48 : 50}, 'ClearAutomaticProjectModelDefaults')
+          `;
+        }
+        if (source === "fork51") {
+          yield* sql`
+            INSERT INTO effect_sql_migrations (migration_id, name)
+            VALUES (51, 'RepairProjectionProjectIcon')
+          `;
+        }
+        if (source === "fork52") {
+          yield* migrateThreadPullRequests;
+          yield* sql`
+            INSERT INTO effect_sql_migrations (migration_id, name)
+            VALUES (51, 'ClearAutomaticProjectModelDefaults'),
+                   (52, 'RepairProjectionThreadPullRequests')
           `;
         }
         yield* sql`
@@ -45,6 +60,10 @@ for (const source of ["fork48", "fork50", "upstream"] as const) {
           FROM projection_thread_pull_requests WHERE thread_id = 'existing-thread'
         `;
         assert.deepEqual(links, [{ host: "github.com", repository: "acme/widgets", number: 7 }]);
+        const messageColumns = yield* sql<{ readonly name: string }>`
+          PRAGMA table_info(projection_thread_messages)
+        `;
+        assert.isTrue(messageColumns.some((column) => column.name === "context_json"));
         assert.deepEqual(yield* runMigrations(), []);
       }),
     );

@@ -67,6 +67,7 @@ import ClearAutomaticProjectModelDefaults from "./Migrations/051_ClearAutomaticP
 import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
 import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
+import RepairForkProjectionSchema from "./Migrations/053_RepairForkProjectionSchema.ts";
 import Migration0056 from "./Migrations/056_PullRequestFilesViewed.ts";
 
 /**
@@ -136,6 +137,7 @@ const migrationEntries = [
   [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
   [56, "PullRequestFilesViewed", Migration0056],
   [57, "ClearAutomaticProjectModelDefaultsForkCompatibility", ClearAutomaticProjectModelDefaults],
+  [58, "RepairForkProjectionSchemaForkCompatibility", RepairForkProjectionSchema],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
