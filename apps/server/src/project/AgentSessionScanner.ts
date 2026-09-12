@@ -646,17 +646,32 @@ export const make = Effect.gen(function* () {
     path.join(homeDir, "Documents", "Codex"),
   ];
 
-  const isExcludedProjectPath = (candidatePath: string) =>
-    excludedProjectRoots.has(normalizeProjectPathForComparison(candidatePath)) ||
-    excludedProjectAncestors.some((ancestor) =>
-      normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
-        normalizeForWorktreeMatch(ancestor, foldWorktreeCase),
-      ),
-    ) ||
-    normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
-      normalizeForWorktreeMatch(baseDir, foldWorktreeCase),
-    ) ||
-    isT3ManagedWorktree(candidatePath, worktreesDir, foldWorktreeCase);
+  const projectPathExclusion = Effect.gen(function* () {
+    // Keep lexical exclusions while also matching candidates whose links were resolved.
+    const baseDirs = [
+      baseDir,
+      yield* fileSystem.realPath(baseDir).pipe(Effect.orElseSucceed(() => baseDir)),
+    ];
+    const worktreesDirs = [
+      worktreesDir,
+      yield* fileSystem.realPath(worktreesDir).pipe(Effect.orElseSucceed(() => worktreesDir)),
+    ];
+    return (candidatePath: string) =>
+      excludedProjectRoots.has(normalizeProjectPathForComparison(candidatePath)) ||
+      excludedProjectAncestors.some((ancestor) =>
+        normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
+          normalizeForWorktreeMatch(ancestor, foldWorktreeCase),
+        ),
+      ) ||
+      baseDirs.some((directory) =>
+        normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
+          normalizeForWorktreeMatch(directory, foldWorktreeCase),
+        ),
+      ) ||
+      worktreesDirs.some((directory) =>
+        isT3ManagedWorktree(candidatePath, directory, foldWorktreeCase),
+      );
+  });
 
   const listDirectory = (directory: string) =>
     fileSystem.readDirectory(directory).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
@@ -1199,6 +1214,7 @@ export const make = Effect.gen(function* () {
   let cachedCandidates: ReadonlyArray<RawCandidate> | null = null;
 
   const scan: AgentSessionScanner["Service"]["scan"] = Effect.gen(function* () {
+    const isExcludedProjectPath = yield* projectPathExclusion;
     const { candidates: raw, truncated } = yield* collectCandidates();
     cachedCandidates = raw;
 
@@ -1329,6 +1345,7 @@ export const make = Effect.gen(function* () {
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
   ) {
+    const isExcludedProjectPath = yield* projectPathExclusion;
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
     if (isExcludedProjectPath(root) || isExcludedProjectPath(realRoot)) return Stream.empty;
