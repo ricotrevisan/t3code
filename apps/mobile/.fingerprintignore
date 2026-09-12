@@ -22,3 +22,6 @@ web-build/
 
 # TypeScript
 *.tsbuildinfo
+
+# Ignore workspace dependency links while retaining native module source fingerprints.
+modules/t3-markdown-text/node_modules/**/*
