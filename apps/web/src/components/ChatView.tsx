@@ -8199,8 +8199,9 @@ export default function ChatView(props: ChatViewProps) {
     } = sendCtx;
     const runtimeModeForSend = coerceRuntimeModeToSupported(
       defaultRuntimeMode,
-      providerStatuses.find((provider) => provider.instanceId === ctxSelectedModelSelection.instanceId)
-        ?.supportedRuntimeModes,
+      providerStatuses.find(
+        (provider) => provider.instanceId === ctxSelectedModelSelection.instanceId,
+      )?.supportedRuntimeModes,
     );
 
     const createdAt = new Date().toISOString();
