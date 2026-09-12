@@ -429,7 +429,7 @@ layer("051_ClearAutomaticProjectModelDefaults", (it) => {
           ('event-explicit-update', 'project', 'project-explicit', 1, 'project.meta-updated', '2026-08-02T00:00:00.000Z', 'command-explicit-update', NULL, 'command-explicit-update', 'client', '{"defaultModelSelection":{"instanceId":"codex","model":"gpt-5.6-sol","options":[{"id":"reasoningEffort","value":"high"}]}}', '{}')
       `;
 
-      yield* runMigrations({ toMigrationInclusive: 51 });
+      yield* runMigrations();
 
       const projects = yield* sql<{
         readonly projectId: string;
