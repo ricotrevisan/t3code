@@ -1025,6 +1025,54 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    for (const aliasedRoot of ["base", "worktrees"] as const) {
+      it.effect.skipIf(!symlinksSupported)(
+        `excludes sandboxes under an explicitly symlinked ${aliasedRoot} root`,
+        () =>
+          Effect.gen(function* () {
+            const path = yield* Path.Path;
+            const fileSystem = yield* FileSystem.FileSystem;
+            const fixture = yield* makeTempDir("t3code-scanner-aliased-root-");
+            const claudeHomePath = path.join(fixture, "claude");
+            const codexHomePath = path.join(fixture, "codex");
+            const configBaseDir = path.join(fixture, "base");
+            const managedRoot = path.join(fixture, "managed");
+            const sandbox = path.join(managedRoot, "sandbox");
+            const keep = path.join(fixture, "managed-sibling");
+            yield* fileSystem.makeDirectory(sandbox, { recursive: true });
+            yield* fileSystem.makeDirectory(keep);
+            if (aliasedRoot === "worktrees") yield* fileSystem.makeDirectory(configBaseDir);
+            const configuredRoot =
+              aliasedRoot === "base" ? configBaseDir : path.join(configBaseDir, "worktrees");
+            yield* fileSystem.symlink(managedRoot, configuredRoot);
+            const symlinkCwd = path.join(fixture, "innocent-project");
+            yield* fileSystem.symlink(sandbox, symlinkCwd);
+            // Lexical exclusion must also survive a symlink pointing out of the root.
+            const outwardLink = path.join(configuredRoot, "outward-link");
+            yield* fileSystem.symlink(keep, outwardLink);
+
+            for (const [index, cwd] of [
+              managedRoot,
+              sandbox,
+              symlinkCwd,
+              outwardLink,
+              keep,
+            ].entries()) {
+              yield* writeTranscript({
+                filePath: path.join(claudeHomePath, "projects", `-slug-${index}`, "a.jsonl"),
+                contents: claudeSessionLine(cwd),
+                mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+              });
+            }
+
+            const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
+
+            expect(result.candidates.map((candidate) => candidate.path)).toEqual([keep]);
+            expect(result.candidates[0]?.threadCount).toBe(1);
+          }),
+      );
+    }
+
     it.effect("finds the cwd on a later line when the first records carry none", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
