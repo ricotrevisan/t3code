@@ -14,8 +14,9 @@ import type {
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
-  EnvironmentId,
   EventId,
+  ProviderAdapterPackageId,
+  ProviderAdapterPackageVersion,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
@@ -928,6 +929,42 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("persists the external adapter package identity with a session", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("external-adapter-thread");
+      const adapterPackage = {
+        id: ProviderAdapterPackageId.make("echo-adapter"),
+        version: ProviderAdapterPackageVersion.make("1.2.3"),
+        protocolVersion: 1,
+      };
+      routing.codex.startSession.mockImplementationOnce((input) =>
+        Effect.succeed({
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          adapterPackage,
+          status: "ready",
+          runtimeMode: input.runtimeMode,
+          threadId,
+          createdAt: "2026-09-14T00:00:00.000Z",
+          updatedAt: "2026-09-14T00:00:00.000Z",
+        }),
+      );
+
+      const session = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      assert.deepStrictEqual(session.adapterPackage, adapterPackage);
+
+      const binding = yield* directory.getBinding(threadId);
+      assert.equal(Option.getOrThrow(binding).adapterKey, "echo-adapter@1.2.3");
+    }),
+  );
+
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

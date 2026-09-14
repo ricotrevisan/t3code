@@ -21,6 +21,7 @@ import {
   ProviderUserInputAnswers,
   RuntimeMode,
 } from "./orchestration.ts";
+import { ProviderAdapterPackageReference } from "./providerAdapter.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -37,6 +38,7 @@ export const ProviderSession = Schema.Struct({
   // populates it (post-slice-4), routing flips to instance-id-only and the
   // legacy `provider` field is removed.
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  adapterPackage: Schema.optional(ProviderAdapterPackageReference),
   status: ProviderSessionStatus,
   runtimeMode: RuntimeMode,
   cwd: Schema.optional(TrimmedNonEmptyString),

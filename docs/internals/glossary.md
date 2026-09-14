@@ -94,11 +94,19 @@ The live backend agent implementation and its event stream. The main service is 
 
 #### Provider
 
-The backend agent runtime that actually performs work. Five drivers ship built in: Codex, Claude, Cursor, Grok, and OpenCode. See [ProviderService.ts][14], [ProviderAdapter.ts][15], and [CodexAdapter.ts][17] as a representative adapter.
+The backend agent runtime that actually performs work. Six drivers ship built in: Codex, Claude, Cursor, Grok, OpenCode, and Prime Agent. See [ProviderService.ts][14], [ProviderAdapter.ts][15], and [CodexAdapter.ts][17] as a representative adapter.
 
-#### Session
+#### Adapter package
 
-The live provider-backed runtime attached to a thread. Session shape is in [the orchestration contracts][1], and lifecycle is managed in [ProviderService.ts][14].
+Server-local code and declarative metadata that know how to launch and translate one provider harness. Registration is separate from provider-instance settings. Trusted external packages are loaded only by the server from its local registry; clients never execute them. See [providers.md][16].
+
+#### Provider instance
+
+One environment-local configuration backed by a provider driver: its routing ID, display metadata, environment references, defaults, and adapter-specific config. Several instances can use the same driver. See [ProviderInstanceRegistry.ts][25].
+
+#### Live session
+
+The provider-backed conversation/process owned by one provider instance and attached to a T3 thread. Session shape is in [the provider contracts][26], and lifecycle is managed in [ProviderService.ts][14].
 
 #### Runtime mode
 
@@ -179,3 +187,5 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../../apps/server/src/checkpointing/Utils.ts
 [23]: ../../apps/server/src/checkpointing/Diffs.ts
 [24]: ./overview.md
+[25]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts
+[26]: ../../packages/contracts/src/provider.ts

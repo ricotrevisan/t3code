@@ -22,6 +22,7 @@
  * @module provider/ProviderDriver
  */
 import type {
+  ProviderAdapterPackageReference,
   ProviderDriverKind,
   ProviderInstanceEnvironment,
   ProviderInstanceId,
@@ -64,6 +65,7 @@ export interface ProviderDriverMetadata {
 export interface ProviderInstance {
   readonly instanceId: ProviderInstanceId;
   readonly driverKind: ProviderDriverKind;
+  readonly adapterPackage?: ProviderAdapterPackageReference | undefined;
   readonly continuationIdentity: ProviderContinuationIdentity;
   readonly displayName: string | undefined;
   readonly accentColor?: string | undefined;

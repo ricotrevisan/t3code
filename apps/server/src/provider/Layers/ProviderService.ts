@@ -330,6 +330,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         threadId,
         provider: session.provider,
         providerInstanceId,
+        adapterKey:
+          session.adapterPackage === undefined
+            ? session.provider
+            : `${session.adapterPackage.id}@${session.adapterPackage.version}`,
         runtimeMode: session.runtimeMode,
         status: toRuntimeStatus(session),
         ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),

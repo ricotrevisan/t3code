@@ -51,8 +51,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
+import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
+import { loadTrustedProviderAdapterPackages } from "../TrustedLocalProviderAdapters.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistryLive.ts";
@@ -156,6 +158,23 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
 > = Layer.unwrap(
   Effect.gen(function* () {
     const serverSettings = yield* ServerSettingsService;
+    const serverConfig = yield* ServerConfig;
+    const external = yield* loadTrustedProviderAdapterPackages<BuiltInDriversEnv>({
+      registryPath: serverConfig.providerAdapterRegistryPath,
+      reservedDriverKinds: new Set(BUILT_IN_DRIVERS.map((driver) => driver.driverKind)),
+    });
+    yield* Effect.forEach(
+      external.diagnostics,
+      (diagnostic) =>
+        Effect.logWarning("provider.adapter.package.skipped", {
+          code: diagnostic.code,
+          detail: diagnostic.detail,
+          packageId: diagnostic.registration?.id,
+          packageVersion: diagnostic.registration?.version,
+          driver: diagnostic.registration?.driver,
+        }),
+      { discard: true },
+    );
     const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => undefined),
     );
@@ -165,7 +184,8 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
         : deriveProviderInstanceConfigMap(initialSettings);
 
     const mutableLayer = ProviderInstanceRegistryMutableLayer({
-      drivers: BUILT_IN_DRIVERS,
+      drivers: [...BUILT_IN_DRIVERS, ...external.drivers],
+      unavailableDriverReasons: external.unavailableDriverReasons,
       configMap: initialConfigMap,
     });
 

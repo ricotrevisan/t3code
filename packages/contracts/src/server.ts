@@ -20,6 +20,7 @@ import {
 import { EditorId, RemoteOpenTarget } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { RuntimeMode } from "./orchestration.ts";
+import { ProviderAdapterPackageReference } from "./providerAdapter.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
 
@@ -166,6 +167,8 @@ export const ServerProvider = Schema.Struct({
   // Open driver kind slug that selects the implementation handling this
   // instance. It is metadata/capability context, not a routing key.
   driver: ProviderDriverKind,
+  /** Server-side adapter package identity. Module paths are never sent to clients. */
+  adapterPackage: Schema.optional(ProviderAdapterPackageReference),
   displayName: Schema.optional(TrimmedNonEmptyString),
   accentColor: Schema.optional(TrimmedNonEmptyString),
   badgeLabel: Schema.optional(TrimmedNonEmptyString),

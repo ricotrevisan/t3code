@@ -117,6 +117,7 @@ const resolveEntryEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown
  */
 const buildEntry = <R>(input: {
   readonly driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>;
+  readonly unavailableDriverReasons: ReadonlyMap<ProviderDriverKind, string>;
   readonly parentScope: Scope.Scope;
   readonly instanceId: ProviderInstanceId;
   readonly rawInstanceId: string;
@@ -128,7 +129,8 @@ const buildEntry = <R>(input: {
   R
 > =>
   Effect.gen(function* () {
-    const { driversById, parentScope, instanceId, rawInstanceId, entry } = input;
+    const { driversById, unavailableDriverReasons, parentScope, instanceId, rawInstanceId, entry } =
+      input;
     const driver = driversById.get(entry.driver);
     if (!driver) {
       return {
@@ -138,7 +140,9 @@ const buildEntry = <R>(input: {
           instanceId,
           displayName: entry.displayName,
           accentColor: entry.accentColor,
-          reason: `Driver '${entry.driver}' is not registered in this build.`,
+          reason:
+            unavailableDriverReasons.get(entry.driver) ??
+            `Driver '${entry.driver}' is not registered in this build.`,
         }),
       };
     }
@@ -220,9 +224,10 @@ const buildEntry = <R>(input: {
 const makeReconcile = <R>(input: {
   readonly state: RegistryState;
   readonly driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>;
+  readonly unavailableDriverReasons: ReadonlyMap<ProviderDriverKind, string>;
   readonly parentScope: Scope.Scope;
 }): ((configMap: ProviderInstanceConfigMap) => Effect.Effect<void, never, R>) => {
-  const { state, driversById, parentScope } = input;
+  const { state, driversById, unavailableDriverReasons, parentScope } = input;
   return (configMap: ProviderInstanceConfigMap) =>
     Effect.gen(function* () {
       const previousEntries = yield* Ref.get(state.entries);
@@ -275,6 +280,7 @@ const makeReconcile = <R>(input: {
 
         const result = yield* buildEntry({
           driversById,
+          unavailableDriverReasons,
           parentScope,
           instanceId,
           rawInstanceId,
@@ -338,6 +344,7 @@ const makeReconcile = <R>(input: {
  */
 export const makeProviderInstanceRegistry = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
   readonly configMap: ProviderInstanceConfigMap;
 }): Effect.Effect<
   {
@@ -370,7 +377,12 @@ export const makeProviderInstanceRegistry = <R>(input: {
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
 
     const state: RegistryState = { entries, unavailable, changes };
-    const reconcileWithR = makeReconcile({ state, driversById, parentScope });
+    const reconcileWithR = makeReconcile({
+      state,
+      driversById,
+      unavailableDriverReasons: input.unavailableDriverReasons ?? new Map(),
+      parentScope,
+    });
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
       reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
 
@@ -422,6 +434,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
  */
 export const ProviderInstanceRegistryLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
   readonly configMap: ProviderInstanceConfigMap;
 }): Layer.Layer<ProviderInstanceRegistry, never, R> =>
   Layer.effect(
@@ -437,6 +450,7 @@ export const ProviderInstanceRegistryLayer = <R>(input: {
  */
 export const ProviderInstanceRegistryMutableLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
   readonly configMap: ProviderInstanceConfigMap;
 }): Layer.Layer<ProviderInstanceRegistry | ProviderInstanceRegistryMutator, never, R> =>
   Layer.effectContext(

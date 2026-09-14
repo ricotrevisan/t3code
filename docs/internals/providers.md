@@ -37,8 +37,51 @@ Two registries separate configuration from live processes:
 [`ProviderService`][service] sits on top. It combines the adapter registry with the provider session
 directory to route session and turn operations for a thread, so callers name a thread, not an agent.
 
-Adding a driver means writing the driver plus adapter and adding it to `BUILT_IN_DRIVERS`. No
-orchestration, contract, or client change is required for the common case.
+Built-in drivers are compiled into the server. Trusted local adapters can instead be registered in
+`<T3 state dir>/provider-adapters.json` and loaded at server startup. This file is deliberately
+separate from `ServerSettings.providerInstances`:
+
+- an **adapter package registration** identifies installed server code (`id`, `version`, `driver`,
+  and `modulePath`);
+- a **provider instance** selects that driver and supplies display, environment, and adapter config;
+- a **live session** belongs to one instance and one T3 thread.
+
+The registry file has this shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "id": "pi-rpc",
+      "version": "1.0.0",
+      "driver": "piRpc",
+      "modulePath": "/absolute/path/to/pi-rpc/index.mjs",
+      "enabled": true
+    }
+  ]
+}
+```
+
+The module default export contains a V1 declarative manifest plus one `ProviderDriver`. The manifest
+pins its package identity, host protocol compatibility, supervised stdio protocol and session
+concurrency, JSON-shaped configuration schema, and the maximum capabilities it may negotiate.
+[`TrustedLocalProviderAdapters.ts`][external] validates the registration, module, compatibility, and
+capabilities before adding the driver. A package cannot replace a built-in driver. Missing, invalid,
+or incompatible packages do not stop server startup; configured instances stay visible as
+unavailable with the package failure reason.
+
+External code is full-trust and executes only in the server process. Web, desktop renderer, and
+mobile clients receive normalized snapshots/events and the package identity, never `modulePath` or
+executable code. Each materialized instance still runs in a registry-owned child scope. The host
+continues to own routing, persistence, session reaping, orchestration, and checkpoints. Package
+activation currently requires a server restart; there is no installer, update UI, remote package
+source, or client plugin surface.
+
+Adding a built-in driver still means writing the driver plus adapter and adding it to
+`BUILT_IN_DRIVERS`. Adding a trusted local package requires no T3 rebuild, but V1 packages currently
+target the server `ProviderDriver` shape directly. A standalone author SDK and a narrower
+host-provided process supervisor are later seam work.
 
 ## How provider work is requested
 
@@ -92,3 +135,4 @@ when a request opens (approval) or user input is requested, via
 [ingest]: ../../apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 [cmd]: ../../apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 [checkpoint]: ../../apps/server/src/orchestration/Layers/CheckpointReactor.ts
+[external]: ../../apps/server/src/provider/TrustedLocalProviderAdapters.ts
