@@ -94,6 +94,36 @@ interface RegistryState {
 const entryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boolean =>
   Equal.equals(a, b);
 
+const adapterPackageRefEqual = (
+  left: NonNullable<ProviderInstanceConfig["adapterPackage"]>,
+  right: NonNullable<ProviderInstanceConfig["adapterPackage"]>,
+): boolean =>
+  left.id === right.id &&
+  left.version === right.version &&
+  left.protocolVersion === right.protocolVersion;
+
+const formatAdapterPackageRef = (
+  reference: NonNullable<ProviderInstanceConfig["adapterPackage"]>,
+): string => `${reference.id}@${reference.version} (protocol ${reference.protocolVersion})`;
+
+const adapterPackageMismatchReason = (input: {
+  readonly driver: ProviderDriverKind;
+  readonly configured: ProviderInstanceConfig["adapterPackage"];
+  readonly loaded: ProviderInstanceConfig["adapterPackage"];
+}): string | undefined => {
+  if (input.loaded === undefined) {
+    return input.configured === undefined
+      ? undefined
+      : `Configured adapter package '${formatAdapterPackageRef(input.configured)}' is not loaded for driver '${input.driver}'.`;
+  }
+  if (input.configured === undefined) {
+    return `External driver '${input.driver}' requires an explicit adapter package reference.`;
+  }
+  return adapterPackageRefEqual(input.loaded, input.configured)
+    ? undefined
+    : `Configured adapter package '${formatAdapterPackageRef(input.configured)}' does not match loaded package '${formatAdapterPackageRef(input.loaded)}'.`;
+};
+
 /**
  * Resolve an entry's enabled state. An explicit false on either the
  * envelope or the raw config blob wins (most restrictive) — old settings
@@ -140,9 +170,31 @@ const buildEntry = <R>(input: {
           instanceId,
           displayName: entry.displayName,
           accentColor: entry.accentColor,
+          adapterPackage: entry.adapterPackage,
           reason:
             unavailableDriverReasons.get(entry.driver) ??
             `Driver '${entry.driver}' is not registered in this build.`,
+        }),
+      };
+    }
+
+    const loadedAdapterPackage = driver.adapterPackage;
+    const configuredAdapterPackage = entry.adapterPackage;
+    const packageMismatchReason = adapterPackageMismatchReason({
+      driver: entry.driver,
+      configured: configuredAdapterPackage,
+      loaded: loadedAdapterPackage,
+    });
+    if (packageMismatchReason !== undefined) {
+      return {
+        kind: "unavailable" as const,
+        snapshot: yield* buildUnavailableProviderSnapshot({
+          driverKind: entry.driver,
+          instanceId,
+          displayName: entry.displayName,
+          accentColor: entry.accentColor,
+          adapterPackage: configuredAdapterPackage ?? loadedAdapterPackage,
+          reason: packageMismatchReason,
         }),
       };
     }
@@ -164,6 +216,7 @@ const buildEntry = <R>(input: {
           instanceId,
           displayName: entry.displayName,
           accentColor: entry.accentColor,
+          adapterPackage: entry.adapterPackage,
           reason: `Invalid config for instance '${rawInstanceId}': ${detail}`,
         }),
       };
@@ -202,6 +255,7 @@ const buildEntry = <R>(input: {
           instanceId,
           displayName: entry.displayName,
           accentColor: entry.accentColor,
+          adapterPackage: entry.adapterPackage,
           reason: `Driver '${entry.driver}' failed to create instance: ${createResult.failure.detail}`,
         }),
       };

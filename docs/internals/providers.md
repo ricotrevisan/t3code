@@ -63,25 +63,51 @@ The registry file has this shape:
 }
 ```
 
-The module default export contains a V1 declarative manifest plus one `ProviderDriver`. The manifest
-pins its package identity, host protocol compatibility, supervised stdio protocol and session
-concurrency, JSON-shaped configuration schema, and the maximum capabilities it may negotiate.
-[`TrustedLocalProviderAdapters.ts`][external] validates the registration, module, compatibility, and
-capabilities before adding the driver. A package cannot replace a built-in driver. Missing, invalid,
-or incompatible packages do not stop server startup; configured instances stay visible as
-unavailable with the package failure reason.
+An instance backed by that package pins the same identity in `ServerSettings.providerInstances`:
 
-External code is full-trust and executes only in the server process. Web, desktop renderer, and
-mobile clients receive normalized snapshots/events and the package identity, never `modulePath` or
-executable code. Each materialized instance still runs in a registry-owned child scope. The host
-continues to own routing, persistence, session reaping, orchestration, and checkpoints. Package
-activation currently requires a server restart; there is no installer, update UI, remote package
-source, or client plugin surface.
+```json
+{
+  "providerInstances": {
+    "pi_local": {
+      "driver": "piRpc",
+      "adapterPackage": {
+        "id": "pi-rpc",
+        "version": "1.0.0",
+        "protocolVersion": 1
+      },
+      "config": {}
+    }
+  }
+}
+```
+
+The module default export is a `ProviderAdapterPackageV1` from the workspace SDK
+`@t3tools/provider-adapter`. It contains a declarative manifest, a runtime configuration codec,
+default configuration, and an instance factory. The manifest pins package identity, host protocol
+compatibility, supervised stdio protocol and session concurrency, JSON-shaped configuration schema,
+and the maximum capabilities the package may negotiate. [`TrustedLocalProviderAdapters.ts`][external]
+validates the registration, module, and compatibility before wrapping it as a host driver. A package
+cannot replace a built-in driver. An external instance is materialized only when its pinned package
+reference exactly matches the loaded package. Missing, invalid, mismatched, or incompatible packages
+do not stop server startup; configured instances stay visible as unavailable with the package failure
+reason and requested package identity.
+
+External code is full-trust and executes only in the server process. It translates its native harness
+protocol into canonical sessions, commands, and runtime events. It does not receive internal
+`ProviderDriver` services. Packages that need a subprocess must use the V1 host process supervisor,
+which owns process spawning, stdio, termination, and scope finalizers. The host also stamps package,
+provider, and instance identity onto package output, rejects negotiated capabilities absent from
+the package manifest, and exposes the negotiated set as `ServerProvider.adapterCapabilities`.
+
+Web, desktop renderer, and mobile clients receive normalized snapshots/events, declarative
+configuration schemas, and package identity, never `modulePath` or executable code. Each materialized instance runs in a registry-owned child
+scope. The host continues to own routing, persistence, session reaping, orchestration, checkpoints,
+and fallback text generation. Package activation currently requires a server restart; there is no
+installer, update UI, remote package source, client plugin surface, or external text-generation hook.
 
 Adding a built-in driver still means writing the driver plus adapter and adding it to
-`BUILT_IN_DRIVERS`. Adding a trusted local package requires no T3 rebuild, but V1 packages currently
-target the server `ProviderDriver` shape directly. A standalone author SDK and a narrower
-host-provided process supervisor are later seam work.
+`BUILT_IN_DRIVERS`. Adding a trusted local package requires no T3 rebuild and targets only the
+versioned `@t3tools/provider-adapter` interface.
 
 ## How provider work is requested
 

@@ -51,6 +51,14 @@ describe("ProviderAdapterManifestV1", () => {
     expect(() => decodeManifest(manifest({ capabilities: ["session.teleport"] }))).toThrow();
   });
 
+  it("rejects executable values in the client-visible configuration schema", () => {
+    expect(() =>
+      decodeManifest(
+        manifest({ configSchema: { type: "object", transform: () => "not declarative" } }),
+      ),
+    ).toThrow();
+  });
+
   it("rejects packages whose host protocol range excludes this host", () => {
     const decoded = decodeManifest(manifest({ hostProtocol: { minimum: 2, maximum: 3 } }));
     expect(isProviderAdapterManifestCompatible(decoded)).toBe(false);

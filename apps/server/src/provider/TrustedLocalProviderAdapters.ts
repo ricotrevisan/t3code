@@ -6,27 +6,26 @@
  * process. Remote clients receive normalized provider snapshots and events,
  * never module paths or executable package code.
  */
+import type { ProviderAdapterPackageV1 } from "@t3tools/provider-adapter";
 import {
   isProviderAdapterManifestCompatible,
   ProviderAdapterManifestV1,
-  ProviderAdapterProtocolCapabilitiesV1,
   ProviderAdapterPackageId,
   ProviderAdapterPackageVersion,
   ProviderDriverKind,
   type ProviderAdapterManifestV1 as ProviderAdapterManifest,
-  type ProviderAdapterPackageReference,
   type ProviderDriverKind as ProviderDriverKindType,
-  type ProviderSession,
-  type ServerProvider,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
 
-import { ProviderDriverError } from "./Errors.ts";
-import type { AnyProviderDriver, ProviderInstance } from "./ProviderDriver.ts";
+import {
+  type ExternalProviderDriverEnv,
+  makeExternalProviderDriver,
+} from "./ExternalProviderDriver.ts";
+import type { AnyProviderDriver } from "./ProviderDriver.ts";
 
 const ProviderAdapterPackageRegistration = Schema.Struct({
   id: ProviderAdapterPackageId,
@@ -42,15 +41,14 @@ const TrustedProviderAdapterRegistryFileV1 = Schema.Struct({
   packages: Schema.Array(ProviderAdapterPackageRegistration),
 });
 
-const ExternalProviderAdapterPackageV1 = Schema.Struct({
+const ExternalProviderAdapterPackageV1Schema = Schema.Struct({
   manifest: ProviderAdapterManifestV1,
-  driver: Schema.Unknown,
+  configSchema: Schema.Unknown,
+  defaultConfig: Schema.Unknown,
+  create: Schema.Unknown,
 });
 
-export interface ExternalProviderAdapterPackageV1<R = never> {
-  readonly manifest: ProviderAdapterManifest;
-  readonly driver: AnyProviderDriver<R>;
-}
+export type ExternalProviderAdapterPackageV1<Config = unknown> = ProviderAdapterPackageV1<Config>;
 
 export interface ProviderAdapterPackageDiagnostic {
   readonly registration: ProviderAdapterPackageRegistration | undefined;
@@ -64,8 +62,8 @@ export interface ProviderAdapterPackageDiagnostic {
   readonly detail: string;
 }
 
-export interface LoadedTrustedProviderAdapters<R> {
-  readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+export interface LoadedTrustedProviderAdapters {
+  readonly drivers: ReadonlyArray<AnyProviderDriver<ExternalProviderDriverEnv>>;
   readonly manifests: ReadonlyArray<ProviderAdapterManifest>;
   readonly unavailableDriverReasons: ReadonlyMap<ProviderDriverKindType, string>;
   readonly diagnostics: ReadonlyArray<ProviderAdapterPackageDiagnostic>;
@@ -80,101 +78,24 @@ interface LoadTrustedProviderAdapterPackagesInput {
 const decodeRegistry = Schema.decodeUnknownEffect(
   Schema.fromJsonString(TrustedProviderAdapterRegistryFileV1),
 );
-const decodePackage = Schema.decodeUnknownEffect(ExternalProviderAdapterPackageV1);
-const decodeNegotiatedCapabilities = Schema.decodeUnknownExit(
-  ProviderAdapterProtocolCapabilitiesV1,
-);
+const decodePackage = Schema.decodeUnknownEffect(ExternalProviderAdapterPackageV1Schema);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isProviderDriver = (value: unknown): value is AnyProviderDriver<unknown> =>
-  isRecord(value) &&
-  typeof value.driverKind === "string" &&
-  isRecord(value.metadata) &&
-  typeof value.metadata.displayName === "string" &&
-  (isRecord(value.configSchema) || typeof value.configSchema === "function") &&
+const isProviderAdapterPackage = (value: {
+  readonly manifest: ProviderAdapterManifest;
+  readonly configSchema: unknown;
+  readonly defaultConfig: unknown;
+  readonly create: unknown;
+}): value is ProviderAdapterPackageV1<unknown> =>
+  Schema.isSchema(value.configSchema) &&
   typeof value.defaultConfig === "function" &&
   typeof value.create === "function";
 
-const packageReference = (manifest: ProviderAdapterManifest): ProviderAdapterPackageReference => ({
-  id: manifest.id,
-  version: manifest.version,
-  protocolVersion: manifest.protocolVersion,
-});
-
-const stampInstance = <R>(
-  manifest: ProviderAdapterManifest,
-  driver: AnyProviderDriver<R>,
-): AnyProviderDriver<R> => ({
-  ...driver,
-  create: (input) =>
-    driver.create(input).pipe(
-      Effect.flatMap((instance) => {
-        const negotiatedResult = decodeNegotiatedCapabilities(
-          instance.adapter.capabilities.protocol,
-        );
-        if (negotiatedResult._tag === "Failure") {
-          return Effect.fail(
-            new ProviderDriverError({
-              driver: driver.driverKind,
-              instanceId: input.instanceId,
-              detail:
-                "External adapters must negotiate valid Provider Adapter Protocol V1 capabilities.",
-            }),
-          );
-        }
-        const negotiated = negotiatedResult.value;
-        const declared = new Set(manifest.capabilities);
-        const undeclared = negotiated.features.filter((feature) => !declared.has(feature));
-        if (undeclared.length > 0) {
-          return Effect.fail(
-            new ProviderDriverError({
-              driver: driver.driverKind,
-              instanceId: input.instanceId,
-              detail: `Adapter negotiated undeclared capabilities: ${undeclared.join(", ")}.`,
-            }),
-          );
-        }
-
-        const adapterPackage = packageReference(manifest);
-        const withPackage = (snapshot: ServerProvider): ServerProvider => ({
-          ...snapshot,
-          adapterPackage,
-        });
-        const snapshot: ProviderInstance["snapshot"] = {
-          ...instance.snapshot,
-          getSnapshot: instance.snapshot.getSnapshot.pipe(Effect.map(withPackage)),
-          refresh: instance.snapshot.refresh.pipe(Effect.map(withPackage)),
-          streamChanges: instance.snapshot.streamChanges.pipe(Stream.map(withPackage)),
-        };
-        const withPackageSession = (session: ProviderSession): ProviderSession => ({
-          ...session,
-          adapterPackage,
-        });
-        const adapter: ProviderInstance["adapter"] = {
-          ...instance.adapter,
-          startSession: (input) =>
-            instance.adapter.startSession(input).pipe(Effect.map(withPackageSession)),
-          listSessions: () =>
-            instance.adapter
-              .listSessions()
-              .pipe(Effect.map((sessions) => sessions.map(withPackageSession))),
-        };
-
-        return Effect.succeed({
-          ...instance,
-          adapterPackage,
-          snapshot,
-          adapter,
-        } satisfies ProviderInstance);
-      }),
-    ),
-});
-
-const emptyResult = <R>(
+const emptyResult = (
   diagnostics: ReadonlyArray<ProviderAdapterPackageDiagnostic> = [],
-): LoadedTrustedProviderAdapters<R> => ({
+): LoadedTrustedProviderAdapters => ({
   drivers: [],
   manifests: [],
   unavailableDriverReasons: new Map(),
@@ -182,23 +103,23 @@ const emptyResult = <R>(
 });
 
 export const loadTrustedProviderAdapterPackages = Effect.fn("loadTrustedProviderAdapterPackages")(
-  function* <R>(
+  function* (
     input: LoadTrustedProviderAdapterPackagesInput,
-  ): Effect.fn.Return<LoadedTrustedProviderAdapters<R>, never, FileSystem.FileSystem | Path.Path> {
+  ): Effect.fn.Return<LoadedTrustedProviderAdapters, never, FileSystem.FileSystem | Path.Path> {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const exists = yield* fileSystem
       .exists(input.registryPath)
       .pipe(Effect.orElseSucceed(() => false));
     if (!exists) {
-      return emptyResult<R>();
+      return emptyResult();
     }
 
     const registryResult = yield* fileSystem
       .readFileString(input.registryPath)
       .pipe(Effect.flatMap(decodeRegistry), Effect.result);
     if (registryResult._tag === "Failure") {
-      return emptyResult<R>([
+      return emptyResult([
         {
           registration: undefined,
           code: "registry-invalid",
@@ -207,7 +128,7 @@ export const loadTrustedProviderAdapterPackages = Effect.fn("loadTrustedProvider
       ]);
     }
 
-    const drivers: Array<AnyProviderDriver<R>> = [];
+    const drivers: Array<AnyProviderDriver<ExternalProviderDriverEnv>> = [];
     const manifests: Array<ProviderAdapterManifest> = [];
     const unavailableDriverReasons = new Map<ProviderDriverKindType, string>();
     const diagnostics: Array<ProviderAdapterPackageDiagnostic> = [];
@@ -217,6 +138,10 @@ export const loadTrustedProviderAdapterPackages = Effect.fn("loadTrustedProvider
 
     for (const registration of registryResult.success.packages) {
       if (!registration.enabled) {
+        unavailableDriverReasons.set(
+          registration.driver,
+          `External adapter package '${registration.id}@${registration.version}' is disabled.`,
+        );
         continue;
       }
 
@@ -266,7 +191,7 @@ export const loadTrustedProviderAdapterPackages = Effect.fn("loadTrustedProvider
         ? (loadedModule.default ?? loadedModule.t3ProviderAdapter)
         : undefined;
       const packageResult = yield* decodePackage(exported).pipe(Effect.result);
-      if (packageResult._tag === "Failure") {
+      if (packageResult._tag === "Failure" || !isProviderAdapterPackage(packageResult.success)) {
         const detail = `Adapter module '${registration.modulePath}' does not export a valid V1 package.`;
         diagnostics.push({ registration, code: "package-invalid", detail });
         unavailableDriverReasons.set(registration.driver, detail);
@@ -291,17 +216,26 @@ export const loadTrustedProviderAdapterPackages = Effect.fn("loadTrustedProvider
         unavailableDriverReasons.set(registration.driver, detail);
         continue;
       }
-      if (
-        !isProviderDriver(adapterPackage.driver) ||
-        adapterPackage.driver.driverKind !== manifest.driver
-      ) {
-        const detail = `Adapter '${packageKey}' does not export the declared provider driver '${manifest.driver}'.`;
+
+      const defaultConfigResult = yield* Effect.try({
+        try: () => adapterPackage.defaultConfig(),
+        catch: (cause) => `Default configuration factory threw: ${String(cause)}`,
+      }).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(adapterPackage.configSchema)),
+        Effect.mapError((cause) => String(cause)),
+        Effect.catchDefect((cause) =>
+          Effect.fail(`Default configuration validation defected: ${String(cause)}`),
+        ),
+        Effect.result,
+      );
+      if (defaultConfigResult._tag === "Failure") {
+        const detail = `Adapter '${packageKey}' has an invalid default configuration: ${defaultConfigResult.failure}`;
         diagnostics.push({ registration, code: "package-invalid", detail });
         unavailableDriverReasons.set(registration.driver, detail);
         continue;
       }
 
-      const driver = stampInstance(manifest, adapterPackage.driver as AnyProviderDriver<R>);
+      const driver = makeExternalProviderDriver(adapterPackage, defaultConfigResult.success);
       drivers.push(driver);
       manifests.push(manifest);
       claimedDrivers.add(driver.driverKind);

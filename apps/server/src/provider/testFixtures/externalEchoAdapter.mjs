@@ -1,7 +1,8 @@
+import { defineProviderAdapterV1 } from "@t3tools/provider-adapter";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-export default {
+export default defineProviderAdapterV1({
   manifest: {
     protocolVersion: 1,
     id: "echo-adapter",
@@ -17,11 +18,7 @@ export default {
     capabilities: ["turn.interrupt", "stream.reasoning"],
     configSchema: { type: "object", additionalProperties: false },
   },
-  driver: {
-    driverKind: "echoHarness",
-    metadata: { displayName: "Echo Adapter" },
-    configSchema: Schema.Struct({}),
-    defaultConfig: () => ({}),
-    create: () => Effect.die("not exercised by dynamic import test"),
-  },
-};
+  configSchema: Schema.Struct({}),
+  defaultConfig: () => ({}),
+  create: () => Effect.die("not exercised by dynamic import test"),
+});

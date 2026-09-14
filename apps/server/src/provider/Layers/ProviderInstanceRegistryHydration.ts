@@ -159,7 +159,7 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
   Effect.gen(function* () {
     const serverSettings = yield* ServerSettingsService;
     const serverConfig = yield* ServerConfig;
-    const external = yield* loadTrustedProviderAdapterPackages<BuiltInDriversEnv>({
+    const external = yield* loadTrustedProviderAdapterPackages({
       registryPath: serverConfig.providerAdapterRegistryPath,
       reservedDriverKinds: new Set(BUILT_IN_DRIVERS.map((driver) => driver.driverKind)),
     });

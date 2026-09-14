@@ -20,6 +20,7 @@ import {
   ProviderSessionStartInput,
   ProviderStopSessionInput,
   ProviderUploadFeedbackInput,
+  type ProviderAdapterPackageReference,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -60,6 +61,14 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 const isModelSelection = Schema.is(ModelSelection);
+
+const providerAdapterKey = (
+  provider: ProviderDriverKind,
+  adapterPackage: ProviderAdapterPackageReference | undefined,
+): string =>
+  adapterPackage === undefined
+    ? provider
+    : `package:${adapterPackage.id}@${adapterPackage.version}:protocol:${adapterPackage.protocolVersion}`;
 
 /**
  * Hook for tests that want to override the canonical event logger pulled
@@ -330,10 +339,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         threadId,
         provider: session.provider,
         providerInstanceId,
-        adapterKey:
-          session.adapterPackage === undefined
-            ? session.provider
-            : `${session.adapterPackage.id}@${session.adapterPackage.version}`,
+        adapterKey: providerAdapterKey(session.provider, session.adapterPackage),
         runtimeMode: session.runtimeMode,
         status: toRuntimeStatus(session),
         ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
@@ -425,6 +431,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     return yield* Effect.gen(function* () {
       const adapter = yield* registry.getByInstance(bindingInstanceId);
+      const liveAdapterKey = providerAdapterKey(adapter.provider, adapter.adapterPackage);
+      if (input.binding.adapterKey !== liveAdapterKey) {
+        return yield* toValidationError(
+          input.operation,
+          `Cannot recover thread '${input.binding.threadId}' because persisted adapter '${input.binding.adapterKey}' does not match loaded adapter '${liveAdapterKey}'.`,
+        );
+      }
       const hasResumeCursor =
         input.binding.resumeCursor !== null && input.binding.resumeCursor !== undefined;
       const hasActiveSession = yield* adapter.hasSession(input.binding.threadId);

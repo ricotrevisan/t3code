@@ -20,7 +20,11 @@ import {
 import { EditorId, RemoteOpenTarget } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { RuntimeMode } from "./orchestration.ts";
-import { ProviderAdapterPackageReference } from "./providerAdapter.ts";
+import {
+  ProviderAdapterConfigSchema,
+  ProviderAdapterPackageReference,
+  ProviderAdapterProtocolCapabilitiesV1,
+} from "./providerAdapter.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
 
@@ -169,6 +173,10 @@ export const ServerProvider = Schema.Struct({
   driver: ProviderDriverKind,
   /** Server-side adapter package identity. Module paths are never sent to clients. */
   adapterPackage: Schema.optional(ProviderAdapterPackageReference),
+  /** Declarative package configuration schema; contains no executable adapter code. */
+  adapterConfigSchema: Schema.optional(ProviderAdapterConfigSchema),
+  /** Capabilities negotiated by this configured package instance. */
+  adapterCapabilities: Schema.optional(ProviderAdapterProtocolCapabilitiesV1),
   displayName: Schema.optional(TrimmedNonEmptyString),
   accentColor: Schema.optional(TrimmedNonEmptyString),
   badgeLabel: Schema.optional(TrimmedNonEmptyString),

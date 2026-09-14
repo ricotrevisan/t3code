@@ -7,23 +7,19 @@
  */
 import * as Schema from "effect/Schema";
 import { PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  ProviderAdapterPackageId,
+  ProviderAdapterPackageVersion,
+} from "./providerAdapterIdentity.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
+export {
+  ProviderAdapterPackageId,
+  ProviderAdapterPackageReference,
+  ProviderAdapterPackageVersion,
+} from "./providerAdapterIdentity.ts";
+
 export const T3_PROVIDER_ADAPTER_PROTOCOL_VERSION = 1 as const;
-
-const AdapterSlug = TrimmedNonEmptyString.check(
-  Schema.isMaxLength(64),
-  Schema.isPattern(/^[a-zA-Z][a-zA-Z0-9_-]*$/),
-);
-
-export const ProviderAdapterPackageId = AdapterSlug.pipe(Schema.brand("ProviderAdapterPackageId"));
-export type ProviderAdapterPackageId = typeof ProviderAdapterPackageId.Type;
-
-export const ProviderAdapterPackageVersion = TrimmedNonEmptyString.check(
-  Schema.isMaxLength(128),
-  Schema.isPattern(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/),
-).pipe(Schema.brand("ProviderAdapterPackageVersion"));
-export type ProviderAdapterPackageVersion = typeof ProviderAdapterPackageVersion.Type;
 
 export const ProviderAdapterCapability = Schema.Literals([
   "session.resume",
@@ -58,13 +54,6 @@ export const ProviderAdapterProtocolCapabilitiesV1 = Schema.Struct({
 export type ProviderAdapterProtocolCapabilitiesV1 =
   typeof ProviderAdapterProtocolCapabilitiesV1.Type;
 
-export const ProviderAdapterPackageReference = Schema.Struct({
-  id: ProviderAdapterPackageId,
-  version: ProviderAdapterPackageVersion,
-  protocolVersion: PositiveInt,
-});
-export type ProviderAdapterPackageReference = typeof ProviderAdapterPackageReference.Type;
-
 export const ProviderAdapterTransportV1 = Schema.Struct({
   kind: Schema.Literal("supervised-stdio"),
   protocol: Schema.Literals(["jsonl-rpc", "acp-v1"]),
@@ -77,6 +66,10 @@ export const ProviderAdapterHostProtocolRange = Schema.Struct({
   maximum: PositiveInt,
 });
 export type ProviderAdapterHostProtocolRange = typeof ProviderAdapterHostProtocolRange.Type;
+
+/** JSON-serializable schema metadata clients may use to render package configuration. */
+export const ProviderAdapterConfigSchema = Schema.Record(Schema.String, Schema.Json);
+export type ProviderAdapterConfigSchema = typeof ProviderAdapterConfigSchema.Type;
 
 /**
  * Declarative package metadata. `configSchema` is JSON-Schema-shaped data;
@@ -91,7 +84,7 @@ export const ProviderAdapterManifestV1 = Schema.Struct({
   hostProtocol: ProviderAdapterHostProtocolRange,
   transport: ProviderAdapterTransportV1,
   capabilities: ProviderAdapterCapabilitySet,
-  configSchema: Schema.Record(Schema.String, Schema.Unknown),
+  configSchema: ProviderAdapterConfigSchema,
 });
 export type ProviderAdapterManifestV1 = typeof ProviderAdapterManifestV1.Type;
 

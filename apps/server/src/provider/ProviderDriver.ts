@@ -120,6 +120,8 @@ export interface ProviderDriverCreateInput<Config> {
  */
 export interface ProviderDriver<Config, R = never> {
   readonly driverKind: ProviderDriverKind;
+  /** Present only for dynamically loaded trusted-local packages. */
+  readonly adapterPackage?: ProviderAdapterPackageReference | undefined;
   readonly metadata: ProviderDriverMetadata;
   /**
    * Decoder for the opaque `ProviderInstanceConfig.config` envelope. The

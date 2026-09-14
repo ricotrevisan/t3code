@@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   ProviderAdapterManifestV1,
+  ProviderAdapterPackageId,
+  ProviderAdapterPackageVersion,
   ProviderDriverKind,
   ProviderInstanceId,
   ServerProvider,
@@ -13,9 +15,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { defineProviderAdapterV1, type ProviderAdapterPackageV1 } from "@t3tools/provider-adapter";
 
-import type { ProviderAdapterShape } from "./Services/ProviderAdapter.ts";
-import type { AnyProviderDriver, ProviderInstance } from "./ProviderDriver.ts";
 import { makeProviderInstanceRegistry } from "./Layers/ProviderInstanceRegistryLive.ts";
 import {
   type ExternalProviderAdapterPackageV1,
@@ -47,91 +48,68 @@ const manifest = (overrides: Record<string, unknown> = {}) =>
     ...overrides,
   });
 
-const makeEchoDriver = (
+const makeEchoPackage = (
   negotiatedFeatures: ProviderAdapterManifestV1["capabilities"] = [
     "turn.interrupt",
     "stream.reasoning",
   ],
-): AnyProviderDriver<never> => ({
-  driverKind: ECHO_DRIVER,
-  metadata: { displayName: "Echo Adapter" },
-  configSchema: Schema.Struct({}),
-  defaultConfig: () => ({}),
-  create: ({ instanceId, displayName, enabled }) => {
-    const snapshot = decodeServerProvider({
-      instanceId,
-      driver: ECHO_DRIVER,
-      displayName,
-      enabled,
-      installed: true,
-      version: "1.0.0",
-      status: enabled ? "ready" : "disabled",
-      auth: { status: "unknown" },
-      checkedAt: NOW,
-      availability: "available",
-      models: [],
-      slashCommands: [],
-      skills: [],
-    });
-    const unsupported = () => Effect.die("not exercised by package-loader tests");
-    const adapter: ProviderAdapterShape<never> = {
-      provider: ECHO_DRIVER,
-      capabilities: {
-        sessionModelSwitch: "unsupported",
-        protocol: { protocolVersion: 1, features: negotiatedFeatures },
-      },
-      startSession: (input) =>
-        Effect.succeed({
-          provider: ECHO_DRIVER,
-          providerInstanceId: input.providerInstanceId,
-          status: "ready",
-          runtimeMode: input.runtimeMode,
-          threadId: input.threadId,
-          createdAt: NOW,
-          updatedAt: NOW,
-        }),
-      sendTurn: unsupported,
-      interruptTurn: () => Effect.void,
-      respondToRequest: unsupported,
-      respondToUserInput: unsupported,
-      stopSession: () => Effect.void,
-      listSessions: () => Effect.succeed([]),
-      hasSession: () => Effect.succeed(false),
-      readThread: unsupported,
-      rollbackThread: unsupported,
-      stopAll: () => Effect.void,
-      streamEvents: Stream.empty,
-    };
-    const textGeneration = {
-      generateCommitMessage: unsupported,
-      generatePrContent: unsupported,
-      generateBranchName: unsupported,
-      generateThreadTitle: unsupported,
-    };
-    return Effect.succeed({
-      instanceId,
-      driverKind: ECHO_DRIVER,
-      continuationIdentity: {
-        driverKind: ECHO_DRIVER,
+  manifestOverrides: Record<string, unknown> = {},
+): ProviderAdapterPackageV1<Record<string, never>> =>
+  defineProviderAdapterV1({
+    manifest: manifest(manifestOverrides),
+    configSchema: Schema.Struct({}),
+    defaultConfig: () => ({}),
+    create: ({ instanceId, displayName, enabled }) => {
+      const snapshot = decodeServerProvider({
+        instanceId,
+        driver: ECHO_DRIVER,
+        displayName,
+        enabled,
+        installed: true,
+        version: "1.0.0",
+        status: enabled ? "ready" : "disabled",
+        auth: { status: "unknown" },
+        checkedAt: NOW,
+        availability: "available",
+        models: [],
+        slashCommands: [],
+        skills: [],
+      });
+      const unsupported = () => Effect.die("not exercised by package-loader tests");
+      return Effect.succeed({
         continuationKey: `echo:instance:${instanceId}`,
-      },
-      displayName,
-      enabled,
-      snapshot: {
-        maintenanceCapabilities: {
-          provider: ECHO_DRIVER,
-          packageName: null,
-          update: null,
+        snapshot: {
+          getSnapshot: Effect.succeed(snapshot),
+          refresh: Effect.succeed(snapshot),
+          streamChanges: Stream.empty,
         },
-        getSnapshot: Effect.succeed(snapshot),
-        refresh: Effect.succeed(snapshot),
-        streamChanges: Stream.empty,
-      },
-      adapter,
-      textGeneration,
-    } satisfies ProviderInstance);
-  },
-});
+        adapter: {
+          capabilities: { protocolVersion: 1, features: negotiatedFeatures },
+          startSession: (input) =>
+            Effect.succeed({
+              provider: ECHO_DRIVER,
+              providerInstanceId: input.providerInstanceId,
+              status: "ready",
+              runtimeMode: input.runtimeMode,
+              threadId: input.threadId,
+              createdAt: NOW,
+              updatedAt: NOW,
+            }),
+          sendTurn: unsupported,
+          interruptTurn: () => Effect.void,
+          respondToRequest: unsupported,
+          respondToUserInput: unsupported,
+          stopSession: () => Effect.void,
+          listSessions: () => Effect.succeed([]),
+          hasSession: () => Effect.succeed(false),
+          readThread: unsupported,
+          rollbackThread: unsupported,
+          stopAll: () => Effect.void,
+          streamEvents: Stream.empty,
+        },
+      });
+    },
+  });
 
 const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -156,9 +134,16 @@ const registration = {
   enabled: true,
 };
 
+const ECHO_PACKAGE_REFERENCE = {
+  id: ProviderAdapterPackageId.make("echo-adapter"),
+  version: ProviderAdapterPackageVersion.make("1.0.0"),
+  protocolVersion: 1,
+};
+
 const registryConfig: ProviderInstanceConfigMap = {
   [ECHO_INSTANCE]: {
     driver: ECHO_DRIVER,
+    adapterPackage: ECHO_PACKAGE_REFERENCE,
     displayName: "Echo Local",
     config: {},
   },
@@ -170,11 +155,9 @@ describe("trusted local provider adapter packages", () => {
   it.effect("loads a registered package and materializes its provider instance", () =>
     Effect.gen(function* () {
       const registryPath = yield* writeRegistry([registration]);
-      const adapterPackage: ExternalProviderAdapterPackageV1 = {
-        manifest: manifest(),
-        driver: makeEchoDriver(),
-      };
-      const loaded = yield* loadTrustedProviderAdapterPackages<never>({
+      const adapterPackage: ExternalProviderAdapterPackageV1<Record<string, never>> =
+        makeEchoPackage();
+      const loaded = yield* loadTrustedProviderAdapterPackages({
         registryPath,
         reservedDriverKinds: new Set(),
         loadModule: async () => ({ default: adapterPackage }),
@@ -191,6 +174,7 @@ describe("trusted local provider adapter packages", () => {
           ...registryConfig,
           [secondInstanceId]: {
             driver: ECHO_DRIVER,
+            adapterPackage: ECHO_PACKAGE_REFERENCE,
             displayName: "Echo Work",
             config: {},
           },
@@ -212,6 +196,14 @@ describe("trusted local provider adapter packages", () => {
       });
       const snapshot = yield* instance.snapshot.getSnapshot;
       assert.deepStrictEqual(snapshot.adapterPackage, instance.adapterPackage);
+      assert.deepStrictEqual(snapshot.adapterConfigSchema, {
+        type: "object",
+        additionalProperties: false,
+      });
+      assert.deepStrictEqual(snapshot.adapterCapabilities, {
+        protocolVersion: 1,
+        features: ["turn.interrupt", "stream.reasoning"],
+      });
       assert.equal(snapshot.instanceId, ECHO_INSTANCE);
       const session = yield* instance.adapter.startSession({
         threadId: ThreadId.make("echo-thread"),
@@ -219,20 +211,159 @@ describe("trusted local provider adapter packages", () => {
         runtimeMode: "full-access",
       });
       assert.deepStrictEqual(session.adapterPackage, instance.adapterPackage);
+      const failedTurn = yield* instance.adapter
+        .sendTurn({ threadId: session.threadId, input: "hello", attachments: [] })
+        .pipe(Effect.result);
+      assert.equal(failedTurn._tag, "Failure");
+      if (
+        failedTurn._tag === "Failure" &&
+        failedTurn.failure._tag === "ProviderAdapterRequestError"
+      ) {
+        assert.equal(failedTurn.failure.method, "sendTurn");
+      }
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("requires configured instances to pin the loaded adapter package", () =>
+    Effect.gen(function* () {
+      const registryPath = yield* writeRegistry([registration]);
+      const loaded = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+        loadModule: async () => ({
+          default: makeEchoPackage(),
+        }),
+      });
+      const unpinnedId = ProviderInstanceId.make("echo_unpinned");
+      const mismatchedId = ProviderInstanceId.make("echo_old_version");
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: loaded.drivers,
+        configMap: {
+          [unpinnedId]: { driver: ECHO_DRIVER, config: {} },
+          [mismatchedId]: {
+            driver: ECHO_DRIVER,
+            adapterPackage: {
+              ...ECHO_PACKAGE_REFERENCE,
+              version: ProviderAdapterPackageVersion.make("0.9.0"),
+            },
+            config: {},
+          },
+        },
+      });
+
+      assert.deepStrictEqual(yield* registry.listInstances, []);
+      const unavailable = yield* registry.listUnavailable;
+      assert.lengthOf(unavailable, 2);
+      assert.include(
+        unavailable.find((snapshot) => snapshot.instanceId === unpinnedId)?.unavailableReason ?? "",
+        "requires an explicit adapter package reference",
+      );
+      const mismatched = unavailable.find((snapshot) => snapshot.instanceId === mismatchedId);
+      assert.include(mismatched?.unavailableReason ?? "", "does not match loaded package");
+      assert.equal(mismatched?.adapterPackage?.version, "0.9.0");
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("rejects a package whose default configuration throws", () =>
+    Effect.gen(function* () {
+      const registryPath = yield* writeRegistry([registration]);
+      const validPackage = makeEchoPackage();
+      const brokenPackage = {
+        ...validPackage,
+        defaultConfig: () => {
+          throw new Error("broken defaults");
+        },
+      };
+      const loaded = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+        loadModule: async () => ({ default: brokenPackage }),
+      });
+
+      assert.deepStrictEqual(loaded.drivers, []);
+      assert.equal(loaded.diagnostics[0]?.code, "package-invalid");
+      assert.include(loaded.diagnostics[0]?.detail ?? "", "broken defaults");
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("turns a malformed runtime instance into an unavailable provider", () =>
+    Effect.gen(function* () {
+      const registryPath = yield* writeRegistry([registration]);
+      const validPackage = makeEchoPackage();
+      const malformedPackage = {
+        ...validPackage,
+        create: () => Effect.succeed({}),
+      } as unknown as ExternalProviderAdapterPackageV1<Record<string, never>>;
+      const loaded = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+        loadModule: async () => ({ default: malformedPackage }),
+      });
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: loaded.drivers,
+        configMap: registryConfig,
+      });
+
+      assert.deepStrictEqual(yield* registry.listInstances, []);
+      const [unavailable] = yield* registry.listUnavailable;
+      assert.include(unavailable?.unavailableReason ?? "", "invalid V1 instance");
+      assert.deepStrictEqual(unavailable?.adapterPackage, ECHO_PACKAGE_REFERENCE);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("rejects malformed canonical output from package methods", () =>
+    Effect.gen(function* () {
+      const registryPath = yield* writeRegistry([registration]);
+      const validPackage = makeEchoPackage();
+      const malformedPackage = {
+        ...validPackage,
+        create: (...args: Parameters<typeof validPackage.create>) =>
+          validPackage.create(...args).pipe(
+            Effect.map((instance) => ({
+              ...instance,
+              adapter: {
+                ...instance.adapter,
+                startSession: () => Effect.succeed({ status: "ready" }),
+              },
+            })),
+          ),
+      } as unknown as ExternalProviderAdapterPackageV1<Record<string, never>>;
+      const loaded = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+        loadModule: async () => ({ default: malformedPackage }),
+      });
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: loaded.drivers,
+        configMap: registryConfig,
+      });
+      const instance = yield* registry.getInstance(ECHO_INSTANCE);
+      assert.isDefined(instance);
+      const result = yield* instance.adapter
+        .startSession({
+          threadId: ThreadId.make("malformed-output"),
+          providerInstanceId: ECHO_INSTANCE,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure" && result.failure._tag === "ProviderAdapterRequestError") {
+        assert.equal(result.failure.method, "startSession.decode");
+      }
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
   it.effect("fails an incompatible package closed and keeps its instance diagnosable", () =>
     Effect.gen(function* () {
       const registryPath = yield* writeRegistry([registration]);
-      const loaded = yield* loadTrustedProviderAdapterPackages<never>({
+      const loaded = yield* loadTrustedProviderAdapterPackages({
         registryPath,
         reservedDriverKinds: new Set(),
         loadModule: async () => ({
-          default: {
-            manifest: manifest({ hostProtocol: { minimum: 2, maximum: 2 } }),
-            driver: makeEchoDriver(),
-          },
+          default: makeEchoPackage(["turn.interrupt", "stream.reasoning"], {
+            hostProtocol: { minimum: 2, maximum: 2 },
+          }),
         }),
       });
 
@@ -255,14 +386,13 @@ describe("trusted local provider adapter packages", () => {
   it.effect("rejects negotiated capabilities the package did not declare", () =>
     Effect.gen(function* () {
       const registryPath = yield* writeRegistry([registration]);
-      const loaded = yield* loadTrustedProviderAdapterPackages<never>({
+      const loaded = yield* loadTrustedProviderAdapterPackages({
         registryPath,
         reservedDriverKinds: new Set(),
         loadModule: async () => ({
-          default: {
-            manifest: manifest({ capabilities: ["turn.interrupt"] }),
-            driver: makeEchoDriver(["turn.interrupt", "stream.reasoning"]),
-          },
+          default: makeEchoPackage(["turn.interrupt", "stream.reasoning"], {
+            capabilities: ["turn.interrupt"],
+          }),
         }),
       });
       const { registry } = yield* makeProviderInstanceRegistry({
@@ -283,7 +413,7 @@ describe("trusted local provider adapter packages", () => {
         new URL("./testFixtures/externalEchoAdapter.mjs", import.meta.url),
       );
       const registryPath = yield* writeRegistry([{ ...registration, modulePath }]);
-      const loaded = yield* loadTrustedProviderAdapterPackages<never>({
+      const loaded = yield* loadTrustedProviderAdapterPackages({
         registryPath,
         reservedDriverKinds: new Set(),
       });
@@ -293,14 +423,33 @@ describe("trusted local provider adapter packages", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
+  it.effect("keeps instances of disabled packages visible with a specific reason", () =>
+    Effect.gen(function* () {
+      const registryPath = yield* writeRegistry([{ ...registration, enabled: false }]);
+      const loaded = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+      });
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: loaded.drivers,
+        unavailableDriverReasons: loaded.unavailableDriverReasons,
+        configMap: registryConfig,
+      });
+
+      const [unavailable] = yield* registry.listUnavailable;
+      assert.include(unavailable?.unavailableReason ?? "", "is disabled");
+      assert.deepStrictEqual(unavailable?.adapterPackage, ECHO_PACKAGE_REFERENCE);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
   it.effect("does not allow an external package to replace a built-in driver", () =>
     Effect.gen(function* () {
       const registryPath = yield* writeRegistry([registration]);
-      const loaded = yield* loadTrustedProviderAdapterPackages<never>({
+      const loaded = yield* loadTrustedProviderAdapterPackages({
         registryPath,
         reservedDriverKinds: new Set([ECHO_DRIVER]),
         loadModule: async () => ({
-          default: { manifest: manifest(), driver: makeEchoDriver() },
+          default: makeEchoPackage(),
         }),
       });
 

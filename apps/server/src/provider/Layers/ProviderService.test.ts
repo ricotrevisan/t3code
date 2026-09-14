@@ -961,8 +961,49 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.deepStrictEqual(session.adapterPackage, adapterPackage);
 
       const binding = yield* directory.getBinding(threadId);
-      assert.equal(Option.getOrThrow(binding).adapterKey, "echo-adapter@1.2.3");
+      assert.equal(Option.getOrThrow(binding).adapterKey, "package:echo-adapter@1.2.3:protocol:1");
     }),
+  );
+
+  it.effect("refuses to resume a session pinned to a different adapter package", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        Object.assign(routing.codex, {
+          adapterPackage: {
+            id: ProviderAdapterPackageId.make("echo-adapter"),
+            version: ProviderAdapterPackageVersion.make("2.0.0"),
+            protocolVersion: 1,
+          },
+        });
+      }),
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = asThreadId("external-adapter-old-version");
+          yield* directory.upsert({
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            adapterKey: "package:echo-adapter@1.2.3:protocol:1",
+            runtimeMode: "full-access",
+            status: "running",
+            resumeCursor: { sessionId: "old-adapter-session" },
+          });
+
+          const result = yield* provider
+            .sendTurn({ threadId, input: "resume", attachments: [] })
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "does not match loaded adapter");
+          }
+        }),
+      () =>
+        Effect.sync(() => {
+          delete (routing.codex as { adapterPackage?: unknown }).adapterPackage;
+        }),
+    ),
   );
 
   it.effect("routes provider operations and rollback conversation", () =>
