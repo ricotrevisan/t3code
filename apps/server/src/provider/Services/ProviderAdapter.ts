@@ -9,6 +9,7 @@
  */
 import type {
   ApprovalRequestId,
+  ProviderAdapterProtocolCapabilitiesV1,
   ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderUserInputAnswers,
@@ -32,6 +33,12 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /**
+   * Versioned capabilities negotiated for this configured instance.
+   * Optional while built-in adapters migrate; external V1 packages must
+   * provide it and may only enable features declared by their manifest.
+   */
+  readonly protocol?: ProviderAdapterProtocolCapabilitiesV1;
 }
 
 export interface ProviderThreadTurnSnapshot {

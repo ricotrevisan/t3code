@@ -843,6 +843,24 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
 
       assert.equal(session.provider, "primeAgent");
       assert.equal(adapter.capabilities.sessionModelSwitch, "in-session");
+      assert.deepStrictEqual(adapter.capabilities.protocol, {
+        protocolVersion: 1,
+        features: [
+          "session.resume",
+          "turn.steer",
+          "turn.interrupt",
+          "input.attachments",
+          "request.approval",
+          "request.structured-input",
+          "model.discovery",
+          "model.switch",
+          "reasoning.selection",
+          "stream.reasoning",
+          "stream.tool-lifecycle",
+          "stream.usage",
+          "stream.subagents",
+        ],
+      });
       assert.deepStrictEqual(session.resumeCursor, {
         schemaVersion: 1,
         sessionId: "prime-mock-session",

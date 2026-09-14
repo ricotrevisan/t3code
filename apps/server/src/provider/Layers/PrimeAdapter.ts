@@ -5,6 +5,7 @@ import {
   type PrimeSettings,
   type ProviderApprovalDecision,
   ProviderDriverKind,
+  type ProviderAdapterProtocolCapabilitiesV1,
   type ProviderRuntimeEvent,
   type ProviderSendTurnInput,
   type ProviderSession,
@@ -54,6 +55,25 @@ import { type PrimeAdapterShape } from "../Services/PrimeAdapter.ts";
 
 const PROVIDER = ProviderDriverKind.make("primeAgent");
 const PRIME_RESUME_VERSION = 1 as const;
+
+export const PRIME_ADAPTER_PROTOCOL_CAPABILITIES = {
+  protocolVersion: 1,
+  features: [
+    "session.resume",
+    "turn.steer",
+    "turn.interrupt",
+    "input.attachments",
+    "request.approval",
+    "request.structured-input",
+    "model.discovery",
+    "model.switch",
+    "reasoning.selection",
+    "stream.reasoning",
+    "stream.tool-lifecycle",
+    "stream.usage",
+    "stream.subagents",
+  ],
+} as const satisfies ProviderAdapterProtocolCapabilitiesV1;
 
 const PrimeState = Schema.Struct({
   sessionFile: Schema.String,
@@ -1723,7 +1743,10 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        protocol: PRIME_ADAPTER_PROTOCOL_CAPABILITIES,
+      },
       startSession,
       sendTurn,
       interruptTurn,
