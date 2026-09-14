@@ -3,6 +3,7 @@ import type {
   ProviderAdapterProcessV1,
 } from "@t3tools/provider-adapter";
 import { ProviderAdapterHostProcessError } from "@t3tools/provider-adapter";
+import type { ThreadId } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
@@ -22,14 +23,27 @@ const processError = (operation: string, detail: string, cause?: unknown) =>
     ...(cause === undefined ? {} : { cause }),
   });
 
+export interface ExternalProviderProcessExit {
+  readonly pid: number;
+  readonly threadId: ThreadId;
+  readonly exitCode: number;
+}
+
+export interface ExternalProviderProcessSupervisor {
+  readonly processes: ProviderAdapterProcessSupervisorV1;
+  readonly unexpectedExits: Stream.Stream<ExternalProviderProcessExit>;
+}
+
 export const makeExternalProviderProcessSupervisor = Effect.fn(
   "makeExternalProviderProcessSupervisor",
 )(function* (): Effect.fn.Return<
-  ProviderAdapterProcessSupervisorV1,
+  ExternalProviderProcessSupervisor,
   never,
-  ChildProcessSpawner.ChildProcessSpawner
+  ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
 > {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const exits = yield* Queue.unbounded<ExternalProviderProcessExit, Cause.Done<void>>();
+  yield* Effect.addFinalizer(() => Queue.end(exits));
 
   const spawn: ProviderAdapterProcessSupervisorV1["spawn"] = (input) =>
     Effect.gen(function* (): Effect.fn.Return<
@@ -50,6 +64,10 @@ export const makeExternalProviderProcessSupervisor = Effect.fn(
       );
       const outgoing = yield* Queue.bounded<Uint8Array, Cause.Done<void>>(64);
       const closed = yield* Ref.make(false);
+      const intentionalClose = yield* Ref.make(false);
+      const attachedSessions = yield* Ref.make<ReadonlySet<ThreadId>>(
+        input.purpose.kind === "session" ? new Set([input.purpose.threadId]) : new Set(),
+      );
       const child = yield* spawner
         .spawn(
           ChildProcess.make(resolved.command, resolved.args, {
@@ -70,14 +88,24 @@ export const makeExternalProviderProcessSupervisor = Effect.fn(
             processError("spawn", `Could not start '${input.command}'.`, cause),
           ),
         );
-      yield* child.exitCode.pipe(
-        Effect.andThen(Ref.set(closed, true)),
-        Effect.andThen(Queue.end(outgoing)),
-        Effect.ignore,
-        Effect.forkScoped,
-      );
+      yield* Effect.gen(function* () {
+        const result = yield* child.exitCode.pipe(Effect.result);
+        yield* Ref.set(closed, true);
+        yield* Queue.end(outgoing);
+        if (result._tag === "Success" && !(yield* Ref.get(intentionalClose))) {
+          const owners = yield* Ref.get(attachedSessions);
+          yield* Effect.forEach(owners, (threadId) =>
+            Queue.offer(exits, {
+              pid: Number(child.pid),
+              threadId,
+              exitCode: Number(result.success),
+            }),
+          );
+        }
+      }).pipe(Effect.forkScoped);
 
       const close = Effect.gen(function* () {
+        yield* Ref.set(intentionalClose, true);
         if (yield* Ref.getAndSet(closed, true)) {
           return;
         }
@@ -115,6 +143,15 @@ export const makeExternalProviderProcessSupervisor = Effect.fn(
 
       return {
         pid: Number(child.pid),
+        attachSession: (threadId) =>
+          Ref.update(attachedSessions, (current) => new Set([...current, threadId])),
+        detachSession: (threadId) =>
+          Ref.update(attachedSessions, (current) => {
+            const next = new Set(current);
+            next.delete(threadId);
+            return next;
+          }),
+        expectExit: Ref.set(intentionalClose, true),
         stdout: child.stdout.pipe(
           Stream.mapError((cause) => processError("stdout", "Failed to read stdout.", cause)),
         ),
@@ -132,5 +169,8 @@ export const makeExternalProviderProcessSupervisor = Effect.fn(
       };
     });
 
-  return { spawn };
+  return {
+    processes: { spawn },
+    unexpectedExits: Stream.fromQueue(exits),
+  };
 });

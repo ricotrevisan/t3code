@@ -1,8 +1,10 @@
+import * as NodeCrypto from "node:crypto";
 import {
   type ProviderAdapterInstanceV1,
   type ProviderAdapterPackageV1,
 } from "@t3tools/provider-adapter";
 import {
+  EventId,
   ProviderAdapterProtocolCapabilitiesV1,
   ProviderRuntimeEvent,
   ProviderSession,
@@ -15,6 +17,7 @@ import {
   type ProviderAdapterProtocolCapabilitiesV1 as ProviderAdapterCapabilities,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -191,7 +194,7 @@ export const makeExternalProviderDriver = <Config>(
     defaultConfig: () => defaultConfig,
     create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
       Effect.gen(function* () {
-        const processes = yield* makeExternalProviderProcessSupervisor();
+        const processSupervisor = yield* makeExternalProviderProcessSupervisor();
         const created = yield* Effect.suspend(() =>
           adapterPackage.create(
             {
@@ -202,7 +205,7 @@ export const makeExternalProviderDriver = <Config>(
               enabled,
               config,
             },
-            { protocolVersion: 1, processes },
+            { protocolVersion: 1, processes: processSupervisor.processes },
           ),
         ).pipe(
           Effect.mapError(
@@ -369,11 +372,34 @@ export const makeExternalProviderDriver = <Config>(
                 uploadFeedback: (input) => invoke("uploadFeedback", () => uploadFeedback(input)),
               }),
           stopAll: () => invoke("stopAll", () => external.adapter.stopAll()),
-          streamEvents: external.adapter.streamEvents.pipe(
-            Stream.mapEffect((event) => decodeRuntimeEvent(event)),
-            Stream.map(withEventIdentity),
-            Stream.catchCause((cause) =>
-              recoverStream<ProviderRuntimeEvent>("event stream", cause),
+          streamEvents: Stream.merge(
+            external.adapter.streamEvents.pipe(
+              Stream.mapEffect((event) => decodeRuntimeEvent(event)),
+              Stream.map(withEventIdentity),
+              Stream.catchCause((cause) =>
+                recoverStream<ProviderRuntimeEvent>("event stream", cause),
+              ),
+            ),
+            processSupervisor.unexpectedExits.pipe(
+              Stream.mapEffect((exit) =>
+                DateTime.now.pipe(
+                  Effect.map(
+                    (now): ProviderRuntimeEvent => ({
+                      eventId: EventId.make(NodeCrypto.randomUUID()),
+                      provider,
+                      providerInstanceId: instanceId,
+                      threadId: exit.threadId,
+                      createdAt: DateTime.formatIso(now),
+                      type: "runtime.error",
+                      payload: {
+                        message: `Provider process ${exit.pid} exited unexpectedly with code ${exit.exitCode}.`,
+                        class: "transport_error",
+                        detail: { pid: exit.pid, exitCode: exit.exitCode },
+                      },
+                    }),
+                  ),
+                ),
+              ),
             ),
           ),
         };

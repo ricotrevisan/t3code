@@ -311,6 +311,52 @@ describe("trusted local provider adapter packages", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
+  it.effect("turns an unexpected session process exit into a canonical runtime error", () =>
+    Effect.gen(function* () {
+      const registryPath = yield* writeRegistry([registration]);
+      const validPackage = makeEchoPackage();
+      const threadId = ThreadId.make("crashing-harness");
+      const crashingPackage: ExternalProviderAdapterPackageV1<Record<string, never>> = {
+        ...validPackage,
+        create: (input, host) =>
+          validPackage.create(input, host).pipe(
+            Effect.tap(() =>
+              host.processes
+                .spawn({
+                  command: process.execPath,
+                  purpose: { kind: "session", threadId },
+                  args: ["-e", "process.exit(23)"],
+                })
+                .pipe(Effect.orDie),
+            ),
+          ),
+      };
+      const loaded = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+        loadModule: async () => ({ default: crashingPackage }),
+      });
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: loaded.drivers,
+        configMap: registryConfig,
+      });
+      const instance = yield* registry.getInstance(ECHO_INSTANCE);
+      assert.isDefined(instance);
+      const event = yield* instance.adapter.streamEvents.pipe(Stream.runHead);
+
+      assert.equal(event._tag, "Some");
+      if (event._tag === "Some") {
+        assert.equal(event.value.type, "runtime.error");
+        assert.equal(event.value.threadId, threadId);
+        assert.equal(event.value.providerInstanceId, ECHO_INSTANCE);
+        if (event.value.type === "runtime.error") {
+          assert.equal(event.value.payload.class, "transport_error");
+          assert.include(event.value.payload.message, "code 23");
+        }
+      }
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
   it.effect("rejects malformed canonical output from package methods", () =>
     Effect.gen(function* () {
       const registryPath = yield* writeRegistry([registration]);

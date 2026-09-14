@@ -62,15 +62,26 @@ export class ProviderAdapterHostProcessError extends Schema.TaggedErrorClass<Pro
   }
 }
 
+export type ProviderAdapterProcessPurposeV1 =
+  | { readonly kind: "probe" }
+  | { readonly kind: "session"; readonly threadId: ThreadId };
+
 export interface ProviderAdapterProcessSpawnV1 {
   readonly command: string;
   readonly args?: ReadonlyArray<string> | undefined;
   readonly cwd?: string | undefined;
   readonly environment?: Readonly<Record<string, string | undefined>> | undefined;
+  /** Required ownership lets the host turn unexpected harness exits into canonical failures. */
+  readonly purpose: ProviderAdapterProcessPurposeV1;
 }
 
 export interface ProviderAdapterProcessV1 {
   readonly pid: number;
+  /** Link another session when one multiplexed process serves several threads. */
+  readonly attachSession: (threadId: ThreadId) => Effect.Effect<void>;
+  readonly detachSession: (threadId: ThreadId) => Effect.Effect<void>;
+  /** Mark the harness's next natural exit as expected without terminating it. */
+  readonly expectExit: Effect.Effect<void>;
   readonly stdout: Stream.Stream<Uint8Array, ProviderAdapterHostProcessError>;
   readonly stderr: Stream.Stream<Uint8Array, ProviderAdapterHostProcessError>;
   readonly exitCode: Effect.Effect<number, ProviderAdapterHostProcessError>;

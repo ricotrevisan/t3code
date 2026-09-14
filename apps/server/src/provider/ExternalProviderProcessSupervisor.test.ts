@@ -1,7 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import { makeExternalProviderProcessSupervisor } from "./ExternalProviderProcessSupervisor.ts";
@@ -12,8 +14,9 @@ describe("ExternalProviderProcessSupervisor", () => {
   it.effect("owns stdio, exit, and idempotent shutdown for an adapter process", () =>
     Effect.gen(function* () {
       const supervisor = yield* makeExternalProviderProcessSupervisor();
-      const child = yield* supervisor.spawn({
+      const child = yield* supervisor.processes.spawn({
         command: process.execPath,
+        purpose: { kind: "probe" },
         args: [
           "-e",
           "process.stdin.on('data', chunk => process.stdout.write(chunk)); process.stdin.on('end', () => process.exit(0));",
@@ -42,11 +45,20 @@ describe("ExternalProviderProcessSupervisor", () => {
   it.effect("refuses writes after the child exits unexpectedly", () =>
     Effect.gen(function* () {
       const supervisor = yield* makeExternalProviderProcessSupervisor();
-      const child = yield* supervisor.spawn({
+      const threadId = ThreadId.make("crashed-session");
+      const exitFiber = yield* supervisor.unexpectedExits.pipe(
+        Stream.take(1),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      const child = yield* supervisor.processes.spawn({
         command: process.execPath,
+        purpose: { kind: "session", threadId },
         args: ["-e", "process.exit(17)"],
       });
       assert.equal(yield* child.exitCode, 17);
+      const exit = Option.getOrThrow(yield* Fiber.join(exitFiber));
+      assert.deepStrictEqual(exit, { pid: child.pid, threadId, exitCode: 17 });
       const result = yield* child.write(encoder.encode("late")).pipe(Effect.result);
 
       assert.equal(result._tag, "Failure");
@@ -59,8 +71,9 @@ describe("ExternalProviderProcessSupervisor", () => {
   it.effect("refuses writes after the host closes the process", () =>
     Effect.gen(function* () {
       const supervisor = yield* makeExternalProviderProcessSupervisor();
-      const child = yield* supervisor.spawn({
+      const child = yield* supervisor.processes.spawn({
         command: process.execPath,
+        purpose: { kind: "probe" },
         args: ["-e", "process.stdin.resume(); process.stdin.on('end', () => process.exit(0));"],
       });
       yield* child.close;

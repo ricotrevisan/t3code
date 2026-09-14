@@ -95,9 +95,13 @@ reason and requested package identity.
 External code is full-trust and executes only in the server process. It translates its native harness
 protocol into canonical sessions, commands, and runtime events. It does not receive internal
 `ProviderDriver` services. Packages that need a subprocess must use the V1 host process supervisor,
-which owns process spawning, stdio, termination, and scope finalizers. The host also stamps package,
-provider, and instance identity onto package output, rejects negotiated capabilities absent from
-the package manifest, and exposes the negotiated set as `ServerProvider.adapterCapabilities`.
+which owns process spawning, bounded stdio, termination, and scope finalizers. Every spawned process
+declares whether it is a probe or session-owned; multiplexed processes can attach more sessions.
+Unexpected exits of session-owned processes become canonical `runtime.error` events, so the host
+clears the affected running turn even when package code does not observe `exitCode`. The host also
+stamps package, provider, and instance identity onto package output, rejects negotiated capabilities
+absent from the package manifest, and exposes the negotiated set as
+`ServerProvider.adapterCapabilities`.
 
 Web, desktop renderer, and mobile clients receive normalized snapshots/events, declarative
 configuration schemas, and package identity, never `modulePath` or executable code. Each materialized instance runs in a registry-owned child
