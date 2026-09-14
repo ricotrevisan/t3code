@@ -555,6 +555,9 @@ describe("UsageService", () => {
         const { transcript, settings, home } = yield* setup;
         const configured = NodePath.join(home, "configured");
         const environmentHome = NodePath.join(home, "environment");
+        const canonicalHome = yield* Effect.promise(() => NodeFSP.realpath(home));
+        const configuredProjects = NodePath.join(canonicalHome, "configured", "projects");
+        const environmentProjects = NodePath.join(canonicalHome, "environment", "projects");
         yield* Effect.promise(async () => {
           await NodeFSP.writeFile(transcript, claudeLine(1, 100));
           for (const [index, root] of [configured, environmentHome].entries()) {
@@ -897,8 +900,8 @@ describe("UsageService", () => {
         const service = yield* UsageService.make.pipe(
           Effect.provideService(FileSystem.FileSystem, {
             ...fileSystem,
-            exists: (path) =>
-              fileSystem.exists(path).pipe(
+            realPath: (path) =>
+              fileSystem.realPath(path).pipe(
                 Effect.tap(() => {
                   if (path !== transcriptDir) return Effect.void;
                   homeProbes += 1;
