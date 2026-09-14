@@ -111,7 +111,10 @@ installer, update UI, remote package source, client plugin surface, or external 
 
 Adding a built-in driver still means writing the driver plus adapter and adding it to
 `BUILT_IN_DRIVERS`. Adding a trusted local package requires no T3 rebuild and targets only the
-versioned `@t3tools/provider-adapter` interface.
+versioned `@t3tools/provider-adapter` interface. A real subprocess-driven echo package lives in
+`apps/server/src/provider/testFixtures/` (`echoAdapterPackage.mjs` plus `echoHarness.mjs`) and its
+conformance suite proves the seam end to end: process supervision, JSONL framing, canonical event
+translation, interrupts, rollback, and graceful stops without crash events.
 
 ## How provider work is requested
 

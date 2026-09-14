@@ -432,7 +432,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     return yield* Effect.gen(function* () {
       const adapter = yield* registry.getByInstance(bindingInstanceId);
       const liveAdapterKey = providerAdapterKey(adapter.provider, adapter.adapterPackage);
-      if (input.binding.adapterKey !== liveAdapterKey) {
+      // Bindings written before a harness moved behind the external seam key
+      // by provider kind alone. They may resume under the package that
+      // replaced the built-in; only package-pinned mismatches are refused.
+      const legacyBindingKey = input.binding.adapterKey === adapter.provider;
+      if (!legacyBindingKey && input.binding.adapterKey !== liveAdapterKey) {
         return yield* toValidationError(
           input.operation,
           `Cannot recover thread '${input.binding.threadId}' because persisted adapter '${input.binding.adapterKey}' does not match loaded adapter '${liveAdapterKey}'.`,

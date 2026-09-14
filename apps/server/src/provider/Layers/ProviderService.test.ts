@@ -1006,6 +1006,47 @@ routing.layer("ProviderServiceLive routing", (it) => {
     ),
   );
 
+  it.effect("resumes legacy provider-keyed bindings under a replacement package", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        Object.assign(routing.codex, {
+          adapterPackage: {
+            id: ProviderAdapterPackageId.make("codex-rpc"),
+            version: ProviderAdapterPackageVersion.make("1.0.0"),
+            protocolVersion: 1,
+          },
+        });
+      }),
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = asThreadId("legacy-binding-thread");
+          yield* directory.upsert({
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            // Pre-seam binding: keyed by provider kind, no package identity.
+            adapterKey: "codex",
+            runtimeMode: "full-access",
+            status: "running",
+            resumeCursor: { sessionId: "legacy-session" },
+          });
+
+          yield* provider.sendTurn({ threadId, input: "resume legacy", attachments: [] });
+          assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+
+          yield* provider.stopSession({ threadId });
+        }),
+      () =>
+        Effect.sync(() => {
+          delete (routing.codex as { adapterPackage?: unknown }).adapterPackage;
+          routing.codex.sendTurn.mockClear();
+          routing.codex.stopSession.mockClear();
+        }),
+    ),
+  );
+
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
