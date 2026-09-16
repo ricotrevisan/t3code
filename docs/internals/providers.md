@@ -148,10 +148,16 @@ updates are ignored. The structured-input mapping handles select, confirm, input
 it does not provide a general extension UI. Pi is still a reference fixture, not a shipped provider
 installation flow.
 
-Prime remains a built-in driver. Its filesystem resources, native resume validation, managed
-snapshots, and text-generation policy are still host-side concerns; V1 does not expose the server's
-Effect services to packages. A shared protocol/process seam must not bypass those requirements or
-be described as an independently installable Prime package before that separation exists.
+Prime remains a built-in driver. Its RPC sessions and model/approval probes now acquire processes
+through the same host-owned supervisor used by external packages. `PrimeRpcClient` receives the
+supervised process and owns only JSONL framing, request correlation, event fanout, and Prime error
+translation. The adapter preserves Prime-specific turn and session cleanup while the host owns
+bounded stdin, spawn resolution, exit detection, termination, and scope finalizers.
+
+Prime's filesystem resources, native resume validation, managed snapshots, and text-generation
+policy are still host-side concerns; V1 does not expose the server's Effect services to packages. A
+shared protocol/process seam must not bypass those requirements or be described as an independently
+installable Prime package before that separation exists.
 
 ## How provider work is requested
 

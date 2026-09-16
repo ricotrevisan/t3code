@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import type { ProviderAdapterProcessV1 } from "@t3tools/provider-adapter";
 import {
   EventId,
   type ModelSelection,
@@ -30,7 +31,6 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -39,7 +39,8 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { spawnPrimeRpcClient, type PrimeRpcClient } from "../prime/PrimeRpcClient.ts";
+import { makeExternalProviderProcessSupervisor } from "../ExternalProviderProcessSupervisor.ts";
+import { makePrimeRpcClient, type PrimeRpcClient } from "../prime/PrimeRpcClient.ts";
 import {
   isPrimeApprovalExtensionHandshake,
   preparePrimeApprovalExtension,
@@ -270,6 +271,7 @@ interface PrimeSubagentState {
 interface PrimeSessionContext {
   readonly threadId: ThreadId;
   readonly rpc: PrimeRpcClient;
+  readonly process: ProviderAdapterProcessV1;
   readonly scope: Scope.Closeable;
   session: ProviderSession;
   currentModelSlug: string | undefined;
@@ -451,7 +453,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("primeAgent");
     const crypto = yield* Crypto.Crypto;
-    const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const processSupervisor = yield* makeExternalProviderProcessSupervisor();
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
@@ -1173,9 +1175,9 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         if (ctx.stopped || sessions.get(ctx.threadId) !== ctx) {
           return;
         }
-        yield* cancelPendingRequests(ctx, { sendResponse: false }).pipe(Effect.ignore);
         ctx.stopped = true;
         sessions.delete(ctx.threadId);
+        yield* cancelPendingRequests(ctx, { sendResponse: false }).pipe(Effect.ignore);
         const turnId = ctx.activeTurnId;
         ctx.activeTurnId = undefined;
         const message = "Prime RPC process exited.";
@@ -1200,6 +1202,16 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         yield* Scope.close(ctx.scope, Exit.void).pipe(Effect.forkDetach, Effect.ignore);
       });
 
+    // The host owns process-exit detection. Prime keeps its richer session
+    // cleanup and emits one provider-specific terminal signal.
+    yield* processSupervisor.unexpectedExits.pipe(
+      Stream.runForEach(({ threadId }) => {
+        const ctx = sessions.get(threadId);
+        return ctx === undefined ? Effect.void : handleUnexpectedExit(ctx);
+      }),
+      Effect.forkScoped,
+    );
+
     const abortIfBusy = (ctx: PrimeSessionContext) =>
       ctx.activeTurnId === undefined
         ? Effect.void
@@ -1213,6 +1225,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         yield* cancelPendingRequests(ctx);
         ctx.stopped = true;
         sessions.delete(ctx.threadId);
+        yield* ctx.process.expectExit;
         const turnId = ctx.activeTurnId;
         yield* abortIfBusy(ctx);
         ctx.activeTurnId = undefined;
@@ -1362,15 +1375,20 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
               ]
             : []),
         ];
-        const rpc = yield* spawnPrimeRpcClient({
-          command: primeSettings.binaryPath || "prime-agent",
-          args,
-          cwd,
-          ...(options?.environment ? { environment: options.environment } : {}),
-        }).pipe(
+        const process = yield* processSupervisor.processes
+          .spawn({
+            command: primeSettings.binaryPath || "prime-agent",
+            args,
+            cwd,
+            ...(options?.environment ? { environment: options.environment } : {}),
+            purpose: { kind: "session", threadId: input.threadId },
+          })
+          .pipe(
+            Effect.provideService(Scope.Scope, sessionScope),
+            Effect.mapError((cause) => toRpcRequestError("spawn", cause)),
+          );
+        const rpc = yield* makePrimeRpcClient(process).pipe(
           Effect.provideService(Scope.Scope, sessionScope),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-          Effect.mapError((cause) => toRpcRequestError("spawn", cause)),
         );
 
         if (approvalExtensionPath !== undefined) {
@@ -1432,6 +1450,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const ctx: PrimeSessionContext = {
           threadId: input.threadId,
           rpc,
+          process,
           scope: sessionScope,
           session,
           currentModelSlug: selected.slug,

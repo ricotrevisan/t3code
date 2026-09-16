@@ -15,6 +15,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import { expandHomePath } from "../../pathExpansion.ts";
+import { makeExternalProviderProcessSupervisor } from "../ExternalProviderProcessSupervisor.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -22,7 +23,7 @@ import {
   spawnAndCollect,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
-import { PrimeRpcError, spawnPrimeRpcClient } from "../prime/PrimeRpcClient.ts";
+import { makePrimeRpcClient, PrimeRpcError } from "../prime/PrimeRpcClient.ts";
 import {
   isPrimeApprovalExtensionHandshake,
   preparePrimeApprovalExtension,
@@ -45,6 +46,38 @@ const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const MODELS_PROBE_TIMEOUT_MS = 10_000;
 const APPROVAL_PROBE_TIMEOUT_MS = 4_000;
 const EMPTY_MODELS = [] as const;
+
+interface PrimeRpcProbeOptions {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly cwd: string;
+  readonly environment: NodeJS.ProcessEnv;
+}
+
+const makePrimeProbeRpcClient = Effect.fn("makePrimeProbeRpcClient")(function* (
+  options: PrimeRpcProbeOptions,
+) {
+  const supervisor = yield* makeExternalProviderProcessSupervisor();
+  const hostProcess = yield* supervisor.processes
+    .spawn({
+      command: options.command,
+      args: options.args,
+      cwd: options.cwd,
+      environment: options.environment,
+      purpose: { kind: "probe" },
+    })
+    .pipe(
+      Effect.mapError(
+        (cause) =>
+          new PrimeRpcError({
+            operation: "spawn",
+            detail: "Failed to start the process.",
+            cause,
+          }),
+      ),
+    );
+  return yield* makePrimeRpcClient(hostProcess);
+});
 
 const buildPrimeServerProvider = (
   input: Parameters<typeof buildServerProvider>[0],
@@ -134,7 +167,7 @@ const listPrimeModels = (
             ),
           )
         : undefined;
-      const rpc = yield* spawnPrimeRpcClient({
+      const rpc = yield* makePrimeProbeRpcClient({
         command: primeSettings.binaryPath || "prime-agent",
         args: [
           "--mode",
@@ -181,7 +214,7 @@ const probePrimeApprovalExtension = (
   Effect.scoped(
     Effect.gen(function* () {
       const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
-      const rpc = yield* spawnPrimeRpcClient({
+      const rpc = yield* makePrimeProbeRpcClient({
         command: primeSettings.binaryPath || "prime-agent",
         args: [
           "--mode",
