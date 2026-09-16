@@ -21,8 +21,16 @@ import {
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 
+import {
+  DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG,
+  DEEPSEEK_HARNESS_ADAPTER_PACKAGE,
+} from "./DeepSeekHarnessAdapter.ts";
 import { PrimeDriver, type PrimeDriverEnv } from "./Drivers/PrimeDriver.ts";
 import { ProviderDriverError } from "./Errors.ts";
+import {
+  makeExternalProviderDriver,
+  type ExternalProviderDriverEnv,
+} from "./ExternalProviderDriver.ts";
 import { PRIME_ADAPTER_PROTOCOL_CAPABILITIES } from "./Layers/PrimeAdapter.ts";
 import type { AnyProviderDriver, ProviderDriver, ProviderInstance } from "./ProviderDriver.ts";
 
@@ -180,7 +188,7 @@ export const makeFirstPartyProviderAdapterDriver = <Config, R>(input: {
   };
 };
 
-export type FirstPartyProviderAdaptersEnv = PrimeDriverEnv;
+export type FirstPartyProviderAdaptersEnv = PrimeDriverEnv | ExternalProviderDriverEnv;
 
 /** Compiled, server-private package registrations shipped by this build. */
 export const FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS: ReadonlyArray<
@@ -190,4 +198,8 @@ export const FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS: ReadonlyArray<
     manifest: PRIME_PROVIDER_ADAPTER_MANIFEST,
     driver: PrimeDriver,
   }),
+  makeExternalProviderDriver(
+    DEEPSEEK_HARNESS_ADAPTER_PACKAGE,
+    DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG,
+  ),
 ];

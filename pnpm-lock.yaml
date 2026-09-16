@@ -500,6 +500,9 @@ importers:
       '@t3tools/provider-adapter':
         specifier: workspace:*
         version: link:../../packages/provider-adapter
+      '@t3tools/provider-adapter-acp':
+        specifier: workspace:*
+        version: link:../../packages/provider-adapter-acp
       '@t3tools/shared':
         specifier: workspace:*
         version: link:../../packages/shared

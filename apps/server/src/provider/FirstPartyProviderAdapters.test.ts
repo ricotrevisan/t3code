@@ -11,8 +11,17 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import {
+  DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG,
+  DEEPSEEK_HARNESS_ADAPTER_MANIFEST,
+  DEEPSEEK_HARNESS_ADAPTER_PACKAGE,
+  DEEPSEEK_HARNESS_ADAPTER_PACKAGE_REFERENCE,
+  DEEPSEEK_HARNESS_DRIVER_KIND,
+  DeepSeekHarnessAdapterConfig,
+} from "./DeepSeekHarnessAdapter.ts";
 import type { ProviderDriver, ProviderInstance } from "./ProviderDriver.ts";
 import {
+  FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
   makeFirstPartyProviderAdapterDriver,
   PRIME_PROVIDER_ADAPTER_MANIFEST,
   PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
@@ -23,6 +32,7 @@ const DRIVER_KIND = ProviderDriverKind.make("primeAgent");
 const INSTANCE_ID = ProviderInstanceId.make("prime_test");
 const THREAD_ID = ThreadId.make("00000000-0000-4000-8000-000000000001");
 const NOW = "2026-09-16T00:00:00.000Z";
+const decodeDeepSeekHarnessAdapterConfig = Schema.decodeUnknownSync(DeepSeekHarnessAdapterConfig);
 
 const makeCompiledDriver = (
   capabilities: ProviderAdapterProtocolCapabilitiesV1,
@@ -96,6 +106,86 @@ const createInput = {
   enabled: true,
   config: {},
 } as const;
+
+describe("DeepSeek Harness first-party ACP package", () => {
+  it("declares the DeepSeek Harness identity, transport, and exact capability ceiling", () => {
+    expect(DEEPSEEK_HARNESS_ADAPTER_MANIFEST).toMatchObject({
+      protocolVersion: 1,
+      id: "deepseek-harness-acp",
+      version: "1.0.0",
+      driver: "deepseekHarness",
+      displayName: "DeepSeek Harness",
+      hostProtocol: { minimum: 1, maximum: 1 },
+      transport: {
+        kind: "supervised-stdio",
+        protocol: "acp-v1",
+        sessionConcurrency: "multiplexed",
+      },
+    });
+    expect(DEEPSEEK_HARNESS_ADAPTER_MANIFEST.capabilities).toEqual([
+      "session.resume",
+      "turn.interrupt",
+      "request.approval",
+      "model.discovery",
+      "model.switch",
+      "reasoning.selection",
+      "stream.reasoning",
+      "stream.tool-lifecycle",
+      "stream.context",
+    ]);
+  });
+
+  it("exposes only process launch config and defaults to dsh --profile acp", () => {
+    expect(DEEPSEEK_HARNESS_ADAPTER_MANIFEST.configSchema).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["command", "args"],
+      properties: {
+        command: {
+          type: "string",
+          default: "dsh",
+          description: "Path to the DeepSeek Harness executable.",
+        },
+        args: {
+          type: "array",
+          items: { type: "string" },
+          default: ["--profile", "acp"],
+          description: "Arguments passed to DeepSeek Harness.",
+        },
+        cwd: {
+          type: "string",
+          description: "Optional working directory for the DeepSeek Harness process.",
+        },
+      },
+    });
+    expect(DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG).toEqual({
+      command: "dsh",
+      args: ["--profile", "acp"],
+    });
+    expect(DEEPSEEK_HARNESS_ADAPTER_PACKAGE.defaultConfig()).toEqual(
+      DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG,
+    );
+    expect(DEEPSEEK_HARNESS_ADAPTER_MANIFEST.configSchema.properties).not.toHaveProperty("env");
+    expect(DEEPSEEK_HARNESS_ADAPTER_PACKAGE.configSchema).toBe(DeepSeekHarnessAdapterConfig);
+    expect(
+      decodeDeepSeekHarnessAdapterConfig({
+        command: "dsh",
+        args: ["--profile", "acp"],
+        env: { DEEPSEEK_API_KEY: "secret" },
+      }),
+    ).toEqual({ command: "dsh", args: ["--profile", "acp"] });
+  });
+
+  it("registers the package and driver identity without creating an instance", () => {
+    expect(DEEPSEEK_HARNESS_ADAPTER_PACKAGE.manifest).toBe(DEEPSEEK_HARNESS_ADAPTER_MANIFEST);
+    const driver = FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS.find(
+      (candidate) => candidate.driverKind === DEEPSEEK_HARNESS_DRIVER_KIND,
+    );
+    expect(driver).toBeDefined();
+    expect(driver?.adapterPackage).toEqual(DEEPSEEK_HARNESS_ADAPTER_PACKAGE_REFERENCE);
+    expect(driver?.defaultConfig()).toEqual(DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG);
+  });
+});
 
 describe("first-party provider adapter bridge", () => {
   it("declares the exact negotiated Prime capability ceiling", () => {
