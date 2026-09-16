@@ -5,6 +5,7 @@ import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import {
   deriveProviderSettingsFields,
   nextProviderConfigWithFieldValue,
+  readAdapterNumberDraftValue,
   readProviderConfigBoolean,
   readProviderConfigString,
 } from "./ProviderSettingsForm";
@@ -62,6 +63,12 @@ describe("ProviderSettingsForm helpers", () => {
     );
 
     expect(next).toEqual({ forkOwned: 1 });
+  });
+
+  it("derives a fresh numeric draft when an external value changes", () => {
+    expect(readAdapterNumberDraftValue("invalid")).toBe("invalid");
+    expect(readAdapterNumberDraftValue(4.5)).toBe("4.5");
+    expect(readAdapterNumberDraftValue(undefined)).toBe("");
   });
 
   it("reads non-string config values as blank strings", () => {

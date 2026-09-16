@@ -8,6 +8,7 @@ import {
 import {
   defaultInstanceIdForDriver,
   type EnvironmentId,
+  type ProviderAdapterManifestV1,
   PROVIDER_DISPLAY_NAMES,
   ProviderDriverKind,
   type ProviderInstanceConfig,
@@ -75,6 +76,7 @@ import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
+import { resolveAdapterConfigSchema } from "./providerAdapterConfig";
 import {
   backgroundActivityOverrideSettings,
   buildProviderInstanceUpdatePatch,
@@ -115,6 +117,8 @@ function withoutProviderInstanceFavorites(
 ) {
   return favorites.filter((favorite) => favorite.provider !== instanceId);
 }
+
+const EMPTY_ADAPTER_MANIFESTS: ReadonlyArray<ProviderAdapterManifestV1> = [];
 
 const PROVIDER_SETTINGS = DRIVER_OPTIONS.map((definition) => ({
   provider: definition.value,
@@ -348,6 +352,7 @@ function AccessGatedProviderSettings({
     <EnvironmentProviderSettings
       environmentId={environment.environmentId}
       environmentLabel={environment.label}
+      adapterManifests={environment.serverConfig?.providerAdapterManifests ?? []}
       readOnly={access.kind === "read-only"}
     />
   );
@@ -356,10 +361,12 @@ function AccessGatedProviderSettings({
 export function EnvironmentProviderSettings({
   environmentId,
   environmentLabel,
+  adapterManifests = EMPTY_ADAPTER_MANIFESTS,
   readOnly = false,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
+  readonly adapterManifests?: ReadonlyArray<ProviderAdapterManifestV1>;
   /**
    * Render the full provider layout, greyed out and inert, when this session's
    * credential lacks `orchestration:operate` on the environment. Showing the
@@ -798,6 +805,14 @@ export function EnvironmentProviderSettings({
             const liveProvider = serverProviders.find(
               (candidate) => candidate.instanceId === row.instanceId,
             );
+            const adapterConfigSchema =
+              row.instance.adapterPackage === undefined
+                ? undefined
+                : resolveAdapterConfigSchema({
+                    instance: row.instance,
+                    liveProvider,
+                    manifests: adapterManifests,
+                  });
             const updateCandidate = liveProvider
               ? providerUpdateCandidateByInstanceId.get(liveProvider.instanceId)
               : undefined;
@@ -839,6 +854,7 @@ export function EnvironmentProviderSettings({
                 instance={row.instance}
                 driverOption={driverOption}
                 liveProvider={liveProvider}
+                adapterConfigSchema={adapterConfigSchema}
                 isExpanded={openInstanceDetails[row.instanceId] ?? false}
                 onExpandedChange={(open) =>
                   setOpenInstanceDetails((existing) => ({
@@ -901,6 +917,7 @@ export function EnvironmentProviderSettings({
           open
           environmentId={environmentId}
           environmentLabel={environmentLabel}
+          adapterManifests={adapterManifests}
           onOpenChange={setIsAddInstanceDialogOpen}
         />
       ) : null}
