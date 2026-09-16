@@ -64,9 +64,9 @@ const isModelSelection = Schema.is(ModelSelection);
 
 const providerAdapterKey = (
   provider: ProviderDriverKind,
-  adapterPackage: ProviderAdapterPackageReference | undefined,
+  adapterPackage: ProviderAdapterPackageReference | null | undefined,
 ): string =>
-  adapterPackage === undefined
+  adapterPackage == null
     ? provider
     : `package:${adapterPackage.id}@${adapterPackage.version}:protocol:${adapterPackage.protocolVersion}`;
 
@@ -201,10 +201,40 @@ const dieOnMissingBindingInstanceId = (
   );
 };
 
+const sameAdapterPackage = (
+  left: ProviderAdapterPackageReference | undefined,
+  right: ProviderAdapterPackageReference | undefined,
+): boolean =>
+  left?.id === right?.id &&
+  left?.version === right?.version &&
+  left?.protocolVersion === right?.protocolVersion;
+
+const stampProviderSessionIdentity = (
+  source: {
+    readonly instanceId: ProviderInstanceId;
+    readonly provider: ProviderDriverKind;
+    readonly adapterPackage: ProviderAdapterPackageReference | undefined;
+  },
+  session: ProviderSession,
+): ProviderSession => {
+  const {
+    provider: _untrustedProvider,
+    adapterPackage: _untrustedAdapterPackage,
+    ...rest
+  } = session;
+  return {
+    ...rest,
+    provider: source.provider,
+    providerInstanceId: source.instanceId,
+    adapterPackage: source.adapterPackage ?? null,
+  };
+};
+
 const correlateRuntimeEventWithInstance = (
   source: {
     readonly instanceId: ProviderInstanceId;
     readonly provider: ProviderDriverKind;
+    readonly adapterPackage: ProviderAdapterPackageReference | undefined;
   },
   event: ProviderRuntimeEvent,
 ): ProviderRuntimeEvent => {
@@ -218,7 +248,12 @@ const correlateRuntimeEventWithInstance = (
       `ProviderService.streamEvents: provider instance '${source.instanceId}' emitted event for instance '${event.providerInstanceId}'.`,
     );
   }
-  return { ...event, providerInstanceId: source.instanceId };
+  const { adapterPackage: _untrustedAdapterPackage, ...rest } = event;
+  return {
+    ...rest,
+    providerInstanceId: source.instanceId,
+    adapterPackage: source.adapterPackage ?? null,
+  };
 };
 
 const makeProviderService = Effect.fn("makeProviderService")(function* (
@@ -340,6 +375,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         provider: session.provider,
         providerInstanceId,
         adapterKey: providerAdapterKey(session.provider, session.adapterPackage),
+        adapterPackage: session.adapterPackage ?? null,
         runtimeMode: session.runtimeMode,
         status: toRuntimeStatus(session),
         ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
@@ -351,6 +387,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     source: {
       readonly instanceId: ProviderInstanceId;
       readonly provider: ProviderDriverKind;
+      readonly adapterPackage: ProviderAdapterPackageReference | undefined;
     },
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> =>
@@ -402,6 +439,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             {
               instanceId: id,
               provider: adapter.provider,
+              adapterPackage: adapter.adapterPackage,
             },
             event,
           ),
@@ -418,6 +456,38 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     () => reconcileInstanceSubscriptions,
   ).pipe(Effect.forkScoped);
 
+  const validateBindingAdapterIdentity = Effect.fnUntraced(function* (input: {
+    readonly binding: ProviderSessionDirectory.ProviderRuntimeBinding;
+    readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+    readonly operation: string;
+  }) {
+    const liveAdapterKey = providerAdapterKey(input.adapter.provider, input.adapter.adapterPackage);
+    const persistedAdapterPackage = input.binding.adapterPackage ?? undefined;
+    if (
+      persistedAdapterPackage !== undefined &&
+      !sameAdapterPackage(persistedAdapterPackage, input.adapter.adapterPackage)
+    ) {
+      return yield* toValidationError(
+        input.operation,
+        `Cannot route thread '${input.binding.threadId}' because its persisted adapter package does not match the loaded adapter package.`,
+      );
+    }
+    // Bindings written before structured package identity used only the
+    // compatibility key. A key equal to the provider kind is a legacy row;
+    // package-pinned key mismatches still fail closed.
+    const legacyBindingKey = input.binding.adapterKey === input.adapter.provider;
+    if (
+      persistedAdapterPackage === undefined &&
+      !legacyBindingKey &&
+      input.binding.adapterKey !== liveAdapterKey
+    ) {
+      return yield* toValidationError(
+        input.operation,
+        `Cannot route thread '${input.binding.threadId}' because persisted adapter '${input.binding.adapterKey}' does not match loaded adapter '${liveAdapterKey}'.`,
+      );
+    }
+  });
+
   const recoverSessionForThread = Effect.fn("recoverSessionForThread")(function* (input: {
     readonly binding: ProviderSessionDirectory.ProviderRuntimeBinding;
     readonly operation: string;
@@ -431,17 +501,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     return yield* Effect.gen(function* () {
       const adapter = yield* registry.getByInstance(bindingInstanceId);
-      const liveAdapterKey = providerAdapterKey(adapter.provider, adapter.adapterPackage);
-      // Bindings written before a harness moved behind the external seam key
-      // by provider kind alone. They may resume under the package that
-      // replaced the built-in; only package-pinned mismatches are refused.
-      const legacyBindingKey = input.binding.adapterKey === adapter.provider;
-      if (!legacyBindingKey && input.binding.adapterKey !== liveAdapterKey) {
-        return yield* toValidationError(
-          input.operation,
-          `Cannot recover thread '${input.binding.threadId}' because persisted adapter '${input.binding.adapterKey}' does not match loaded adapter '${liveAdapterKey}'.`,
-        );
-      }
+      yield* validateBindingAdapterIdentity({
+        binding: input.binding,
+        adapter,
+        operation: input.operation,
+      });
       const hasResumeCursor =
         input.binding.resumeCursor !== null && input.binding.resumeCursor !== undefined;
       const hasActiveSession = yield* adapter.hasSession(input.binding.threadId);
@@ -451,16 +515,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           (session) => session.threadId === input.binding.threadId,
         );
         if (existing) {
-          yield* upsertSessionBinding(
-            { ...existing, providerInstanceId: bindingInstanceId },
-            input.binding.threadId,
+          const stampedExisting = stampProviderSessionIdentity(
+            {
+              instanceId: bindingInstanceId,
+              provider: adapter.provider,
+              adapterPackage: adapter.adapterPackage,
+            },
+            existing,
           );
+          yield* upsertSessionBinding(stampedExisting, input.binding.threadId);
           yield* analytics.record("provider.session.recovered", {
-            provider: existing.provider,
+            provider: stampedExisting.provider,
             strategy: "adopt-existing",
-            hasResumeCursor: existing.resumeCursor !== undefined,
+            hasResumeCursor: stampedExisting.resumeCursor !== undefined,
           });
-          return { adapter, session: existing } as const;
+          return { adapter, session: stampedExisting } as const;
         }
       }
 
@@ -494,16 +563,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         );
       }
 
-      yield* upsertSessionBinding(
-        { ...resumed, providerInstanceId: bindingInstanceId },
-        input.binding.threadId,
+      const stampedResumed = stampProviderSessionIdentity(
+        {
+          instanceId: bindingInstanceId,
+          provider: adapter.provider,
+          adapterPackage: adapter.adapterPackage,
+        },
+        resumed,
       );
+      yield* upsertSessionBinding(stampedResumed, input.binding.threadId);
       yield* analytics.record("provider.session.recovered", {
-        provider: resumed.provider,
+        provider: stampedResumed.provider,
         strategy: "resume-thread",
-        hasResumeCursor: resumed.resumeCursor !== undefined,
+        hasResumeCursor: stampedResumed.resumeCursor !== undefined,
       });
-      return { adapter, session: resumed } as const;
+      return { adapter, session: stampedResumed } as const;
     }).pipe(
       withMetrics({
         counter: providerSessionsTotal,
@@ -529,6 +603,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     }
     const instanceId = yield* requireBindingInstanceId(input.operation, binding);
     const adapter = yield* registry.getByInstance(instanceId);
+    yield* validateBindingAdapterIdentity({ binding, adapter, operation: input.operation });
 
     const hasRequestedSession = yield* adapter.hasSession(input.threadId);
     if (hasRequestedSession) {
@@ -639,7 +714,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             `Provider instance '${resolvedInstanceId}' is disabled in T3 Code settings.`,
           );
         }
+        const adapter = yield* registry.getByInstance(resolvedInstanceId);
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        if (persistedBinding?.providerInstanceId === resolvedInstanceId) {
+          yield* validateBindingAdapterIdentity({
+            binding: persistedBinding,
+            adapter,
+            operation: "ProviderService.startSession",
+          });
+        }
         const effectiveResumeCursor =
           input.resumeCursor ??
           (persistedBinding?.providerInstanceId === resolvedInstanceId
@@ -669,7 +752,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 : "none",
           "provider.cwd.effective": effectiveCwd ?? "",
         });
-        const adapter = yield* registry.getByInstance(resolvedInstanceId);
         yield* prepareMcpSession(threadId, resolvedInstanceId);
         const session = yield* adapter
           .startSession({
@@ -687,10 +769,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             `Adapter/provider mismatch: requested '${adapter.provider}', received '${session.provider}'.`,
           );
         }
-        const sessionWithInstance = {
-          ...session,
-          providerInstanceId: resolvedInstanceId,
-        };
+        const sessionWithInstance = stampProviderSessionIdentity(
+          {
+            instanceId: resolvedInstanceId,
+            provider: adapter.provider,
+            adapterPackage: adapter.adapterPackage,
+          },
+          session,
+        );
 
         yield* stopStaleSessionsForThread({
           threadId,
@@ -1011,10 +1097,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const sessionsByProvider = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
         adapter.listSessions().pipe(
           Effect.map((sessions) =>
-            sessions.map((session) => ({
-              ...session,
-              providerInstanceId: instanceId,
-            })),
+            sessions.map((session) =>
+              stampProviderSessionIdentity(
+                {
+                  instanceId,
+                  provider: adapter.provider,
+                  adapterPackage: adapter.adapterPackage,
+                },
+                session,
+              ),
+            ),
           ),
         ),
       );
@@ -1186,10 +1278,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const activeSessions = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
       adapter.listSessions().pipe(
         Effect.map((sessions) =>
-          sessions.map((session) => ({
-            ...session,
-            providerInstanceId: instanceId,
-          })),
+          sessions.map((session) =>
+            stampProviderSessionIdentity(
+              {
+                instanceId,
+                provider: adapter.provider,
+                adapterPackage: adapter.adapterPackage,
+              },
+              session,
+            ),
+          ),
         ),
       ),
     ).pipe(Effect.map((sessionsByAdapter) => sessionsByAdapter.flatMap((sessions) => sessions)));

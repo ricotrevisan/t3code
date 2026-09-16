@@ -6,6 +6,8 @@ import {
   ThreadId,
   TurnId,
   ProviderInstanceId,
+  ProviderAdapterPackageId,
+  ProviderAdapterPackageVersion,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -189,6 +191,9 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           thread_id,
           status,
           provider_name,
+          adapter_package_id,
+          adapter_package_version,
+          adapter_package_protocol_version,
           provider_session_id,
           provider_thread_id,
           runtime_mode,
@@ -200,6 +205,9 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'thread-1',
           'running',
           'codex',
+          'echo-adapter',
+          '1.2.3',
+          1,
           'provider-session-1',
           'provider-thread-1',
           'approval-required',
@@ -375,6 +383,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             threadId: ThreadId.make("thread-1"),
             status: "running",
             providerName: "codex",
+            adapterPackage: {
+              id: ProviderAdapterPackageId.make("echo-adapter"),
+              version: ProviderAdapterPackageVersion.make("1.2.3"),
+              protocolVersion: 1,
+            },
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
@@ -449,6 +462,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             threadId: ThreadId.make("thread-1"),
             status: "running",
             providerName: "codex",
+            adapterPackage: {
+              id: ProviderAdapterPackageId.make("echo-adapter"),
+              version: ProviderAdapterPackageVersion.make("1.2.3"),
+              protocolVersion: 1,
+            },
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,

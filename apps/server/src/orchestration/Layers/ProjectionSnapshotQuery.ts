@@ -4,6 +4,9 @@ import {
   IsoDateTime,
   MessageId,
   NonNegativeInt,
+  PositiveInt,
+  ProviderAdapterPackageId,
+  ProviderAdapterPackageVersion,
   OrchestrationCheckpointFile,
   OrchestrationProposedPlanId,
   OrchestrationReadModel,
@@ -97,7 +100,30 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
-const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
+const projectionThreadSessionDbFields = {
+  threadId: ProjectionThreadSession.fields.threadId,
+  status: ProjectionThreadSession.fields.status,
+  providerName: ProjectionThreadSession.fields.providerName,
+  providerInstanceId: ProjectionThreadSession.fields.providerInstanceId,
+  runtimeMode: ProjectionThreadSession.fields.runtimeMode,
+  activeTurnId: ProjectionThreadSession.fields.activeTurnId,
+  lastError: ProjectionThreadSession.fields.lastError,
+  updatedAt: ProjectionThreadSession.fields.updatedAt,
+};
+const ProjectionThreadSessionDbRowSchema = Schema.Union([
+  Schema.Struct({
+    ...projectionThreadSessionDbFields,
+    adapterPackageId: Schema.Null,
+    adapterPackageVersion: Schema.Null,
+    adapterPackageProtocolVersion: Schema.Null,
+  }),
+  Schema.Struct({
+    ...projectionThreadSessionDbFields,
+    adapterPackageId: ProviderAdapterPackageId,
+    adapterPackageVersion: ProviderAdapterPackageVersion,
+    adapterPackageProtocolVersion: PositiveInt,
+  }),
+]);
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
   Struct.assign({
     files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
@@ -303,6 +329,15 @@ function mapSessionRow(
     status: row.status,
     providerName: row.providerName,
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
+    ...(row.adapterPackageId !== null
+      ? {
+          adapterPackage: {
+            id: row.adapterPackageId,
+            version: row.adapterPackageVersion,
+            protocolVersion: row.adapterPackageProtocolVersion,
+          },
+        }
+      : {}),
     runtimeMode: row.runtimeMode,
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
@@ -593,6 +628,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
+          adapter_package_id AS "adapterPackageId",
+          adapter_package_version AS "adapterPackageVersion",
+          adapter_package_protocol_version AS "adapterPackageProtocolVersion",
           provider_session_id AS "providerSessionId",
           provider_thread_id AS "providerThreadId",
           runtime_mode AS "runtimeMode",
@@ -614,6 +652,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
+          sessions.adapter_package_id AS "adapterPackageId",
+          sessions.adapter_package_version AS "adapterPackageVersion",
+          sessions.adapter_package_protocol_version AS "adapterPackageProtocolVersion",
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
@@ -639,6 +680,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
+          sessions.adapter_package_id AS "adapterPackageId",
+          sessions.adapter_package_version AS "adapterPackageVersion",
+          sessions.adapter_package_protocol_version AS "adapterPackageProtocolVersion",
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
@@ -1055,6 +1099,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
+          adapter_package_id AS "adapterPackageId",
+          adapter_package_version AS "adapterPackageVersion",
+          adapter_package_protocol_version AS "adapterPackageProtocolVersion",
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
@@ -1652,18 +1699,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               for (const row of sessionRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                sessionsByThread.set(row.threadId, {
-                  threadId: row.threadId,
-                  status: row.status,
-                  providerName: row.providerName,
-                  ...(row.providerInstanceId !== null
-                    ? { providerInstanceId: row.providerInstanceId }
-                    : {}),
-                  runtimeMode: row.runtimeMode,
-                  activeTurnId: row.activeTurnId,
-                  lastError: row.lastError,
-                  updatedAt: row.updatedAt,
-                });
+                sessionsByThread.set(row.threadId, mapSessionRow(row));
               }
 
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(

@@ -22,6 +22,7 @@ import {
   TrimmedString,
   TurnId,
 } from "./baseSchemas.ts";
+import { ProviderAdapterPackageReference } from "./providerAdapterIdentity.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
@@ -319,6 +320,7 @@ export const OrchestrationSession = Schema.Struct({
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  adapterPackage: Schema.optional(Schema.NullOr(ProviderAdapterPackageReference)),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),

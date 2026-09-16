@@ -110,9 +110,18 @@ stamps package, provider, and instance identity onto package output, rejects neg
 absent from the package manifest, and exposes the negotiated set as
 `ServerProvider.adapterCapabilities`.
 
+The exact package ID, version, and protocol are also persisted as one optional structured identity on
+provider runtime bindings and projected thread sessions. Migration 42 adds three nullable columns to
+each table. Readers accept either a complete identity or no identity and reject partial triples. On
+canonical session and runtime-event contracts, an omitted field means legacy/unknown, `null` is an
+authoritative package-less adapter, and an object is the exact package identity. This distinction lets
+package-less rebinds clear stale projected identities without rewriting old events. The legacy
+`adapter_key` remains dual-written for downgrade and recovery compatibility; a successful legacy
+resume upgrades the binding to the loaded package identity.
+
 Web, desktop renderer, and mobile clients receive normalized snapshots/events, declarative
-configuration schemas, and package identity, never `modulePath` or executable code. Each materialized instance runs in a registry-owned child
-scope. The host continues to own routing, persistence, session reaping, orchestration, checkpoints,
+configuration schemas, and package identity, never `modulePath` or executable code. Each
+materialized instance runs in a registry-owned child scope. The host continues to own routing, persistence, session reaping, orchestration, checkpoints,
 and fallback text generation. Package activation currently requires a server restart; there is no
 installer, update UI, remote package source, client plugin surface, or external text-generation hook.
 

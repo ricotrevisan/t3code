@@ -11,6 +11,7 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import {
   IsoDateTime,
+  ProviderAdapterPackageReference,
   ProviderInstanceId,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
@@ -44,6 +45,7 @@ export const ProviderSessionRuntime = Schema.Struct({
    */
   providerInstanceId: Schema.NullOr(ProviderInstanceId),
   adapterKey: Schema.String,
+  adapterPackage: Schema.NullOr(ProviderAdapterPackageReference),
   runtimeMode: RuntimeMode,
   status: ProviderSessionRuntimeStatus,
   lastSeenAt: IsoDateTime,
@@ -114,6 +116,9 @@ const ProviderSessionRuntimeRawDbRowSchema = Schema.Struct({
   providerName: Schema.Unknown,
   providerInstanceId: Schema.Unknown,
   adapterKey: Schema.Unknown,
+  adapterPackageId: Schema.Unknown,
+  adapterPackageVersion: Schema.Unknown,
+  adapterPackageProtocolVersion: Schema.Unknown,
   runtimeMode: Schema.Unknown,
   status: Schema.Unknown,
   lastSeenAt: Schema.Unknown,
@@ -121,7 +126,21 @@ const ProviderSessionRuntimeRawDbRowSchema = Schema.Struct({
   runtimePayload: Schema.Unknown,
 });
 
-const decodeRuntimeRow = Schema.decodeUnknownEffect(ProviderSessionRuntimeDbRowSchema);
+const decodeRuntimeDbRow = Schema.decodeUnknownEffect(ProviderSessionRuntimeDbRowSchema);
+const decodeRuntimeRow = (row: Schema.Schema.Type<typeof ProviderSessionRuntimeRawDbRowSchema>) =>
+  decodeRuntimeDbRow({
+    ...row,
+    adapterPackage:
+      row.adapterPackageId === null &&
+      row.adapterPackageVersion === null &&
+      row.adapterPackageProtocolVersion === null
+        ? null
+        : {
+            id: row.adapterPackageId,
+            version: row.adapterPackageVersion,
+            protocolVersion: row.adapterPackageProtocolVersion,
+          },
+  });
 
 const GetRuntimeRequestSchema = Schema.Struct({
   threadId: ThreadId,
@@ -156,6 +175,9 @@ export const make = Effect.gen(function* () {
           provider_name,
           provider_instance_id,
           adapter_key,
+          adapter_package_id,
+          adapter_package_version,
+          adapter_package_protocol_version,
           runtime_mode,
           status,
           last_seen_at,
@@ -167,6 +189,9 @@ export const make = Effect.gen(function* () {
           ${runtime.providerName},
           ${runtime.providerInstanceId},
           ${runtime.adapterKey},
+          ${runtime.adapterPackage?.id ?? null},
+          ${runtime.adapterPackage?.version ?? null},
+          ${runtime.adapterPackage?.protocolVersion ?? null},
           ${runtime.runtimeMode},
           ${runtime.status},
           ${runtime.lastSeenAt},
@@ -178,6 +203,9 @@ export const make = Effect.gen(function* () {
           provider_name = excluded.provider_name,
           provider_instance_id = excluded.provider_instance_id,
           adapter_key = excluded.adapter_key,
+          adapter_package_id = excluded.adapter_package_id,
+          adapter_package_version = excluded.adapter_package_version,
+          adapter_package_protocol_version = excluded.adapter_package_protocol_version,
           runtime_mode = excluded.runtime_mode,
           status = excluded.status,
           last_seen_at = excluded.last_seen_at,
@@ -196,6 +224,9 @@ export const make = Effect.gen(function* () {
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
           adapter_key AS "adapterKey",
+          adapter_package_id AS "adapterPackageId",
+          adapter_package_version AS "adapterPackageVersion",
+          adapter_package_protocol_version AS "adapterPackageProtocolVersion",
           runtime_mode AS "runtimeMode",
           status,
           last_seen_at AS "lastSeenAt",
@@ -216,6 +247,9 @@ export const make = Effect.gen(function* () {
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
           adapter_key AS "adapterKey",
+          adapter_package_id AS "adapterPackageId",
+          adapter_package_version AS "adapterPackageVersion",
+          adapter_package_protocol_version AS "adapterPackageProtocolVersion",
           runtime_mode AS "runtimeMode",
           status,
           last_seen_at AS "lastSeenAt",

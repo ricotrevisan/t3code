@@ -38,7 +38,7 @@ export const ProviderSession = Schema.Struct({
   // populates it (post-slice-4), routing flips to instance-id-only and the
   // legacy `provider` field is removed.
   providerInstanceId: Schema.optional(ProviderInstanceId),
-  adapterPackage: Schema.optional(ProviderAdapterPackageReference),
+  adapterPackage: Schema.optional(Schema.NullOr(ProviderAdapterPackageReference)),
   status: ProviderSessionStatus,
   runtimeMode: RuntimeMode,
   cwd: Schema.optional(TrimmedNonEmptyString),

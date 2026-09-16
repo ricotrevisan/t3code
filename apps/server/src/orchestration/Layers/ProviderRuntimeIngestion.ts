@@ -1604,6 +1604,11 @@ const make = Effect.gen(function* () {
             ...(event.providerInstanceId !== undefined
               ? { providerInstanceId: event.providerInstanceId }
               : {}),
+            ...(event.adapterPackage !== undefined
+              ? { adapterPackage: event.adapterPackage }
+              : thread.session.adapterPackage !== undefined
+                ? { adapterPackage: thread.session.adapterPackage }
+                : {}),
             runtimeMode: thread.session.runtimeMode,
             activeTurnId: eventTurnId,
             lastError: null,
@@ -1695,6 +1700,11 @@ const make = Effect.gen(function* () {
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
+              ...(event.adapterPackage !== undefined
+                ? { adapterPackage: event.adapterPackage }
+                : thread.session?.adapterPackage !== undefined
+                  ? { adapterPackage: thread.session.adapterPackage }
+                  : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: nextActiveTurnId,
               lastError,
@@ -1945,6 +1955,11 @@ const make = Effect.gen(function* () {
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
+              ...(event.adapterPackage !== undefined
+                ? { adapterPackage: event.adapterPackage }
+                : thread.session?.adapterPackage !== undefined
+                  ? { adapterPackage: thread.session.adapterPackage }
+                  : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: eventTurnId ?? null,
               lastError: runtimeErrorMessage,
