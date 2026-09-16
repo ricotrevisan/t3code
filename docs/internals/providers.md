@@ -116,6 +116,43 @@ versioned `@t3tools/provider-adapter` interface. A real subprocess-driven echo p
 conformance suite proves the seam end to end: process supervision, JSONL framing, canonical event
 translation, interrupts, rollback, and graceful stops without crash events.
 
+### Pi RPC reference adapter
+
+`piAdapterPackage.mjs` in the same fixture directory exercises a real harness protocol through V1.
+Its default process is `piHarness.mjs`, a deterministic fake; it is not an installed Pi provider.
+An explicit `binaryPath` and `args` can target a real Pi CLI in `--mode rpc` mode. The protocol
+reference is Pi commit `71dca871bc80b6bc97be37f0ca3189399d651fff`.
+
+Pi's `turn_end` means one assistant response plus its tool calls, not a completed T3 turn. A T3 turn
+must stay open through tool loops and retries until `agent_settled`. Prompt acknowledgement is not
+completion: Pi can acknowledge before producing any events. Model identity must retain both the Pi
+provider and model ID. Extension UI responses are notifications, not RPC requests with a second
+acknowledgement. Display-only extension notifications must not become blocking user questions.
+
+The fixture is a conformance reference, not a claim of complete Pi support. Capabilities not mapped
+through V1 must stay unadvertised. Real-process smoke checks use a separate temporary agent home,
+session directory, and workspace, with loopback inference instead of user credentials. Fake-harness
+checks alone cannot establish compatibility with a released Pi build.
+
+The reference adapter was smoke-tested through `ExternalProviderDriver` against
+`@earendil-works/pi-coding-agent@0.85.1` (published git head
+`d981de1229ef899957bbe968bc8dcda02a21f477`), using loopback model responses and real Pi tool execution.
+That check covers provider-qualified model switching, multi-response tool loops, final usage,
+active-branch history, native-session resume, and another prompt after resume. A controlled Pi
+extension also verifies confirmation, empty input, display-only notifications, and commands that
+finish without starting an agent run. This npm build and the protocol-document commit are distinct pins.
+
+Current gaps include attachments, approvals, rollback, queued follow-up delivery, context-window
+streaming, and complete extension-dialog timeout/cancellation synchronization. Display-only UI
+updates are ignored. The structured-input mapping handles select, confirm, input, and editor answers;
+it does not provide a general extension UI. Pi is still a reference fixture, not a shipped provider
+installation flow.
+
+Prime remains a built-in driver. Its filesystem resources, native resume validation, managed
+snapshots, and text-generation policy are still host-side concerns; V1 does not expose the server's
+Effect services to packages. A shared protocol/process seam must not bypass those requirements or
+be described as an independently installable Prime package before that separation exists.
+
 ## How provider work is requested
 
 Clients never call a provider directly. They dispatch orchestration commands over the RPC method

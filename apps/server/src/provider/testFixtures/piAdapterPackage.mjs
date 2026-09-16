@@ -16,6 +16,7 @@
  * cursor only as a read cursor.
  */
 import * as NodeCrypto from "node:crypto";
+import * as NodeURL from "node:url";
 
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -27,7 +28,6 @@ const PROVIDER = "piRpc";
 const CAPABILITIES = [
   "session.resume",
   "turn.steer",
-  "turn.follow-up",
   "turn.interrupt",
   "request.structured-input",
   "model.discovery",
@@ -36,7 +36,6 @@ const CAPABILITIES = [
   "stream.reasoning",
   "stream.tool-lifecycle",
   "stream.usage",
-  "stream.context",
 ];
 
 const adapterError = (operation, detail) =>
@@ -54,6 +53,9 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
   let activeTurnId = undefined;
   let abortRequested = false;
   let turnStartedEmitted = false;
+  let lastAssistantMessage;
+  let transportClosed = false;
+  const uiRequests = new Map();
 
   const base = () => ({
     eventId: NodeCrypto.randomUUID(),
@@ -76,6 +78,50 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
     return pushEvent(withTurn({ type: "turn.started", payload: {} }));
   };
 
+  const resetTurn = () => {
+    activeTurnId = undefined;
+    turnStartedEmitted = false;
+    abortRequested = false;
+    lastAssistantMessage = undefined;
+  };
+
+  const settleTurn = () =>
+    Effect.gen(function* () {
+      if (activeTurnId === undefined) return;
+      yield* emitTurnStarted();
+      const message = lastAssistantMessage;
+      const terminal = withTurn(
+        abortRequested || message?.stopReason === "aborted"
+          ? { type: "turn.aborted", payload: { reason: "aborted by user" } }
+          : {
+              type: "turn.completed",
+              payload: {
+                state: message?.stopReason === "error" ? "failed" : "completed",
+                ...(message?.stopReason === undefined ? {} : { stopReason: message.stopReason }),
+                ...(message?.errorMessage ? { errorMessage: message.errorMessage } : {}),
+              },
+            },
+      );
+      resetTurn();
+      yield* pushEvent(terminal);
+    });
+
+  const emitUsage = (usage) =>
+    usage?.totalTokens === undefined
+      ? Effect.void
+      : pushEvent(
+          withTurn({
+            type: "thread.token-usage.updated",
+            payload: {
+              usage: {
+                usedTokens: usage.totalTokens,
+                inputTokens: usage.input,
+                outputTokens: usage.output,
+              },
+            },
+          }),
+        );
+
   const handlePiEvent = (event) => {
     switch (event.type) {
       case "agent_start":
@@ -83,23 +129,6 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
         return emitTurnStarted();
       case "message_update": {
         const delta = event.assistantMessageEvent ?? {};
-        const usageEvent =
-          event.usage?.totalTokens === undefined
-            ? []
-            : [
-                pushEvent(
-                  withTurn({
-                    type: "thread.token-usage.updated",
-                    payload: {
-                      usage: {
-                        usedTokens: event.usage.totalTokens,
-                        inputTokens: event.usage.input,
-                        outputTokens: event.usage.output,
-                      },
-                    },
-                  }),
-                ),
-              ];
         if (delta.type === "text_delta") {
           return Effect.all([
             emitTurnStarted(),
@@ -113,7 +142,6 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
                 },
               }),
             ),
-            ...usageEvent,
           ]).pipe(Effect.asVoid);
         }
         if (delta.type === "thinking_delta") {
@@ -157,19 +185,22 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
             },
           }),
         );
+      case "message_end":
+        if (event.message?.role !== "assistant") return Effect.void;
+        lastAssistantMessage = event.message;
+        return emitUsage(event.message.usage);
       case "turn_end":
-        if (abortRequested) {
-          return pushEvent(
-            withTurn({ type: "turn.aborted", payload: { reason: "aborted by user" } }),
-          );
-        }
-        return pushEvent(withTurn({ type: "turn.completed", payload: { state: "completed" } }));
-      case "agent_settled":
-        activeTurnId = undefined;
-        turnStartedEmitted = false;
-        abortRequested = false;
+        lastAssistantMessage = event.message;
         return Effect.void;
-      case "extension_ui_request":
+      case "agent_settled":
+        return settleTurn();
+      case "extension_ui_request": {
+        if (!["select", "confirm", "input", "editor"].includes(event.method)) {
+          // RPC also uses this envelope for fire-and-forget display updates.
+          return Effect.void;
+        }
+        uiRequests.set(event.id, event.method);
+        const options = event.method === "confirm" ? ["Yes", "No"] : (event.options ?? []);
         return pushEvent(
           withTurn({
             type: "user-input.requested",
@@ -178,9 +209,9 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
               questions: [
                 {
                   id: event.id,
-                  header: event.method,
-                  question: event.title ?? event.message ?? event.method,
-                  options: (event.options ?? []).map((option) => ({
+                  header: event.title || event.method,
+                  question: event.message || event.title || event.method,
+                  options: options.map((option) => ({
                     label: String(option),
                     description: String(option),
                   })),
@@ -190,6 +221,7 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
             },
           }),
         );
+      }
       default:
         return Effect.void;
     }
@@ -237,10 +269,25 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
       }),
     ),
     Stream.runDrain,
+    Effect.ensuring(
+      Effect.gen(function* () {
+        transportClosed = true;
+        for (const reply of pending.values()) {
+          yield* Deferred.fail(reply, {
+            _tag: "ProviderAdapterV1Error",
+            operation: "pi-rpc",
+            detail: "Pi RPC output closed before the command completed.",
+          });
+        }
+        pending.clear();
+      }),
+    ),
   );
 
   const request = (command) =>
     Effect.gen(function* () {
+      if (transportClosed)
+        return yield* adapterError(String(command.type), "Pi RPC output is closed.");
       requestSequence += 1;
       const id = `t3-${requestSequence}`;
       const reply = yield* Deferred.make();
@@ -279,12 +326,17 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
     exitCode: child.exitCode,
     expectExit: child.expectExit,
     close: child.close,
-    /** Called when a `prompt` is accepted: owns the canonical turn id. */
+    /** Reserve an id before the request so early events retain their owner. */
     beginTurn: (turnId) => {
+      resetTurn();
       activeTurnId = turnId;
-      turnStartedEmitted = false;
-      abortRequested = false;
     },
+    resetTurn,
+    settleHandledPrompt: (turnId, state) =>
+      activeTurnId === turnId && !turnStartedEmitted && !state.isStreaming && !state.isCompacting
+        ? settleTurn()
+        : Effect.void,
+    uiRequests,
     markAbortRequested: () => {
       abortRequested = true;
     },
@@ -296,7 +348,7 @@ const makeConnection = ({ process: child, providerInstanceId, threadId, events }
 
 const toServerModels = (models) =>
   models.map((model) => ({
-    slug: String(model.id),
+    slug: `${model.provider}/${model.id}`,
     name: String(model.name ?? model.id),
     isCustom: false,
     capabilities: {},
@@ -339,17 +391,19 @@ export default {
       const sessions = new Map();
       const now = () => new Date().toISOString();
 
-      const spawnConnection = (threadId) =>
+      const spawnConnection = (threadId, cwd) =>
         Effect.gen(function* () {
           const harnessUrl = new URL("./piHarness.mjs", import.meta.url);
           const binaryPath = input.config.binaryPath ?? process.execPath;
           const args =
             input.config.args ??
-            (input.config.binaryPath === undefined ? [harnessUrl.pathname] : []);
+            (input.config.binaryPath === undefined ? [NodeURL.fileURLToPath(harnessUrl)] : []);
           const spawnResult = yield* host.processes
             .spawn({
               command: binaryPath,
               args,
+              ...(cwd === undefined ? {} : { cwd }),
+              environment: input.environment,
               purpose: { kind: "session", threadId },
             })
             .pipe(Effect.result);
@@ -372,7 +426,18 @@ export default {
       const applyModelSelection = (connection, modelSelection) =>
         Effect.gen(function* () {
           if (modelSelection === undefined) return;
-          yield* connection.request({ type: "set_model", modelId: modelSelection.model });
+          const separator = modelSelection.model.indexOf("/");
+          if (separator < 1 || separator === modelSelection.model.length - 1) {
+            return yield* adapterError(
+              "set_model",
+              "Pi models must use a provider/modelId selection.",
+            );
+          }
+          yield* connection.request({
+            type: "set_model",
+            provider: modelSelection.model.slice(0, separator),
+            modelId: modelSelection.model.slice(separator + 1),
+          });
           for (const option of modelSelection.options ?? []) {
             if (option.id === "reasoningEffort") {
               yield* connection.request({
@@ -398,28 +463,47 @@ export default {
         Effect.gen(function* () {
           const existing = sessions.get(sessionInput.threadId);
           if (existing) return existing.session;
-          const connection = yield* spawnConnection(sessionInput.threadId);
-          const resumeCursor =
-            sessionInput.resumeCursor?.sessionFile === undefined
-              ? undefined
-              : { sessionFile: sessionInput.resumeCursor.sessionFile };
-          if (resumeCursor !== undefined) {
-            yield* connection.request({
-              type: "switch_session",
-              sessionPath: resumeCursor.sessionFile,
-            });
-          }
-          const state = yield* connection.request({ type: "get_state" });
-          const session = buildSession(
-            connection,
-            sessionInput.threadId,
-            sessionInput.runtimeMode,
-            {
-              sessionFile: state.sessionFile,
-            },
-          );
-          sessions.set(sessionInput.threadId, { connection, session });
-          return session;
+          const connection = yield* spawnConnection(sessionInput.threadId, sessionInput.cwd);
+          return yield* Effect.gen(function* () {
+            const resumeCursor =
+              sessionInput.resumeCursor?.sessionFile === undefined
+                ? undefined
+                : { sessionFile: sessionInput.resumeCursor.sessionFile };
+            if (resumeCursor !== undefined) {
+              const switched = yield* connection.request({
+                type: "switch_session",
+                sessionPath: resumeCursor.sessionFile,
+              });
+              if (switched.cancelled) {
+                return yield* adapterError("startSession", "Pi session resume was cancelled.");
+              }
+            }
+            yield* applyModelSelection(
+              connection,
+              sessionInput.modelSelection ??
+                (input.config.model === undefined ? undefined : { model: input.config.model }),
+            );
+            if (
+              input.config.thinkingLevel !== undefined &&
+              sessionInput.modelSelection === undefined
+            ) {
+              yield* connection.request({
+                type: "set_thinking_level",
+                level: input.config.thinkingLevel,
+              });
+            }
+            const state = yield* connection.request({ type: "get_state" });
+            const session = buildSession(
+              connection,
+              sessionInput.threadId,
+              sessionInput.runtimeMode,
+              {
+                sessionFile: state.sessionFile,
+              },
+            );
+            sessions.set(sessionInput.threadId, { connection, session });
+            return session;
+          }).pipe(Effect.onError(() => connection.close.pipe(Effect.ignore)));
         });
 
       const requireConnection = (threadId, operation) => {
@@ -434,7 +518,15 @@ export default {
         Effect.gen(function* () {
           const turnId = `pi-turn-${NodeCrypto.randomUUID()}`;
           connection.beginTurn(turnId);
-          yield* connection.request(command);
+          const accepted = yield* connection.request(command).pipe(Effect.result);
+          if (accepted._tag === "Failure") {
+            connection.resetTurn();
+            return yield* Effect.fail(accepted.failure);
+          }
+          // Pi starts normal runs synchronously after preflight acceptance. An
+          // accepted extension/input handler may instead finish without a run.
+          const state = yield* connection.request({ type: "get_state" });
+          yield* connection.settleHandledPrompt(turnId, state);
           return {
             threadId,
             turnId,
@@ -452,8 +544,9 @@ export default {
                 args:
                   input.config.args ??
                   (input.config.binaryPath === undefined
-                    ? [new URL("./piHarness.mjs", import.meta.url).pathname]
+                    ? [NodeURL.fileURLToPath(new URL("./piHarness.mjs", import.meta.url))]
                     : []),
+                environment: input.environment,
                 purpose: { kind: "probe" },
               })
               .pipe(Effect.result);
@@ -545,12 +638,23 @@ export default {
           respondToUserInput: (threadId, requestId, answers) =>
             Effect.gen(function* () {
               const connection = yield* requireConnection(threadId, "respondToUserInput");
+              const method = connection.uiRequests.get(requestId);
+              if (method === undefined) {
+                return yield* adapterError("respondToUserInput", "Unknown Pi UI request.");
+              }
               const answer = Object.values(answers)[0];
               const response =
-                answer === undefined || answer === ""
+                answer === undefined
                   ? { type: "extension_ui_response", id: requestId, cancelled: true }
-                  : { type: "extension_ui_response", id: requestId, value: String(answer) };
+                  : method === "confirm"
+                    ? {
+                        type: "extension_ui_response",
+                        id: requestId,
+                        confirmed: answer === true || answer === "Yes" || answer === "true",
+                      }
+                    : { type: "extension_ui_response", id: requestId, value: String(answer) };
               yield* connection.notify(response);
+              connection.uiRequests.delete(requestId);
               yield* Queue.offer(events, {
                 eventId: NodeCrypto.randomUUID(),
                 provider: PROVIDER,
@@ -578,12 +682,26 @@ export default {
             Effect.gen(function* () {
               const connection = yield* requireConnection(threadId, "readThread");
               const result = yield* connection.request({ type: "get_entries" });
+              const byId = new Map((result.entries ?? []).map((entry) => [entry.id, entry]));
+              const branch = [];
+              const visited = new Set();
+              let cursor = result.leafId;
+              while (cursor != null && !visited.has(cursor)) {
+                visited.add(cursor);
+                const entry = byId.get(cursor);
+                if (entry === undefined) break;
+                branch.push(entry);
+                cursor = entry.parentId;
+              }
               return {
                 threadId,
-                turns: (result.entries ?? []).map((entry) => ({
-                  id: entry.id,
-                  items: [entry.message],
-                })),
+                turns: branch
+                  .toReversed()
+                  .filter((entry) => entry.type === "message")
+                  .map((entry) => ({
+                    id: entry.id,
+                    items: [entry.message],
+                  })),
               };
             }),
           rollbackThread: () =>

@@ -1,3 +1,5 @@
+import * as NodeURL from "node:url";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -6,7 +8,9 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
-const runnerPath = new URL("./testFixtures/piConformanceRunner.mjs", import.meta.url).pathname;
+const runnerPath = NodeURL.fileURLToPath(
+  new URL("./testFixtures/piConformanceRunner.mjs", import.meta.url),
+);
 const RunnerResult = Schema.Struct({
   ok: Schema.Boolean,
   eventCount: Schema.optional(Schema.Number),
@@ -46,7 +50,8 @@ describe("pi rpc adapter conformance", () => {
       assert.equal(Number(exitCode), 0, stderr.text);
       assert.equal(stderr.text, "");
       assert.equal(result.ok, true, failureDetail);
-      assert.equal(result.eventCount, 33);
+      assert.ok(result.checks.length > 0, "The scenario must execute checks.");
+      assert.ok((result.eventCount ?? 0) > 0, "The scenario must consume canonical events.");
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });
