@@ -226,6 +226,139 @@ it.effect("maps exit status lookup failures to transport errors", () =>
   ),
 );
 
+it.effect("passes initial typed handlers before reading queued startup notifications", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fake = yield* makeFakeProcess();
+      const handled = yield* Deferred.make<unknown>();
+
+      yield* Queue.offer(
+        fake.stdout,
+        encodeMessage({
+          method: "session/update",
+          params: {
+            sessionId: "session-startup",
+            update: {
+              sessionUpdate: "plan",
+              entries: [
+                {
+                  content: "Queued before connection startup",
+                  priority: "high",
+                  status: "in_progress",
+                },
+              ],
+            },
+          },
+        }),
+      );
+
+      const connection = yield* AcpHostConnection.make(fake.process, {
+        onSessionUpdate: (notification) =>
+          Deferred.succeed(handled, notification).pipe(Effect.asVoid),
+      });
+
+      assert.deepEqual(yield* Deferred.await(handled), {
+        sessionId: "session-startup",
+        update: {
+          sessionUpdate: "plan",
+          entries: [
+            {
+              content: "Queued before connection startup",
+              priority: "high",
+              status: "in_progress",
+            },
+          ],
+        },
+      });
+      assert.equal((yield* Stream.runCollect(connection.client.raw.notifications)).length, 0);
+    }),
+  ),
+);
+
+it.effect("dispatches sustained large typed notifications without retaining raw duplicates", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const notificationCount = 128;
+      const largeContent = "x".repeat(32 * 1024);
+      const fake = yield* makeFakeProcess();
+      const connection = yield* AcpHostConnection.make(fake.process);
+      const handledCount = yield* Ref.make(0);
+      const allHandled = yield* Deferred.make<void>();
+
+      yield* connection.client.handleSessionUpdate(() =>
+        Ref.updateAndGet(handledCount, (count) => count + 1).pipe(
+          Effect.flatMap((count) =>
+            count === notificationCount
+              ? Deferred.succeed(allHandled, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          ),
+        ),
+      );
+
+      yield* Effect.forEach(
+        Array.from({ length: notificationCount }, (_, index) => index),
+        (index) =>
+          Queue.offer(
+            fake.stdout,
+            encodeMessage({
+              method: "session/update",
+              params: {
+                sessionId: "session-1",
+                update: {
+                  sessionUpdate: "plan",
+                  entries: [
+                    {
+                      content: `${index}:${largeContent}`,
+                      priority: "high",
+                      status: "in_progress",
+                    },
+                  ],
+                },
+              },
+            }),
+          ),
+        { discard: true },
+      );
+
+      yield* Deferred.await(allHandled);
+      assert.equal(yield* Ref.get(handledCount), notificationCount);
+      assert.equal((yield* Stream.runCollect(connection.client.raw.notifications)).length, 0);
+    }),
+  ),
+);
+
+it.effect("captures raw notifications only when explicitly enabled", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fake = yield* makeFakeProcess();
+      const connection = yield* AcpHostConnection.make(fake.process, {
+        captureRawNotifications: true,
+      });
+      const captured = yield* connection.client.raw.notifications.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* Queue.offer(
+        fake.stdout,
+        encodeMessage({
+          method: "x/captured",
+          params: { payload: "raw" },
+        }),
+      );
+
+      const notifications = yield* Fiber.join(captured);
+      assert.equal(notifications.length, 1);
+      assert.deepEqual(notifications[0], {
+        _tag: "ExtNotification",
+        method: "x/captured",
+        params: { payload: "raw" },
+      });
+    }),
+  ),
+);
+
 it.effect("drains stderr into a bounded tail without taking process ownership", () =>
   Effect.gen(function* () {
     const fake = yield* makeFakeProcess();

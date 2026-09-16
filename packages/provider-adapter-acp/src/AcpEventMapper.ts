@@ -38,8 +38,14 @@ export interface AcpMappedToolCall {
   readonly status: AcpToolStatus | null;
   readonly content: ReadonlyArray<AcpSchema.ToolCallContent> | null;
   readonly locations: ReadonlyArray<AcpSchema.ToolCallLocation> | null;
+  readonly terminalEmitted: boolean;
   readonly rawInput?: unknown;
   readonly rawOutput?: unknown;
+}
+
+export interface AcpSessionInfoState {
+  readonly title?: string | null;
+  readonly updatedAt?: string | null;
 }
 
 interface AcpContentItemState {
@@ -51,6 +57,9 @@ interface AcpContentItemState {
 export interface AcpEventMapperState {
   readonly toolCalls: ReadonlyMap<string, AcpMappedToolCall>;
   readonly configOptions: ReadonlyArray<AcpSchema.SessionConfigOption> | undefined;
+  readonly availableCommands: ReadonlyArray<AcpSchema.AvailableCommand> | undefined;
+  readonly currentModeId: string | undefined;
+  readonly sessionInfo: AcpSessionInfoState | undefined;
   readonly assistantItem: AcpContentItemState | undefined;
   readonly reasoningItem: AcpContentItemState | undefined;
   readonly nextContentItemIndex: number;
@@ -89,6 +98,9 @@ export function makeAcpEventMapperState(
   return {
     toolCalls: new Map(),
     configOptions,
+    availableCommands: undefined,
+    currentModeId: undefined,
+    sessionInfo: undefined,
     assistantItem: undefined,
     reasoningItem: undefined,
     nextContentItemIndex: 0,
@@ -151,6 +163,7 @@ function mergeToolCall(
       creation || hasOwn(update, "locations")
         ? (update.locations ?? null)
         : (previous?.locations ?? null),
+    terminalEmitted: previous?.terminalEmitted ?? false,
     ...(hasOwn(update, "rawInput")
       ? { rawInput: update.rawInput }
       : previous && hasOwn(previous, "rawInput")
@@ -274,16 +287,34 @@ function makeContentItemId(
   return `acp:${kind}:${host.sessionId}:${scope}:${suffix}`;
 }
 
-function mapTextUpdate(
+function nonTextContentFallback(
+  content: Exclude<AcpSchema.ContentBlock, { readonly type: "text" }>,
+): string {
+  switch (content.type) {
+    case "image":
+      return `[Image: ${content.mimeType}${content.uri ? `; ${content.uri}` : ""}]`;
+    case "audio":
+      return `[Audio: ${content.mimeType}]`;
+    case "resource_link": {
+      const label = content.title?.trim() || content.name.trim() || "resource";
+      return `[Resource: ${label}${content.uri ? `; ${content.uri}` : ""}]`;
+    }
+    case "resource":
+      if ("text" in content.resource && content.resource.text) {
+        return content.resource.text;
+      }
+      return `[Resource: ${content.resource.mimeType || "binary"}${
+        content.resource.uri ? `; ${content.resource.uri}` : ""
+      }]`;
+  }
+}
+
+function mapContentUpdate(
   state: AcpEventMapperState,
   notification: AcpSchema.SessionNotification,
   host: AcpEventMapperHost,
   update: AcpTextUpdate,
 ): AcpEventMapperResult {
-  if (update.content.type !== "text") {
-    return { state, events: [], snapshotRefreshRequired: false };
-  }
-
   const kind = update.sessionUpdate === "agent_message_chunk" ? "assistant" : "reasoning";
   const current = kind === "assistant" ? state.assistantItem : state.reasoningItem;
   const messageId = normalizedMessageId(update);
@@ -337,16 +368,40 @@ function mapTextUpdate(
       raw,
     });
   }
-  events.push({
-    type: "content.delta",
-    ...makeBase(host, events.length),
-    itemId: RuntimeItemId.make(itemId),
-    payload: {
-      streamKind: kind === "assistant" ? "assistant_text" : "reasoning_text",
-      delta: update.content.text,
-    },
-    raw,
-  });
+  if (update.content.type === "text") {
+    events.push({
+      type: "content.delta",
+      ...makeBase(host, events.length),
+      itemId: RuntimeItemId.make(itemId),
+      payload: {
+        streamKind: kind === "assistant" ? "assistant_text" : "reasoning_text",
+        delta: update.content.text,
+      },
+      raw,
+    });
+  } else {
+    events.push({
+      type: "item.updated",
+      ...makeBase(host, events.length),
+      itemId: RuntimeItemId.make(itemId),
+      payload: {
+        itemType: kind === "assistant" ? "assistant_message" : "reasoning",
+        status: "inProgress",
+        data: { content: update.content },
+      },
+      raw,
+    });
+    events.push({
+      type: "content.delta",
+      ...makeBase(host, events.length),
+      itemId: RuntimeItemId.make(itemId),
+      payload: {
+        streamKind: kind === "assistant" ? "assistant_text" : "reasoning_text",
+        delta: nonTextContentFallback(update.content),
+      },
+      raw,
+    });
+  }
   return { state: nextState, events, snapshotRefreshRequired: false };
 }
 
@@ -357,10 +412,6 @@ export function finishAcpTurn(input: {
   readonly raw: AcpEventMapperRaw;
 }): AcpEventMapperResult {
   const { state, host } = input;
-  if (state.assistantItem === undefined && state.reasoningItem === undefined) {
-    return { state, events: [], snapshotRefreshRequired: false };
-  }
-
   const raw = makeRaw(host, input.raw.payload, input.raw);
   const events: Array<ProviderRuntimeEvent> = [];
   if (state.assistantItem !== undefined) {
@@ -375,10 +426,30 @@ export function finishAcpTurn(input: {
   }
 
   return {
-    state: { ...state, assistantItem: undefined, reasoningItem: undefined },
+    state: {
+      ...state,
+      toolCalls: new Map(),
+      assistantItem: undefined,
+      reasoningItem: undefined,
+    },
     events,
     snapshotRefreshRequired: false,
   };
+}
+
+function planStatus(status: AcpSchema.PlanEntry["status"]): "pending" | "inProgress" | "completed" {
+  switch (status) {
+    case "pending":
+      return "pending";
+    case "in_progress":
+      return "inProgress";
+    case "completed":
+      return "completed";
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unsupported ACP session update: ${JSON.stringify(value)}`);
 }
 
 /**
@@ -397,9 +468,13 @@ export function mapAcpSessionUpdate(input: {
 
   const update = notification.update;
   switch (update.sessionUpdate) {
+    // User messages already enter the canonical timeline through the prompt command.
+    case "user_message_chunk":
+      return { state, events: [], snapshotRefreshRequired: false };
+
     case "agent_message_chunk":
     case "agent_thought_chunk":
-      return mapTextUpdate(state, notification, host, update);
+      return mapContentUpdate(state, notification, host, update);
 
     case "tool_call":
     case "tool_call_update": {
@@ -409,26 +484,120 @@ export function mapAcpSessionUpdate(input: {
       }
       const previous = state.toolCalls.get(toolCallId);
       const merged = mergeToolCall(previous, { ...update, toolCallId });
-      const toolCalls = new Map(state.toolCalls);
-      toolCalls.set(toolCallId, merged);
-      const nextState = { ...state, toolCalls };
       const terminal = merged.status === "completed" || merged.status === "failed";
+      const emitsTerminal = terminal && !merged.terminalEmitted;
+      const retained = emitsTerminal ? { ...merged, terminalEmitted: true } : merged;
+      const toolCalls = new Map(state.toolCalls);
+      toolCalls.set(toolCallId, retained);
+      const nextState = { ...state, toolCalls };
       const events: Array<ProviderRuntimeEvent> = [];
       if (previous === undefined) {
-        events.push(makeToolEvent(host, notification, merged, "item.started", events.length));
+        events.push(makeToolEvent(host, notification, retained, "item.started", events.length));
       }
       if (previous !== undefined || terminal) {
         events.push(
           makeToolEvent(
             host,
             notification,
-            merged,
-            terminal ? "item.completed" : "item.updated",
+            retained,
+            emitsTerminal ? "item.completed" : "item.updated",
             events.length,
           ),
         );
       }
       return { state: nextState, events, snapshotRefreshRequired: false };
+    }
+
+    case "plan":
+      return {
+        state,
+        events: [
+          {
+            type: "turn.plan.updated",
+            ...makeBase(host, 0),
+            payload: {
+              plan: update.entries.flatMap((entry) => {
+                const step = entry.content.trim();
+                return step ? [{ step, status: planStatus(entry.status) }] : [];
+              }),
+            },
+            raw: makeRaw(host, notification),
+          },
+        ],
+        snapshotRefreshRequired: false,
+      };
+
+    case "available_commands_update": {
+      const nextState = { ...state, availableCommands: update.availableCommands };
+      return {
+        state: nextState,
+        events: [
+          {
+            type: "session.configured",
+            ...makeBase(host, 0),
+            payload: { config: { availableCommands: update.availableCommands } },
+            raw: makeRaw(host, notification),
+          },
+        ],
+        snapshotRefreshRequired: true,
+      };
+    }
+
+    case "current_mode_update": {
+      const nextState = { ...state, currentModeId: update.currentModeId };
+      return {
+        state: nextState,
+        events: [
+          {
+            type: "session.configured",
+            ...makeBase(host, 0),
+            payload: { config: { currentModeId: update.currentModeId } },
+            raw: makeRaw(host, notification),
+          },
+        ],
+        snapshotRefreshRequired: true,
+      };
+    }
+
+    case "config_option_update": {
+      const nextState = { ...state, configOptions: update.configOptions };
+      return {
+        state: nextState,
+        events: [
+          {
+            type: "session.configured",
+            ...makeBase(host, 0),
+            payload: { config: { configOptions: update.configOptions } },
+            raw: makeRaw(host, notification),
+          },
+        ],
+        snapshotRefreshRequired: true,
+      };
+    }
+
+    case "session_info_update": {
+      const sessionInfo: AcpSessionInfoState = {
+        ...state.sessionInfo,
+        ...(hasOwn(update, "title") ? { title: update.title ?? null } : {}),
+        ...(hasOwn(update, "updatedAt") ? { updatedAt: update.updatedAt ?? null } : {}),
+      };
+      const name = sessionInfo.title?.trim();
+      const nextState = { ...state, sessionInfo };
+      return {
+        state: nextState,
+        events: [
+          {
+            type: "thread.metadata.updated",
+            ...makeBase(host, 0),
+            payload: {
+              ...(name ? { name } : {}),
+              metadata: { sessionId: host.sessionId, ...sessionInfo },
+            },
+            raw: makeRaw(host, notification),
+          },
+        ],
+        snapshotRefreshRequired: true,
+      };
     }
 
     case "usage_update":
@@ -449,24 +618,7 @@ export function mapAcpSessionUpdate(input: {
         ],
         snapshotRefreshRequired: false,
       };
-
-    case "config_option_update": {
-      const nextState = { ...state, configOptions: update.configOptions };
-      return {
-        state: nextState,
-        events: [
-          {
-            type: "session.configured",
-            ...makeBase(host, 0),
-            payload: { config: { configOptions: update.configOptions } },
-            raw: makeRaw(host, notification),
-          },
-        ],
-        snapshotRefreshRequired: true,
-      };
-    }
-
-    default:
-      return { state, events: [], snapshotRefreshRequired: false };
   }
+
+  return assertNever(update);
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type * as AcpSchema from "effect-acp/schema";
 
 import {
+  ACP_EMPTY_VALUE_SENTINEL,
   findAcpConfigOption,
   findAcpReasoningSelection,
   flattenAcpSelectOptions,
@@ -57,12 +58,18 @@ const dshConfigOptions: ReadonlyArray<AcpSchema.SessionConfigOption> = [
 ];
 
 describe("ACP config option projection", () => {
-  it("flattens grouped and ungrouped ACP select options", () => {
+  it("flattens grouped and ungrouped ACP select options without dropping empty values", () => {
     expect(flattenAcpSelectOptions(modelConfigOption)).toEqual([
       {
         value: '["control-fixture","beta"]',
         name: "Beta",
         description: "Stable control model",
+        groupId: "control-fixture",
+        groupName: "Control Fixture",
+      },
+      {
+        value: "",
+        name: "Agent default",
         groupId: "control-fixture",
         groupName: "Control Fixture",
       },
@@ -74,6 +81,7 @@ describe("ACP config option projection", () => {
       },
     ]);
     expect(flattenAcpSelectOptions(reasoningConfigOption)).toEqual([
+      { value: "", name: "Default" },
       { value: "low", name: "Low" },
       { value: "high", name: "High" },
     ]);
@@ -94,6 +102,15 @@ describe("ACP config option projection", () => {
         },
       },
       {
+        slug: ACP_EMPTY_VALUE_SENTINEL,
+        name: "Agent default",
+        subProvider: "Control Fixture",
+        isCustom: false,
+        capabilities: {
+          optionDescriptors: [projected.reasoningConfig?.descriptor],
+        },
+      },
+      {
         slug: '["other-fixture","alpha"]',
         name: "Alpha",
         subProvider: "Other Fixture",
@@ -103,72 +120,190 @@ describe("ACP config option projection", () => {
         },
       },
     ]);
-    expect(projected.modelConfig).toEqual({
+    expect(projected.modelConfig).toMatchObject({
       configId: "model",
       currentValue: '["control-fixture","beta"]',
-      values: ['["control-fixture","beta"]', '["other-fixture","alpha"]'],
+      values: ['["control-fixture","beta"]', ACP_EMPTY_VALUE_SENTINEL, '["other-fixture","alpha"]'],
     });
+    expect(projected.modelConfig?.canonicalToWireValue.get(ACP_EMPTY_VALUE_SENTINEL)).toBe("");
+    expect(projected.modelConfig?.wireToCanonicalValue.get("")).toBe(ACP_EMPTY_VALUE_SENTINEL);
   });
 
-  it("projects reasoning choices and omits the empty default", () => {
+  it("projects an empty reasoning default through the canonical sentinel", () => {
     const reasoning = projectAcpConfigOptions(dshConfigOptions).reasoningConfig;
 
-    expect(reasoning).toEqual({
+    expect(reasoning).toMatchObject({
       configId: "reasoning_effort",
-      values: ["low", "high"],
+      currentValue: ACP_EMPTY_VALUE_SENTINEL,
+      values: [ACP_EMPTY_VALUE_SENTINEL, "low", "high"],
       descriptor: {
         id: "reasoningEffort",
         label: "Reasoning effort",
         type: "select",
+        currentValue: ACP_EMPTY_VALUE_SENTINEL,
         options: [
+          { id: ACP_EMPTY_VALUE_SENTINEL, label: "Default", isDefault: true },
           { id: "low", label: "Low" },
           { id: "high", label: "High" },
         ],
       },
     });
+    expect(reasoning?.canonicalToWireValue.get(ACP_EMPTY_VALUE_SENTINEL)).toBe("");
+    expect(reasoning?.wireToCanonicalValue.get("")).toBe(ACP_EMPTY_VALUE_SENTINEL);
   });
 
-  it("falls back to the thought_level category but requires exact model id", () => {
-    const projected = projectAcpConfigOptions([
-      { ...modelConfigOption, id: "Model" },
-      { ...reasoningConfigOption, id: "thinking", currentValue: "high" },
+  it("prefers the standard model category with an opaque id and falls back to exact id model", () => {
+    const categorized = projectAcpConfigOptions([
+      { ...modelConfigOption, id: "model", category: "other" },
+      {
+        ...modelConfigOption,
+        id: "llm",
+        currentValue: '["other-fixture","alpha"]',
+      },
     ]);
 
-    expect(projected.models).toEqual([]);
-    expect(projected.modelConfig).toBeUndefined();
-    expect(projected.reasoningConfig).toMatchObject({
-      configId: "thinking",
-      currentValue: "high",
-      descriptor: {
-        currentValue: "high",
-        options: [
-          { id: "low", label: "Low" },
-          { id: "high", label: "High", isDefault: true },
-        ],
-      },
+    expect(categorized.modelConfig).toMatchObject({
+      configId: "llm",
+      currentValue: '["other-fixture","alpha"]',
     });
+
+    const fallback = projectAcpConfigOptions([{ ...modelConfigOption, category: "other" }]);
+    expect(fallback.modelConfig?.configId).toBe("model");
     expect(findAcpConfigOption(dshConfigOptions, "Model")).toBeUndefined();
   });
 
-  it("finds selections and validates config updates without changing tokens", () => {
-    const projected = projectAcpConfigOptions(dshConfigOptions);
-    const reasoning = findAcpReasoningSelection([
-      { id: "unrelated", value: true },
-      { id: "reasoningEffort", value: "high" },
+  it("prefers the thought_level category and falls back to exact id reasoning_effort", () => {
+    const categorized = projectAcpConfigOptions([
+      { ...reasoningConfigOption, category: "other", currentValue: "high" },
+      { ...reasoningConfigOption, id: "thinking", currentValue: "low" },
     ]);
+    expect(categorized.reasoningConfig).toMatchObject({
+      configId: "thinking",
+      currentValue: "low",
+      descriptor: {
+        currentValue: "low",
+        options: [
+          { id: ACP_EMPTY_VALUE_SENTINEL, label: "Default" },
+          { id: "low", label: "Low", isDefault: true },
+          { id: "high", label: "High" },
+        ],
+      },
+    });
 
-    expect(reasoning).toBe("high");
-    expect(getAcpConfigOptionUpdate(projected.modelConfig, '["other-fixture","alpha"]')).toEqual({
+    const fallback = projectAcpConfigOptions([
+      { ...reasoningConfigOption, category: "other", currentValue: "high" },
+    ]);
+    expect(fallback.reasoningConfig).toMatchObject({
+      configId: "reasoning_effort",
+      currentValue: "high",
+    });
+  });
+
+  it("round-trips the DSH empty model default after choosing another model", () => {
+    const emptyDefault = projectAcpConfigOptions([
+      { ...modelConfigOption, currentValue: "" },
+    ]).modelConfig;
+    expect(emptyDefault?.currentValue).toBe(ACP_EMPTY_VALUE_SENTINEL);
+    expect(
+      projectAcpConfigOptions([{ ...modelConfigOption, currentValue: "" }]).models.find(
+        (model) => model.slug === ACP_EMPTY_VALUE_SENTINEL,
+      ),
+    ).toMatchObject({ isDefault: true });
+    expect(getAcpConfigOptionUpdate(emptyDefault, '["other-fixture","alpha"]')).toEqual({
       configId: "model",
       value: '["other-fixture","alpha"]',
     });
-    expect(getAcpConfigOptionUpdate(projected.reasoningConfig, reasoning)).toEqual({
-      configId: "reasoning_effort",
-      value: "high",
+
+    const chosen = projectAcpConfigOptions([
+      { ...modelConfigOption, currentValue: '["other-fixture","alpha"]' },
+    ]).modelConfig;
+    expect(getAcpConfigOptionUpdate(chosen, ACP_EMPTY_VALUE_SENTINEL)).toEqual({
+      configId: "model",
+      value: "",
     });
-    expect(
-      getAcpConfigOptionUpdate(projected.modelConfig, '["control-fixture","beta"]'),
-    ).toBeUndefined();
-    expect(getAcpConfigOptionUpdate(projected.reasoningConfig, "medium")).toBeUndefined();
+  });
+
+  it("chooses collision-free sentinels for every value T3 cannot round-trip", () => {
+    const options = [
+      { value: "", name: "Agent default" },
+      { value: ACP_EMPTY_VALUE_SENTINEL, name: "Literal sentinel" },
+      { value: `${ACP_EMPTY_VALUE_SENTINEL}:1`, name: "Literal suffixed sentinel" },
+      { value: "opaque:model/value", name: "Opaque value" },
+      { value: "   ", name: "Whitespace only" },
+      { value: " padded opaque value ", name: "Padded opaque value" },
+    ];
+    const projected = projectAcpConfigOptions([
+      {
+        ...modelConfigOption,
+        id: "llm",
+        currentValue: " padded opaque value ",
+        options,
+      },
+    ]);
+    const emptyCanonicalValue = `${ACP_EMPTY_VALUE_SENTINEL}:2`;
+    const whitespaceCanonicalValue = `${ACP_EMPTY_VALUE_SENTINEL}:3`;
+    const paddedCanonicalValue = `${ACP_EMPTY_VALUE_SENTINEL}:4`;
+
+    expect(projected.models.map((model) => model.slug)).toEqual([
+      emptyCanonicalValue,
+      ACP_EMPTY_VALUE_SENTINEL,
+      `${ACP_EMPTY_VALUE_SENTINEL}:1`,
+      "opaque:model/value",
+      whitespaceCanonicalValue,
+      paddedCanonicalValue,
+    ]);
+    expect(projected.modelConfig?.currentValue).toBe(paddedCanonicalValue);
+    expect(projected.models.find((model) => model.slug === paddedCanonicalValue)).toMatchObject({
+      isDefault: true,
+    });
+    expect(projected.modelConfig?.canonicalToWireValue.get(emptyCanonicalValue)).toBe("");
+    expect(projected.modelConfig?.canonicalToWireValue.get(whitespaceCanonicalValue)).toBe("   ");
+    expect(projected.modelConfig?.canonicalToWireValue.get(paddedCanonicalValue)).toBe(
+      " padded opaque value ",
+    );
+    expect(projected.modelConfig?.canonicalToWireValue.get("opaque:model/value")).toBe(
+      "opaque:model/value",
+    );
+    const safeCurrent = projectAcpConfigOptions([
+      {
+        ...modelConfigOption,
+        id: "llm",
+        currentValue: "opaque:model/value",
+        options,
+      },
+    ]).modelConfig;
+    expect(getAcpConfigOptionUpdate(safeCurrent, paddedCanonicalValue)).toEqual({
+      configId: "llm",
+      value: " padded opaque value ",
+    });
+    expect(getAcpConfigOptionUpdate(projected.modelConfig, whitespaceCanonicalValue)).toEqual({
+      configId: "llm",
+      value: "   ",
+    });
+    expect(getAcpConfigOptionUpdate(projected.modelConfig, emptyCanonicalValue)).toEqual({
+      configId: "llm",
+      value: "",
+    });
+    expect(getAcpConfigOptionUpdate(projected.modelConfig, ACP_EMPTY_VALUE_SENTINEL)).toEqual({
+      configId: "llm",
+      value: ACP_EMPTY_VALUE_SENTINEL,
+    });
+  });
+
+  it("resets reasoning to its empty wire value", () => {
+    const chosen = projectAcpConfigOptions([
+      { ...reasoningConfigOption, currentValue: "high" },
+    ]).reasoningConfig;
+    const resetSelection = findAcpReasoningSelection([
+      { id: "unrelated", value: true },
+      { id: "reasoningEffort", value: ACP_EMPTY_VALUE_SENTINEL },
+    ]);
+
+    expect(resetSelection).toBe(ACP_EMPTY_VALUE_SENTINEL);
+    expect(getAcpConfigOptionUpdate(chosen, resetSelection)).toEqual({
+      configId: "reasoning_effort",
+      value: "",
+    });
+    expect(getAcpConfigOptionUpdate(chosen, "medium")).toBeUndefined();
   });
 });

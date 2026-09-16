@@ -45,6 +45,14 @@ export interface AcpPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
   readonly terminationError?: Effect.Effect<AcpError.AcpError>;
   readonly serverRequestMethods: ReadonlySet<string>;
+  /**
+   * Retains every decoded notification for `incoming` consumers.
+   *
+   * This uses an unbounded queue so notification payloads are never silently lost. It defaults to
+   * `true` for direct low-level protocol users. Disable it when notifications are handled through
+   * `onNotification` and the raw stream is not consumed.
+   */
+  readonly captureRawNotifications?: boolean;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (event: AcpProtocolLogEvent) => Effect.Effect<void, never>;
@@ -83,7 +91,10 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const parser = parserFactory.makeUnsafe();
   const serverQueue = yield* Queue.unbounded<RpcMessage.FromClientEncoded>();
   const clientQueue = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
-  const notificationQueue = yield* Queue.unbounded<AcpIncomingNotification>();
+  const notificationQueue =
+    options.captureRawNotifications === false
+      ? undefined
+      : yield* Queue.unbounded<AcpIncomingNotification>();
   const disconnects = yield* Queue.unbounded<number>();
   const outgoing = yield* Queue.unbounded<string | Uint8Array, Cause.Done<void>>();
   const nextRequestId = yield* Ref.make(1);
@@ -178,7 +189,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     );
 
   const dispatchNotification = (notification: AcpIncomingNotification) =>
-    Queue.offer(notificationQueue, notification).pipe(
+    (notificationQueue ? Queue.offer(notificationQueue, notification) : Effect.void).pipe(
       Effect.andThen(
         options.onNotification
           ? options.onNotification(notification).pipe(Effect.catch(() => Effect.void))
@@ -553,7 +564,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     clientProtocol,
     serverProtocol,
     get incoming() {
-      return Stream.fromQueue(notificationQueue);
+      return notificationQueue ? Stream.fromQueue(notificationQueue) : Stream.empty;
     },
     request: sendRequest,
     notify: sendNotification,

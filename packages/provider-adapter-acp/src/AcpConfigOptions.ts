@@ -8,6 +8,7 @@ import type * as AcpSchema from "effect-acp/schema";
 export const ACP_MODEL_CONFIG_ID = "model";
 export const ACP_REASONING_CONFIG_ID = "reasoning_effort";
 export const T3_REASONING_OPTION_ID = "reasoningEffort";
+export const ACP_EMPTY_VALUE_SENTINEL = "__t3_acp_empty__";
 
 type AcpSelectConfigOption = Extract<AcpSchema.SessionConfigOption, { readonly type: "select" }>;
 
@@ -23,8 +24,11 @@ export interface FlattenedAcpSelectOption {
 
 export interface ProjectedAcpSelectConfig {
   readonly configId: string;
-  readonly currentValue?: string;
+  /** Canonical values exposed to T3. Unsafe wire values use non-empty sentinels. */
   readonly values: ReadonlyArray<string>;
+  readonly currentValue?: string;
+  readonly canonicalToWireValue: ReadonlyMap<string, string>;
+  readonly wireToCanonicalValue: ReadonlyMap<string, string>;
 }
 
 export interface ProjectedAcpReasoningConfig extends ProjectedAcpSelectConfig {
@@ -48,11 +52,10 @@ export function flattenAcpSelectOptions(
 
   for (const entry of options) {
     if ("value" in entry) {
-      if (entry.value.trim().length === 0) continue;
       const description = nonEmpty(entry.description);
       flattened.push({
         value: entry.value,
-        name: nonEmpty(entry.name) ?? entry.value,
+        name: nonEmpty(entry.name) ?? (entry.value.length > 0 ? entry.value : "Agent default"),
         ...(description ? { description } : {}),
       });
       continue;
@@ -60,11 +63,10 @@ export function flattenAcpSelectOptions(
 
     const groupName = nonEmpty(entry.name) ?? nonEmpty(entry.group);
     for (const option of entry.options) {
-      if (option.value.trim().length === 0) continue;
       const description = nonEmpty(option.description);
       flattened.push({
         value: option.value,
-        name: nonEmpty(option.name) ?? option.value,
+        name: nonEmpty(option.name) ?? (option.value.length > 0 ? option.value : "Agent default"),
         ...(description ? { description } : {}),
         ...(entry.group ? { groupId: entry.group } : {}),
         ...(groupName ? { groupName } : {}),
@@ -83,15 +85,30 @@ export function findAcpConfigOption(
   return options?.find((option) => option.id === configId);
 }
 
+const findModelConfigOption = (
+  options: ReadonlyArray<AcpSchema.SessionConfigOption>,
+): AcpSelectConfigOption | undefined => {
+  const standard = options.find(
+    (option): option is AcpSelectConfigOption =>
+      option.type === "select" && option.category === "model",
+  );
+  if (standard) return standard;
+
+  const compatibility = findAcpConfigOption(options, ACP_MODEL_CONFIG_ID);
+  return compatibility?.type === "select" ? compatibility : undefined;
+};
+
 const findReasoningConfigOption = (
   options: ReadonlyArray<AcpSchema.SessionConfigOption>,
 ): AcpSelectConfigOption | undefined => {
-  const exact = findAcpConfigOption(options, ACP_REASONING_CONFIG_ID);
-  if (exact?.type === "select") return exact;
-  return options.find(
+  const standard = options.find(
     (option): option is AcpSelectConfigOption =>
       option.type === "select" && option.category === "thought_level",
   );
+  if (standard) return standard;
+
+  const compatibility = findAcpConfigOption(options, ACP_REASONING_CONFIG_ID);
+  return compatibility?.type === "select" ? compatibility : undefined;
 };
 
 const uniqueOptions = (
@@ -105,13 +122,52 @@ const uniqueOptions = (
   });
 };
 
+interface CanonicalAcpSelectOptions {
+  readonly choices: ReadonlyArray<FlattenedAcpSelectOption & { readonly canonicalValue: string }>;
+  readonly values: ReadonlyArray<string>;
+  readonly canonicalToWireValue: ReadonlyMap<string, string>;
+  readonly wireToCanonicalValue: ReadonlyMap<string, string>;
+}
+
+const canonicalizeOptions = (
+  choices: ReadonlyArray<FlattenedAcpSelectOption>,
+): CanonicalAcpSelectOptions => {
+  const wireValues = new Set(choices.map((choice) => choice.value));
+  const usedCanonicalValues = new Set<string>();
+  let sentinelIndex = 0;
+  const nextSentinel = () => {
+    let candidate = ACP_EMPTY_VALUE_SENTINEL;
+    while (wireValues.has(candidate) || usedCanonicalValues.has(candidate)) {
+      sentinelIndex += 1;
+      candidate = `${ACP_EMPTY_VALUE_SENTINEL}:${sentinelIndex}`;
+    }
+    usedCanonicalValues.add(candidate);
+    return candidate;
+  };
+
+  const canonicalToWireValue = new Map<string, string>();
+  const wireToCanonicalValue = new Map<string, string>();
+  const canonicalChoices = choices.map((choice) => {
+    const isT3Safe = choice.value.length > 0 && choice.value.trim() === choice.value;
+    const canonicalValue = isT3Safe ? choice.value : nextSentinel();
+    usedCanonicalValues.add(canonicalValue);
+    canonicalToWireValue.set(canonicalValue, choice.value);
+    wireToCanonicalValue.set(choice.value, canonicalValue);
+    return { ...choice, canonicalValue };
+  });
+
+  return {
+    choices: canonicalChoices,
+    values: canonicalChoices.map((choice) => choice.canonicalValue),
+    canonicalToWireValue,
+    wireToCanonicalValue,
+  };
+};
+
 const currentValueIn = (
   option: AcpSelectConfigOption,
-  values: ReadonlyArray<string>,
-): string | undefined =>
-  option.currentValue.length > 0 && values.includes(option.currentValue)
-    ? option.currentValue
-    : undefined;
+  wireToCanonicalValue: ReadonlyMap<string, string>,
+): string | undefined => wireToCanonicalValue.get(option.currentValue);
 
 const projectReasoningConfig = (
   option: AcpSelectConfigOption | undefined,
@@ -120,17 +176,17 @@ const projectReasoningConfig = (
   const choices = uniqueOptions(flattenAcpSelectOptions(option));
   if (choices.length === 0) return undefined;
 
-  const values = choices.map((choice) => choice.value);
-  const currentValue = currentValueIn(option, values);
+  const canonical = canonicalizeOptions(choices);
+  const currentValue = currentValueIn(option, canonical.wireToCanonicalValue);
   const descriptor = {
     id: T3_REASONING_OPTION_ID,
     label: nonEmpty(option.name) ?? "Reasoning",
     type: "select",
-    options: choices.map((choice) => ({
-      id: choice.value,
+    options: canonical.choices.map((choice) => ({
+      id: choice.canonicalValue,
       label: choice.name,
       ...(choice.description ? { description: choice.description } : {}),
-      ...(choice.value === currentValue ? { isDefault: true } : {}),
+      ...(choice.canonicalValue === currentValue ? { isDefault: true } : {}),
     })),
     ...(nonEmpty(option.description) ? { description: nonEmpty(option.description) } : {}),
     ...(currentValue ? { currentValue } : {}),
@@ -138,7 +194,9 @@ const projectReasoningConfig = (
 
   return {
     configId: option.id,
-    values,
+    values: canonical.values,
+    canonicalToWireValue: canonical.canonicalToWireValue,
+    wireToCanonicalValue: canonical.wireToCanonicalValue,
     descriptor,
     ...(currentValue ? { currentValue } : {}),
   };
@@ -153,26 +211,25 @@ export function projectAcpConfigOptions(
   options: ReadonlyArray<AcpSchema.SessionConfigOption> | null | undefined,
 ) {
   const configOptions = options ?? [];
-  const modelOption = findAcpConfigOption(configOptions, ACP_MODEL_CONFIG_ID);
-  const selectModelOption = modelOption?.type === "select" ? modelOption : undefined;
+  const selectModelOption = findModelConfigOption(configOptions);
   const modelChoices = selectModelOption
     ? uniqueOptions(flattenAcpSelectOptions(selectModelOption))
     : [];
-  const modelValues = modelChoices.map((choice) => choice.value);
+  const canonicalModels = canonicalizeOptions(modelChoices);
   const currentModel = selectModelOption
-    ? currentValueIn(selectModelOption, modelValues)
+    ? currentValueIn(selectModelOption, canonicalModels.wireToCanonicalValue)
     : undefined;
   const reasoningConfig = projectReasoningConfig(findReasoningConfigOption(configOptions));
   const capabilities = reasoningConfig ? { optionDescriptors: [reasoningConfig.descriptor] } : null;
 
-  const models = modelChoices.map(
+  const models = canonicalModels.choices.map(
     (choice) =>
       ({
-        slug: choice.value,
+        slug: choice.canonicalValue,
         name: choice.name,
         ...(choice.groupName ? { subProvider: choice.groupName } : {}),
         isCustom: false,
-        ...(choice.value === currentModel ? { isDefault: true } : {}),
+        ...(choice.canonicalValue === currentModel ? { isDefault: true } : {}),
         capabilities,
       }) satisfies ServerProviderModel,
   );
@@ -180,7 +237,9 @@ export function projectAcpConfigOptions(
   const modelConfig: ProjectedAcpSelectConfig | undefined = selectModelOption
     ? {
         configId: selectModelOption.id,
-        values: modelValues,
+        values: canonicalModels.values,
+        canonicalToWireValue: canonicalModels.canonicalToWireValue,
+        wireToCanonicalValue: canonicalModels.wireToCanonicalValue,
         ...(currentModel ? { currentValue: currentModel } : {}),
       }
     : undefined;
@@ -213,5 +272,8 @@ export function getAcpConfigOptionUpdate(
   ) {
     return undefined;
   }
-  return { configId: config.configId, value: requestedValue };
+
+  const wireValue = config.canonicalToWireValue.get(requestedValue);
+  if (wireValue === undefined) return undefined;
+  return { configId: config.configId, value: wireValue };
 }
