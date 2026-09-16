@@ -17,11 +17,13 @@ orchestration layer does not know which one is behind a thread.
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
 
-[`FirstPartyProviderAdapters.ts`][first-party] separately registers the compiled Prime driver as
-`prime-rpc@1.0.0` using the same pinned package identity and negotiated capability fields as external
-packages. This is a server-private transition bridge: Prime remains compiled into this build and can
-still use private Effect services, managed snapshots, filesystem behavior, and text generation. It
-is not an independently installable `@t3tools/provider-adapter` package.
+[`FirstPartyProviderAdapters.ts`][first-party] registers the compiled Prime driver as
+`prime-rpc@1.0.0`. [`ProviderAdapterManifestCatalog.ts`][manifest-catalog] also publishes the compiled
+DeepSeek Harness package described below. Both use the same pinned package identity and negotiated
+capability fields as external packages. Prime is a server-private transition bridge: it remains
+compiled into this build and can still use private Effect services, managed snapshots, filesystem
+behavior, and text generation. It is not an independently installable
+`@t3tools/provider-adapter` package.
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
@@ -120,10 +122,23 @@ package-less rebinds clear stale projected identities without rewriting old even
 resume upgrades the binding to the loaded package identity.
 
 Web, desktop renderer, and mobile clients receive normalized snapshots/events, declarative
-configuration schemas, and package identity, never `modulePath` or executable code. Each
-materialized instance runs in a registry-owned child scope. The host continues to own routing, persistence, session reaping, orchestration, checkpoints,
-and fallback text generation. Package activation currently requires a server restart; there is no
-installer, update UI, remote package source, client plugin surface, or external text-generation hook.
+configuration schemas, and package identity, never `modulePath` or executable code. The optional
+`ServerConfig.providerAdapterManifests` catalog combines validated compiled manifests with manifests
+from successfully loaded trusted packages. It deterministically sorts and deduplicates exact package
+identities. Startup rejects trusted-package driver collisions and exact identity collisions with
+compiled packages rather than letting local code shadow them.
+
+The web client and desktop renderer use a small schema subset for adapter settings: strings, booleans,
+numbers, integers, string enums, and string arrays. They preserve fields or schemas they cannot edit.
+A configured instance is editable only when its driver and exact package ID, version, and protocol
+match a live provider or catalog manifest. A stale instance stays visible and deletable, but its
+configuration is read-only until that exact package is installed again. Mobile administration for
+these package-backed instances is deferred.
+
+Each materialized instance runs in a registry-owned child scope. The host continues to own routing,
+persistence, session reaping, orchestration, checkpoints, and fallback text generation. Package
+activation currently requires a server restart; there is no installer, update UI, remote package
+source, client plugin surface, or external text-generation hook.
 
 Adding an unversioned built-in driver still means writing the driver plus adapter and adding it to
 `BUILT_IN_DRIVERS`. A compiled first-party registration instead belongs in
@@ -134,6 +149,38 @@ lives in
 `apps/server/src/provider/testFixtures/` (`echoAdapterPackage.mjs` plus `echoHarness.mjs`) and its
 conformance suite proves the seam end to end: process supervision, JSONL framing, canonical event
 translation, interrupts, rollback, and graceful stops without crash events.
+
+### ACP runtime and DeepSeek Harness
+
+[`@t3tools/provider-adapter-acp`][acp-package] is the generic package runtime for ACP v1 agents. It
+runs one host-supervised stdio process and multiplexes new and resumed sessions over its JSON-RPC
+connection. T3 owns spawning, environment injection, bounded stdio, exit detection, termination,
+and scope cleanup; the runtime owns ACP initialization, request correlation, session attachment, and
+translation.
+
+[`AcpEventMapper.ts`][acp-mapper] maps standard ACP updates to canonical provider events. Agent
+message and thought chunks become assistant and reasoning item lifecycles; tool calls become typed
+tool lifecycle items; plans become `turn.plan.updated`; available commands, current mode, and config
+options become `session.configured`; session information becomes `thread.metadata.updated`; and
+usage becomes `thread.token-usage.updated`. User message echoes are ignored because the prompt is
+already in the canonical timeline. Every emitted event carries the provider, instance, thread, turn
+when applicable, and exact adapter package identity.
+
+The runtime advertises only features that are both implemented by the runtime and declared by the
+package manifest. A manifest that requires `session.resume` makes missing ACP resume support an
+`initialize` failure; a package that does not declare resume cannot use it even if the agent offers
+it. Local `readThread` history is sanitized and bounded separately from the lossless live event
+stream: at most 100 turns and 200 items per turn, with bounded strings, collections, and nesting.
+Attachments, plan interaction mode, conversation rollback, and structured input are rejected and
+remain outside the advertised capability set. Incoming ACP plan updates are still projected as
+canonical plan events.
+
+[`DeepSeekHarnessAdapter.ts`][deepseek] compiles the first shipped package on this runtime as
+`deepseek-harness-acp@1.0.0`, with driver `deepseekHarness`. Its default launch is
+`dsh --profile acp`; configuration can override the command, arguments, and working directory, while
+secrets remain provider-instance environment variables. Compatibility was validated against the
+real npm release `@deepseek-ai/dsh@0.1.5-rc.2`, built from git commit
+`c291e7961a515f6d7af9304e7fd1d257929aef26`, in an isolated keyless smoke test.
 
 ### Pi RPC reference adapter
 
@@ -240,3 +287,7 @@ when a request opens (approval) or user input is requested, via
 [cmd]: ../../apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 [checkpoint]: ../../apps/server/src/orchestration/Layers/CheckpointReactor.ts
 [external]: ../../apps/server/src/provider/TrustedLocalProviderAdapters.ts
+[manifest-catalog]: ../../apps/server/src/provider/ProviderAdapterManifestCatalog.ts
+[acp-package]: ../../packages/provider-adapter-acp/src/index.ts
+[acp-mapper]: ../../packages/provider-adapter-acp/src/AcpEventMapper.ts
+[deepseek]: ../../apps/server/src/provider/DeepSeekHarnessAdapter.ts
