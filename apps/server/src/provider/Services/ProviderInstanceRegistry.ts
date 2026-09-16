@@ -18,7 +18,11 @@
  *
  * @module provider/Services/ProviderInstanceRegistry
  */
-import type { ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
+import type {
+  ProviderAdapterManifestV1,
+  ProviderInstanceId,
+  ServerProvider,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as PubSub from "effect/PubSub";
@@ -47,6 +51,12 @@ export interface ProviderInstanceRegistryShape {
    * directly into `ProviderRegistry` output.
    */
   readonly listUnavailable: Effect.Effect<ReadonlyArray<ServerProvider>>;
+  /**
+   * Safe declarative metadata for every adapter package loaded at startup.
+   * This catalog is independent of provider instance creation and never
+   * contains trusted-local registration records or executable module paths.
+   */
+  readonly listAdapterManifests: Effect.Effect<ReadonlyArray<ProviderAdapterManifestV1>>;
   /**
    * Push notification stream emitted whenever the registry's contents
    * change — instance added, removed, or rebuilt. The payload is `void`

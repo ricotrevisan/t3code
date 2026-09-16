@@ -36,6 +36,7 @@ import {
   defaultInstanceIdForDriver,
   providerInstanceConfigEnabledFlag,
   ProviderInstanceId,
+  type ProviderAdapterManifestV1,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
   type ProviderDriverKind,
@@ -52,6 +53,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import { normalizeProviderAdapterManifests } from "../ProviderAdapterManifestCatalog.ts";
 import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
 import {
   ProviderInstanceRegistry,
@@ -398,6 +400,7 @@ const makeReconcile = <R>(input: {
  */
 export const makeProviderInstanceRegistry = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly adapterManifests?: ReadonlyArray<ProviderAdapterManifestV1>;
   readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
   readonly configMap: ProviderInstanceConfigMap;
 }): Effect.Effect<
@@ -412,6 +415,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
     const driversById = new Map<ProviderDriverKind, AnyProviderDriver<R>>(
       input.drivers.map((driver) => [driver.driverKind, driver]),
     );
+    const adapterManifests = normalizeProviderAdapterManifests(input.adapterManifests ?? []);
 
     // Capture the enclosing scope so per-instance child scopes can be
     // attached to it at `reconcile` time. Without this, `reconcile`
@@ -455,6 +459,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
       listUnavailable: Ref.get(unavailable).pipe(
         Effect.map((map) => Array.from(map.values()) as ReadonlyArray<ServerProvider>),
       ),
+      listAdapterManifests: Effect.succeed(adapterManifests),
       // Getters: each read constructs a fresh Stream / Effect descriptor
       // so multiple consumers don't share a single already-started
       // Channel or subscription. Matches the pattern `ProviderRegistry`
@@ -488,6 +493,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
  */
 export const ProviderInstanceRegistryLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly adapterManifests?: ReadonlyArray<ProviderAdapterManifestV1>;
   readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
   readonly configMap: ProviderInstanceConfigMap;
 }): Layer.Layer<ProviderInstanceRegistry, never, R> =>
@@ -504,6 +510,7 @@ export const ProviderInstanceRegistryLayer = <R>(input: {
  */
 export const ProviderInstanceRegistryMutableLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly adapterManifests?: ReadonlyArray<ProviderAdapterManifestV1>;
   readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
   readonly configMap: ProviderInstanceConfigMap;
 }): Layer.Layer<ProviderInstanceRegistry | ProviderInstanceRegistryMutator, never, R> =>

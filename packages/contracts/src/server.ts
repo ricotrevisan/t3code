@@ -22,6 +22,7 @@ import { ModelCapabilities } from "./model.ts";
 import { RuntimeMode } from "./orchestration.ts";
 import {
   ProviderAdapterConfigSchema,
+  ProviderAdapterManifestCatalog,
   ProviderAdapterPackageReference,
   ProviderAdapterProtocolCapabilitiesV1,
 } from "./providerAdapter.ts";
@@ -438,6 +439,11 @@ export const ServerConfig = Schema.Struct({
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,
   providers: ServerProviders,
+  /**
+   * Safe declarative metadata for provider adapter packages loaded by this server.
+   * Absent on older servers. Executable registration details stay server-local.
+   */
+  providerAdapterManifests: Schema.optionalKey(ProviderAdapterManifestCatalog),
   // Editor ids grow over time; drop ones this build does not know rather than
   // failing the whole config decode.
   availableEditors: ForwardCompatibleArray(EditorId),

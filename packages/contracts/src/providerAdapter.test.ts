@@ -3,12 +3,15 @@ import * as Schema from "effect/Schema";
 
 import {
   isProviderAdapterManifestCompatible,
+  ProviderAdapterManifestCatalog,
   ProviderAdapterManifestV1,
   ProviderAdapterProtocolCapabilitiesV1,
   T3_PROVIDER_ADAPTER_PROTOCOL_VERSION,
 } from "./providerAdapter.ts";
 
 const decodeManifest = Schema.decodeUnknownSync(ProviderAdapterManifestV1);
+const decodeManifestCatalog = Schema.decodeUnknownSync(ProviderAdapterManifestCatalog);
+const encodeManifestCatalog = Schema.encodeSync(ProviderAdapterManifestCatalog);
 const decodeCapabilities = Schema.decodeUnknownSync(ProviderAdapterProtocolCapabilitiesV1);
 
 const manifest = (overrides: Record<string, unknown> = {}) => ({
@@ -120,6 +123,29 @@ describe("ProviderAdapterManifestV1", () => {
     expect(acp.transport.protocol).toBe("acp-v1");
     expect(acp.capabilities).not.toContain("turn.steer");
     expect(acp.capabilities).not.toContain("request.structured-input");
+  });
+});
+
+describe("ProviderAdapterManifestCatalog", () => {
+  it("round-trips only validated declarative manifests", () => {
+    const decoded = decodeManifestCatalog([
+      manifest({
+        modulePath: "/trusted-local/fixture.mjs",
+        registration: { enabled: true },
+      }),
+    ]);
+    const encoded = encodeManifestCatalog(decoded);
+
+    expect(encoded).toHaveLength(1);
+    expect(encoded[0]).not.toHaveProperty("modulePath");
+    expect(encoded[0]).not.toHaveProperty("registration");
+    expect(decodeManifestCatalog(encoded)).toEqual(decoded);
+  });
+
+  it("drops manifest versions this client does not understand", () => {
+    const decoded = decodeManifestCatalog([manifest(), manifest({ protocolVersion: 2 })]);
+
+    expect(decoded).toEqual([decodeManifest(manifest())]);
   });
 });
 

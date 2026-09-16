@@ -62,6 +62,10 @@ import {
   FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
   type FirstPartyProviderAdaptersEnv,
 } from "../FirstPartyProviderAdapters.ts";
+import {
+  FIRST_PARTY_PROVIDER_ADAPTER_MANIFESTS,
+  makeProviderAdapterManifestCatalog,
+} from "../ProviderAdapterManifestCatalog.ts";
 import { loadTrustedProviderAdapterPackages } from "../TrustedLocalProviderAdapters.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
@@ -188,6 +192,9 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
     const external = yield* loadTrustedProviderAdapterPackages({
       registryPath: serverConfig.providerAdapterRegistryPath,
       reservedDriverKinds: new Set(SHIPPED_PROVIDER_DRIVERS.map((driver) => driver.driverKind)),
+      reservedPackageReferences: FIRST_PARTY_PROVIDER_ADAPTER_MANIFESTS.map(
+        ({ id, version, protocolVersion }) => ({ id, version, protocolVersion }),
+      ),
     });
     yield* Effect.forEach(
       external.diagnostics,
@@ -211,6 +218,7 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
 
     const mutableLayer = ProviderInstanceRegistryMutableLayer({
       drivers: [...SHIPPED_PROVIDER_DRIVERS, ...external.drivers],
+      adapterManifests: makeProviderAdapterManifestCatalog(external.manifests),
       unavailableDriverReasons: external.unavailableDriverReasons,
       configMap: initialConfigMap,
     });

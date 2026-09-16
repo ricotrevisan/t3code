@@ -1,21 +1,56 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_SERVER_SETTINGS,
+  ProviderAdapterManifestV1,
   ProviderAdapterPackageId,
   ProviderAdapterPackageVersion,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerSettings,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 
+import { makeProviderAdapterManifestCatalog } from "../ProviderAdapterManifestCatalog.ts";
 import { PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE } from "../FirstPartyProviderAdapters.ts";
 import { deriveProviderInstanceConfigMap } from "./ProviderInstanceRegistryHydration.ts";
+
+const decodeProviderAdapterManifest = Schema.decodeUnknownSync(ProviderAdapterManifestV1);
 
 const withProviderInstances = (
   providerInstances: ServerSettings["providerInstances"],
 ): ServerSettings => ({
   ...DEFAULT_SERVER_SETTINGS,
   providerInstances,
+});
+
+describe("provider adapter manifest catalog hydration", () => {
+  it("includes compiled and successfully loaded manifests without registrations", () => {
+    const trustedLocal = decodeProviderAdapterManifest({
+      protocolVersion: 1,
+      id: "aaa-external",
+      version: "2.0.0",
+      driver: "externalHarness",
+      displayName: "External Harness",
+      hostProtocol: { minimum: 1, maximum: 1 },
+      transport: {
+        kind: "supervised-stdio",
+        protocol: "jsonl-rpc",
+        sessionConcurrency: "one-per-process",
+      },
+      capabilities: ["session.resume"],
+      configSchema: { type: "object", properties: {} },
+      modulePath: "/must/not/cross/the/wire.mjs",
+    });
+
+    const catalog = makeProviderAdapterManifestCatalog([trustedLocal, trustedLocal]);
+
+    expect(catalog.map(({ id, version }) => `${id}@${version}`)).toEqual([
+      "aaa-external@2.0.0",
+      "deepseek-harness-acp@1.0.0",
+      "prime-rpc@1.0.0",
+    ]);
+    expect(JSON.stringify(catalog)).not.toContain("modulePath");
+  });
 });
 
 describe("deriveProviderInstanceConfigMap", () => {

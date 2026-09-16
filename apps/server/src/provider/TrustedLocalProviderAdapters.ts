@@ -14,6 +14,7 @@ import {
   ProviderAdapterPackageVersion,
   ProviderDriverKind,
   type ProviderAdapterManifestV1 as ProviderAdapterManifest,
+  type ProviderAdapterPackageReference,
   type ProviderDriverKind as ProviderDriverKindType,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -58,6 +59,7 @@ export interface ProviderAdapterPackageDiagnostic {
     | "package-invalid"
     | "package-incompatible"
     | "package-mismatch"
+    | "package-conflict"
     | "driver-conflict";
   readonly detail: string;
 }
@@ -72,6 +74,7 @@ export interface LoadedTrustedProviderAdapters {
 interface LoadTrustedProviderAdapterPackagesInput {
   readonly registryPath: string;
   readonly reservedDriverKinds: ReadonlySet<ProviderDriverKindType>;
+  readonly reservedPackageReferences?: ReadonlyArray<ProviderAdapterPackageReference>;
   readonly loadModule?: (moduleUrl: URL) => Promise<unknown>;
 }
 
@@ -82,6 +85,14 @@ const decodePackage = Schema.decodeUnknownEffect(ExternalProviderAdapterPackageV
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const packageIdentity = (
+  reference: Pick<ProviderAdapterPackageReference, "id" | "version" | "protocolVersion">,
+): string => `${reference.id}\u0000${reference.version}\u0000${reference.protocolVersion}`;
+
+const formatPackageIdentity = (
+  reference: Pick<ProviderAdapterPackageReference, "id" | "version" | "protocolVersion">,
+): string => `${reference.id}@${reference.version} (protocol ${reference.protocolVersion})`;
 
 const isProviderAdapterPackage = (value: {
   readonly manifest: ProviderAdapterManifest;
@@ -134,6 +145,9 @@ export const loadTrustedProviderAdapterPackages = Effect.fn("loadTrustedProvider
     const diagnostics: Array<ProviderAdapterPackageDiagnostic> = [];
     const claimedDrivers = new Set(input.reservedDriverKinds);
     const claimedPackages = new Set<string>();
+    const reservedPackageIdentities = new Set(
+      (input.reservedPackageReferences ?? []).map(packageIdentity),
+    );
     const loadModule = input.loadModule ?? ((url: URL) => import(url.href));
 
     for (const registration of registryResult.success.packages) {
@@ -213,6 +227,12 @@ export const loadTrustedProviderAdapterPackages = Effect.fn("loadTrustedProvider
       if (!isProviderAdapterManifestCompatible(manifest)) {
         const detail = `Adapter '${packageKey}' is incompatible with T3 provider protocol 1.`;
         diagnostics.push({ registration, code: "package-incompatible", detail });
+        unavailableDriverReasons.set(registration.driver, detail);
+        continue;
+      }
+      if (reservedPackageIdentities.has(packageIdentity(manifest))) {
+        const detail = `Adapter package '${formatPackageIdentity(manifest)}' conflicts with a compiled package identity. Choose a different package id or version.`;
+        diagnostics.push({ registration, code: "package-conflict", detail });
         unavailableDriverReasons.set(registration.driver, detail);
         continue;
       }

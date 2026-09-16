@@ -488,6 +488,46 @@ describe("trusted local provider adapter packages", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
+  it.effect("rejects an external package that reuses a compiled package identity", () =>
+    Effect.gen(function* () {
+      const compiledPackageReference = {
+        id: ProviderAdapterPackageId.make("prime-rpc"),
+        version: ProviderAdapterPackageVersion.make("1.0.0"),
+        protocolVersion: 1,
+      } as const;
+      const collidingRegistration = {
+        ...registration,
+        id: compiledPackageReference.id,
+        version: compiledPackageReference.version,
+      };
+      const registryPath = yield* writeRegistry([collidingRegistration]);
+      const loaded = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+        reservedPackageReferences: [compiledPackageReference],
+        loadModule: async () => ({
+          default: makeEchoPackage(undefined, {
+            id: compiledPackageReference.id,
+            version: compiledPackageReference.version,
+          }),
+        }),
+      });
+
+      assert.deepStrictEqual(loaded.drivers, []);
+      assert.deepStrictEqual(loaded.manifests, []);
+      assert.equal(loaded.diagnostics[0]?.code, "package-conflict");
+      assert.include(loaded.diagnostics[0]?.detail ?? "", "prime-rpc@1.0.0 (protocol 1)");
+      assert.include(
+        loaded.diagnostics[0]?.detail ?? "",
+        "Choose a different package id or version",
+      );
+      assert.include(
+        loaded.unavailableDriverReasons.get(ECHO_DRIVER) ?? "",
+        "compiled package identity",
+      );
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
   it.effect("does not allow an external package to replace a built-in driver", () =>
     Effect.gen(function* () {
       const registryPath = yield* writeRegistry([registration]);

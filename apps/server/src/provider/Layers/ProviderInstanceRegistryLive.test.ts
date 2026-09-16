@@ -50,8 +50,10 @@ import { BUILT_IN_DRIVERS } from "../builtInDrivers.ts";
 import { CodexDriver } from "../Drivers/CodexDriver.ts";
 import {
   FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
+  PRIME_PROVIDER_ADAPTER_MANIFEST,
   PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
 } from "../FirstPartyProviderAdapters.ts";
+import { DEEPSEEK_HARNESS_ADAPTER_MANIFEST } from "../DeepSeekHarnessAdapter.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
@@ -158,6 +160,53 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+  );
+
+  it.live("discovers installed adapters before the first provider instance", () =>
+    Effect.gen(function* () {
+      const { registry } = yield* makeProviderInstanceRegistry<never>({
+        drivers: [],
+        adapterManifests: [PRIME_PROVIDER_ADAPTER_MANIFEST, DEEPSEEK_HARNESS_ADAPTER_MANIFEST],
+        configMap: {},
+      });
+
+      expect(yield* registry.listInstances).toEqual([]);
+      expect((yield* registry.listAdapterManifests).map((manifest) => manifest.id)).toEqual([
+        "deepseek-harness-acp",
+        "prime-rpc",
+      ]);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.live("catalogs installed adapters before a valid provider instance exists", () =>
+    Effect.gen(function* () {
+      const invalidInstanceId = ProviderInstanceId.make("invalid_codex");
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [CodexDriver],
+        adapterManifests: [
+          PRIME_PROVIDER_ADAPTER_MANIFEST,
+          DEEPSEEK_HARNESS_ADAPTER_MANIFEST,
+          PRIME_PROVIDER_ADAPTER_MANIFEST,
+        ],
+        configMap: {
+          [invalidInstanceId]: {
+            driver: ProviderDriverKind.make("codex"),
+            config: { enabled: "not-a-boolean" },
+          },
+        },
+      });
+
+      expect(yield* registry.listInstances).toEqual([]);
+      expect((yield* registry.listUnavailable).map((provider) => provider.instanceId)).toEqual([
+        invalidInstanceId,
+      ]);
+      expect(
+        (yield* registry.listAdapterManifests).map(({ id, version }) => `${id}@${version}`),
+      ).toEqual(["deepseek-harness-acp@1.0.0", "prime-rpc@1.0.0"]);
+      expect(
+        (yield* registry.listAdapterManifests).every((manifest) => !("modulePath" in manifest)),
+      ).toBe(true);
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.live("boots two independent codex instances from a ProviderInstanceConfigMap", () =>

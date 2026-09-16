@@ -12,6 +12,9 @@ const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
 const decodeServerProviders = Schema.decodeUnknownSync(ServerProviders);
 const decodeUpsertKeybindingResult = Schema.decodeUnknownSync(ServerUpsertKeybindingResult);
 const decodeAvailableEditors = Schema.decodeUnknownSync(ServerConfig.fields.availableEditors);
+const decodeServerConfigAdapterCatalog = Schema.decodeUnknownSync(
+  Schema.Struct({ providerAdapterManifests: ServerConfig.fields.providerAdapterManifests }),
+);
 
 const baseProviderSnapshot = {
   instanceId: "codex",
@@ -131,6 +134,34 @@ describe("ServerProvider", () => {
 });
 
 describe("server config forward compatibility", () => {
+  it("decodes configs from old servers without an adapter catalog", () => {
+    expect(decodeServerConfigAdapterCatalog({})).toEqual({});
+  });
+
+  it("decodes the optional safe adapter manifest catalog", () => {
+    const parsed = decodeServerConfigAdapterCatalog({
+      providerAdapterManifests: [
+        {
+          protocolVersion: 1,
+          id: "fixture-adapter",
+          version: "1.2.3",
+          driver: "fixtureHarness",
+          displayName: "Fixture Harness",
+          hostProtocol: { minimum: 1, maximum: 1 },
+          transport: {
+            kind: "supervised-stdio",
+            protocol: "jsonl-rpc",
+            sessionConcurrency: "one-per-process",
+          },
+          capabilities: ["session.resume"],
+          configSchema: { type: "object", properties: {} },
+        },
+      ],
+    });
+
+    expect(parsed.providerAdapterManifests?.[0]?.id).toBe("fixture-adapter");
+  });
+
   it("drops config issues with kinds this build does not know", () => {
     const parsed = decodeUpsertKeybindingResult({
       keybindings: [],

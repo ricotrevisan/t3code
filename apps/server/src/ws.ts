@@ -81,6 +81,7 @@ import {
   observeRpcStream as instrumentRpcStream,
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
+import * as ProviderInstanceRegistry from "./provider/Services/ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
@@ -433,6 +434,7 @@ const makeWsRpcLayer = (
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
+      const providerInstanceRegistry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerService = yield* ProviderService.ProviderService;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
@@ -1091,6 +1093,7 @@ const makeWsRpcLayer = (
           keybindings: keybindingsConfig.keybindings,
           issues: keybindingsConfig.issues,
           providers,
+          providerAdapterManifests: yield* providerInstanceRegistry.listAdapterManifests,
           availableEditors: yield* resolveAvailableEditorsForConfig(
             externalLauncher.resolveAvailableEditors(),
           ),

@@ -6,7 +6,7 @@
  * the package module itself.
  */
 import * as Schema from "effect/Schema";
-import { PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ForwardCompatibleArray, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   ProviderAdapterPackageId,
   ProviderAdapterPackageVersion,
@@ -87,6 +87,13 @@ export const ProviderAdapterManifestV1 = Schema.Struct({
   configSchema: ProviderAdapterConfigSchema,
 });
 export type ProviderAdapterManifestV1 = typeof ProviderAdapterManifestV1.Type;
+
+/**
+ * A server may load adapter protocol versions this client does not know yet.
+ * Keep every V1 entry it can decode instead of failing the whole config.
+ */
+export const ProviderAdapterManifestCatalog = ForwardCompatibleArray(ProviderAdapterManifestV1);
+export type ProviderAdapterManifestCatalog = typeof ProviderAdapterManifestCatalog.Type;
 
 export const isProviderAdapterManifestCompatible = (
   manifest: ProviderAdapterManifestV1,
