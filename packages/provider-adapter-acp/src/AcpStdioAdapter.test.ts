@@ -1134,6 +1134,27 @@ describe("AcpStdioAdapter", () => {
         const snapshot = yield* instance.adapter.readThread(threadId);
         assert.isAtMost(snapshot.turns[0]?.items.length ?? 0, 200);
         assert.isFalse(containsRawKey(snapshot));
+        const storedEvents = (snapshot.turns[0]?.items ?? []).filter(
+          (item): item is Record<string, unknown> =>
+            typeof item === "object" &&
+            item !== null &&
+            "type" in item &&
+            item.type !== "userMessage",
+        );
+        assert.isTrue(
+          storedEvents.every(
+            (event) =>
+              event.provider === manifest.driver &&
+              event.providerInstanceId === instanceId &&
+              event.threadId === threadId &&
+              JSON.stringify(event.adapterPackage) ===
+                JSON.stringify({
+                  id: manifest.id,
+                  version: manifest.version,
+                  protocolVersion: manifest.protocolVersion,
+                }),
+          ),
+        );
       }),
     ),
   );
