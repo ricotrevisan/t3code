@@ -10,7 +10,8 @@
  *
  *  2. **Many drivers, one registry** — the "all drivers slice" describe
  *     block below configures one instance of every shipped driver
- *     (`codex`, `claudeAgent`, `cursor`, `grok`, `opencode`, `primeAgent`) in a single
+ *     (five unversioned built-ins plus the compiled, versioned `primeAgent`
+ *     first-party adapter) in a single
  *     `ProviderInstanceConfigMap` and asserts the registry boots them all
  *     without cross-contamination. This proves the driver SPI is uniform
  *     across every provider — any driver plugs into the registry through
@@ -31,6 +32,7 @@ import {
   type GrokSettings,
   type OpenCodeSettings,
   type PrimeSettings,
+  ProviderAdapterPackageVersion,
   ProviderDriverKind,
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
@@ -44,12 +46,12 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
+import { BUILT_IN_DRIVERS } from "../builtInDrivers.ts";
 import { CodexDriver } from "../Drivers/CodexDriver.ts";
-import { CursorDriver } from "../Drivers/CursorDriver.ts";
-import { GrokDriver } from "../Drivers/GrokDriver.ts";
-import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
-import { PrimeDriver } from "../Drivers/PrimeDriver.ts";
+import {
+  FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
+  PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
+} from "../FirstPartyProviderAdapters.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
@@ -323,6 +325,33 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
   );
 
+  it.live("fails closed for an explicitly stale Prime package reference", () =>
+    Effect.gen(function* () {
+      const primeId = ProviderInstanceId.make("prime_stale");
+      const stalePackage = {
+        ...PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
+        version: ProviderAdapterPackageVersion.make("0.9.0"),
+      };
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
+        configMap: {
+          [primeId]: {
+            driver: ProviderDriverKind.make("primeAgent"),
+            adapterPackage: stalePackage,
+            enabled: false,
+            config: makePrimeConfig({}),
+          },
+        },
+      });
+
+      expect(yield* registry.listInstances).toEqual([]);
+      const unavailable = yield* registry.listUnavailable;
+      expect(unavailable).toHaveLength(1);
+      expect(unavailable[0]?.adapterPackage).toEqual(stalePackage);
+      expect(unavailable[0]?.unavailableReason).toContain("does not match loaded package");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.live("boots one instance of every shipped driver from a single config map", () =>
     Effect.gen(function* () {
       const codexId = ProviderInstanceId.make("codex_default");
@@ -375,6 +404,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         },
         [primeId]: {
           driver: primeDriverKind,
+          adapterPackage: PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
           displayName: "Prime Agent",
           enabled: false,
           config: makePrimeConfig({}),
@@ -382,7 +412,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       };
 
       const { registry } = yield* makeProviderInstanceRegistry({
-        drivers: [CodexDriver, ClaudeDriver, CursorDriver, GrokDriver, OpenCodeDriver, PrimeDriver],
+        drivers: [...BUILT_IN_DRIVERS, ...FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS],
         configMap,
       });
 
@@ -495,6 +525,9 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       const primeSnapshot = yield* prime!.snapshot.getSnapshot;
       expect(primeSnapshot.instanceId).toBe(primeId);
       expect(primeSnapshot.driver).toBe(primeDriverKind);
+      expect(primeSnapshot.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
+      expect(primeSnapshot.adapterConfigSchema).toBeDefined();
+      expect(primeSnapshot.adapterCapabilities).toBeDefined();
       expect(primeSnapshot.enabled).toBe(false);
       expect(primeSnapshot.continuation?.groupKey).toBe(`${primeDriverKind}:instance:${primeId}`);
     }).pipe(Effect.provide(testLayer)),

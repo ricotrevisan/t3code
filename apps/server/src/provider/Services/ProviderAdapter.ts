@@ -57,7 +57,10 @@ export interface ProviderAdapterShape<TError> {
    * Provider kind implemented by this adapter.
    */
   readonly provider: ProviderDriverKind;
-  /** Exact external package identity, absent for built-in adapters. */
+  /**
+   * Exact versioned package identity. Present for trusted-local packages and
+   * compiled first-party package bridges; absent for unversioned built-ins.
+   */
   readonly adapterPackage?: ProviderAdapterPackageReference | undefined;
   readonly capabilities: ProviderAdapterCapabilities;
 

@@ -7,7 +7,7 @@ orchestration layer does not know which one is behind a thread.
 
 ## Built-in drivers
 
-[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with six entries:
+[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with five unversioned core entries:
 
 | Driver kind   | Driver source                           |
 | ------------- | --------------------------------------- |
@@ -16,7 +16,12 @@ orchestration layer does not know which one is behind a thread.
 | `cursor`      | [`Drivers/CursorDriver.ts`][cursor]     |
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
-| `primeAgent`  | [`Drivers/PrimeDriver.ts`][prime]       |
+
+[`FirstPartyProviderAdapters.ts`][first-party] separately registers the compiled Prime driver as
+`prime-rpc@1.0.0` using the same pinned package identity and negotiated capability fields as external
+packages. This is a server-private transition bridge: Prime remains compiled into this build and can
+still use private Effect services, managed snapshots, filesystem behavior, and text generation. It
+is not an independently installable `@t3tools/provider-adapter` package.
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
@@ -37,7 +42,8 @@ Two registries separate configuration from live processes:
 [`ProviderService`][service] sits on top. It combines the adapter registry with the provider session
 directory to route session and turn operations for a thread, so callers name a thread, not an agent.
 
-Built-in drivers are compiled into the server. Trusted local adapters can instead be registered in
+Built-in drivers and first-party adapter bridges are compiled into the server. Trusted local
+adapters can instead be registered in
 `<T3 state dir>/provider-adapters.json` and loaded at server startup. This file is deliberately
 separate from `ServerSettings.providerInstances`:
 
@@ -87,7 +93,8 @@ default configuration, and an instance factory. The manifest pins package identi
 compatibility, supervised stdio protocol and session concurrency, JSON-shaped configuration schema,
 and the maximum capabilities the package may negotiate. [`TrustedLocalProviderAdapters.ts`][external]
 validates the registration, module, and compatibility before wrapping it as a host driver. A package
-cannot replace a built-in driver. An external instance is materialized only when its pinned package
+cannot replace a built-in or compiled first-party driver. An external instance is materialized only
+when its pinned package
 reference exactly matches the loaded package. Missing, invalid, mismatched, or incompatible packages
 do not stop server startup; configured instances stay visible as unavailable with the package failure
 reason and requested package identity.
@@ -109,9 +116,12 @@ scope. The host continues to own routing, persistence, session reaping, orchestr
 and fallback text generation. Package activation currently requires a server restart; there is no
 installer, update UI, remote package source, client plugin surface, or external text-generation hook.
 
-Adding a built-in driver still means writing the driver plus adapter and adding it to
-`BUILT_IN_DRIVERS`. Adding a trusted local package requires no T3 rebuild and targets only the
-versioned `@t3tools/provider-adapter` interface. A real subprocess-driven echo package lives in
+Adding an unversioned built-in driver still means writing the driver plus adapter and adding it to
+`BUILT_IN_DRIVERS`. A compiled first-party registration instead belongs in
+`FirstPartyProviderAdapters.ts` and must carry a package identity, declarative configuration schema,
+and a declared capability ceiling. Adding a trusted local package requires no T3 rebuild and targets
+only the versioned `@t3tools/provider-adapter` interface. A real subprocess-driven echo package
+lives in
 `apps/server/src/provider/testFixtures/` (`echoAdapterPackage.mjs` plus `echoHarness.mjs`) and its
 conformance suite proves the seam end to end: process supervision, JSONL framing, canonical event
 translation, interrupts, rollback, and graceful stops without crash events.
@@ -148,15 +158,23 @@ updates are ignored. The structured-input mapping handles select, confirm, input
 it does not provide a general extension UI. Pi is still a reference fixture, not a shipped provider
 installation flow.
 
-Prime remains a built-in driver. Its RPC sessions and model/approval probes now acquire processes
-through the same host-owned supervisor used by external packages. `PrimeRpcClient` receives the
-supervised process and owns only JSONL framing, request correlation, event fanout, and Prime error
-translation. The adapter preserves Prime-specific turn and session cleanup while the host owns
-bounded stdin, spawn resolution, exit detection, termination, and scope finalizers.
+Prime is no longer in `BUILT_IN_DRIVERS`. The server-private first-party bridge registers its
+compiled driver as `prime-rpc@1.0.0`, reserves `primeAgent` against trusted-local replacement, and
+pins legacy or explicitly unpinned Prime instance configs during hydration. An explicit stale package
+reference is never rewritten; normal registry matching leaves that instance visible but unavailable.
+The bridge stamps the package identity on the live instance, adapter, snapshots, and sessions, and
+adds the declarative config schema plus negotiated capabilities to snapshots. Negotiated features
+must be a subset of the manifest declaration.
 
-Prime's filesystem resources, native resume validation, managed snapshots, and text-generation
-policy are still host-side concerns; V1 does not expose the server's Effect services to packages. A
-shared protocol/process seam must not bypass those requirements or be described as an independently
+Prime's RPC sessions and model/approval probes acquire processes through the same host-owned
+supervisor used by external packages. `PrimeRpcClient` receives the supervised process and owns only
+JSONL framing, request correlation, event fanout, and Prime error translation. The adapter preserves
+Prime-specific turn and session cleanup while the host owns bounded stdin, spawn resolution, exit
+detection, termination, and scope finalizers.
+
+This registration is transitional and compiled/private. Prime's filesystem resources, native resume
+validation, managed snapshots, and text-generation policy remain host-side concerns; V1 does not
+expose the server's Effect services to packages. The bridge must not be described as an independently
 installable Prime package before that separation exists.
 
 ## How provider work is requested
@@ -196,6 +214,7 @@ when a request opens (approval) or user input is requested, via
 `flushBufferedAssistantMessagesForTurn`.
 
 [drivers]: ../../apps/server/src/provider/builtInDrivers.ts
+[first-party]: ../../apps/server/src/provider/FirstPartyProviderAdapters.ts
 [codex]: ../../apps/server/src/provider/Drivers/CodexDriver.ts
 [claude]: ../../apps/server/src/provider/Drivers/ClaudeDriver.ts
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts

@@ -11,7 +11,8 @@
  *   - `getInstance(instanceId)` — for routing turn/session calls.
  *   - `listInstances` — for snapshot aggregation in `ProviderRegistry`.
  *   - `listUnavailable` — `ServerProvider` shadows for instances whose
- *     driver is not registered in this build (rollback / fork tolerance).
+ *     driver or pinned adapter package is not registered in this build
+ *     (rollback / fork tolerance).
  *   - `streamChanges` — coalesced "registry mutated" pings so consumers
  *     can re-pull lists or re-broadcast.
  *
