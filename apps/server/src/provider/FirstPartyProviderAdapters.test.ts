@@ -206,6 +206,14 @@ describe("first-party provider adapter bridge", () => {
     ]);
   });
 
+  it("keeps instance enablement out of the Prime adapter config manifest", () => {
+    expect(PRIME_PROVIDER_ADAPTER_MANIFEST.configSchema.properties).not.toHaveProperty("enabled");
+    expect(PRIME_PROVIDER_ADAPTER_MANIFEST.configSchema.properties).toMatchObject({
+      binaryPath: { default: "prime-agent" },
+      launchArgs: { default: "" },
+    });
+  });
+
   it.effect("stamps the Prime package identity, config schema, and negotiated capabilities", () =>
     Effect.gen(function* () {
       const driver = makeFirstPartyProviderAdapterDriver({

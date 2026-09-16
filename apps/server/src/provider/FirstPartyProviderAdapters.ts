@@ -53,11 +53,6 @@ export const PRIME_PROVIDER_ADAPTER_MANIFEST: ProviderAdapterManifestV1 = {
     type: "object",
     additionalProperties: false,
     properties: {
-      enabled: {
-        type: "boolean",
-        default: false,
-        description: "Whether this Prime Agent instance is enabled.",
-      },
       binaryPath: {
         type: "string",
         default: "prime-agent",
