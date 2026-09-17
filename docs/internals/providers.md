@@ -18,11 +18,11 @@ orchestration layer does not know which one is behind a thread.
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
 
 [`FirstPartyProviderAdapters.ts`][first-party] registers the compiled workspace packages for Prime
-(`prime-rpc@1.0.0`) and DeepSeek Harness. Both run through `makeExternalProviderDriver`, with the
-same package identity, host negotiation, output decoding, defect isolation, and crash handling as
-trusted-local packages. Prime's implementation lives in [`@t3tools/provider-adapter-prime`][prime]
-and depends only on the public adapter SDK plus shared contracts and helpers; it no longer uses a
-private compiled driver bridge or server Effect services.
+(`prime-rpc@1.0.0`), Pi (`pi-rpc@1.0.0`), and DeepSeek Harness. All run through
+`makeExternalProviderDriver`, with the same package identity, host negotiation, output decoding,
+defect isolation, and crash handling as trusted-local packages. Prime's implementation lives in
+[`@t3tools/provider-adapter-prime`][prime] and depends only on the public adapter SDK plus shared
+contracts and helpers; it no longer uses a private compiled driver bridge or server Effect services.
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
@@ -60,10 +60,10 @@ The registry file has this shape:
   "schemaVersion": 1,
   "packages": [
     {
-      "id": "pi-rpc",
+      "id": "my-local-agent",
       "version": "1.0.0",
-      "driver": "piRpc",
-      "modulePath": "/absolute/path/to/pi-rpc/index.mjs",
+      "driver": "myLocalAgent",
+      "modulePath": "/absolute/path/to/my-local-agent/index.mjs",
       "enabled": true
     }
   ]
@@ -75,10 +75,10 @@ An instance backed by that package pins the same identity in `ServerSettings.pro
 ```json
 {
   "providerInstances": {
-    "pi_local": {
-      "driver": "piRpc",
+    "my_local_agent": {
+      "driver": "myLocalAgent",
       "adapterPackage": {
-        "id": "pi-rpc",
+        "id": "my-local-agent",
         "version": "1.0.0",
         "protocolVersion": 1
       },
@@ -189,37 +189,43 @@ secrets remain provider-instance environment variables. Compatibility was valida
 real npm release `@deepseek-ai/dsh@0.1.5-rc.2`, built from git commit
 `c291e7961a515f6d7af9304e7fd1d257929aef26`, in an isolated keyless smoke test.
 
-### Pi RPC reference adapter
+### Pi RPC adapter
 
-`piAdapterPackage.mjs` in the same fixture directory exercises a real harness protocol through V1.
-Its default process is `piHarness.mjs`, a deterministic fake; it is not an installed Pi provider.
-An explicit `binaryPath` and `args` can target a real Pi CLI in `--mode rpc` mode. The protocol
-reference is Pi commit `71dca871bc80b6bc97be37f0ca3189399d651fff`.
+[`@t3tools/provider-adapter-pi`][pi-package] is the shipped `pi-rpc@1.0.0` package, with driver
+`piRpc`. It starts one host-supervised Pi process per T3 session in `--mode rpc`. The manifest
+requires Host V2: T3 resolves the authorized workspace, assigns an instance- and thread-contained
+session directory, forces Pi to write there, and validates a native session file before resume. The
+package config exposes the executable, additional launch arguments, optional default working directory,
+model, and thinking level. The adapter owns `--mode rpc` and the Host V2 session-directory argument;
+the shipped executable default is `pi`.
 
 Pi's `turn_end` means one assistant response plus its tool calls, not a completed T3 turn. A T3 turn
 must stay open through tool loops and retries until `agent_settled`. Prompt acknowledgement is not
-completion: Pi can acknowledge before producing any events. Model identity must retain both the Pi
+completion: Pi can acknowledge before producing any events. Model identity retains both the Pi
 provider and model ID. Extension UI responses are notifications, not RPC requests with a second
-acknowledgement. Display-only extension notifications must not become blocking user questions.
+acknowledgement. Display-only extension notifications do not become blocking user questions.
 
-The fixture is a conformance reference, not a claim of complete Pi support. Capabilities not mapped
-through V1 must stay unadvertised. Real-process smoke checks use a separate temporary agent home,
-session directory, and workspace, with loopback inference instead of user credentials. Fake-harness
-checks alone cannot establish compatibility with a released Pi build.
+The deterministic `piHarness.mjs` fixture exercises the package through `ExternalProviderDriver`,
+including successful native resume after an adapter/process restart and another prompt on the resumed
+session. Real-process smoke checks use a separate temporary agent home, host-owned session directory,
+and workspace, with loopback inference instead of user credentials. Fake-harness checks alone do not
+establish compatibility with a released Pi build.
 
-The reference adapter was smoke-tested through `ExternalProviderDriver` against
-`@earendil-works/pi-coding-agent@0.85.1` (published git head
+The adapter was smoke-tested against `@earendil-works/pi-coding-agent@0.85.1` (published git head
 `d981de1229ef899957bbe968bc8dcda02a21f477`), using loopback model responses and real Pi tool execution.
 That check covers provider-qualified model switching, multi-response tool loops, final usage,
 active-branch history, native-session resume, and another prompt after resume. A controlled Pi
 extension also verifies confirmation, empty input, display-only notifications, and commands that
-finish without starting an agent run. This npm build and the protocol-document commit are distinct pins.
+finish without starting an agent run. This npm build and the protocol-document commit
+`71dca871bc80b6bc97be37f0ca3189399d651fff` are distinct pins.
 
-Current gaps include attachments, approvals, rollback, queued follow-up delivery, context-window
+Until a controlled Pi permission extension is wired through the package, snapshots advertise only the
+`full-access` runtime mode and session start rejects other modes. Current gaps include attachments,
+approvals, rollback, queued follow-up delivery, context-window
 streaming, and complete extension-dialog timeout/cancellation synchronization. Display-only UI
 updates are ignored. The structured-input mapping handles select, confirm, input, and editor answers;
-it does not provide a general extension UI. Pi is still a reference fixture, not a shipped provider
-installation flow.
+it does not provide a general extension UI. Capabilities that are not mapped through protocol V1 stay
+unadvertised.
 
 Prime is no longer in `BUILT_IN_DRIVERS` and has no server-private `PrimeDriver`. The compiled
 `@t3tools/provider-adapter-prime` workspace package registers as `prime-rpc@1.0.0` through the same
@@ -284,6 +290,7 @@ when a request opens (approval) or user input is requested, via
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
 [prime]: ../../packages/provider-adapter-prime/src/index.ts
+[pi-package]: ../../packages/provider-adapter-pi/src/index.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
 [external-host]: ../../apps/server/src/provider/ExternalProviderAdapterHost.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts

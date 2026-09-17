@@ -47,6 +47,7 @@ describe("provider adapter manifest catalog hydration", () => {
     expect(catalog.map(({ id, version }) => `${id}@${version}`)).toEqual([
       "aaa-external@2.0.0",
       "deepseek-harness-acp@1.0.0",
+      "pi-rpc@1.0.0",
       "prime-rpc@1.0.0",
     ]);
     expect(JSON.stringify(catalog)).not.toContain("modulePath");

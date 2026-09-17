@@ -93,13 +93,12 @@ describe("ProviderAdapterManifestV1", () => {
       manifest({
         id: "pi-rpc",
         driver: "piRpc",
-        displayName: "Pi RPC",
+        displayName: "Pi",
+        hostProtocol: { minimum: 2, maximum: 2 },
         capabilities: [
           "session.resume",
           "turn.steer",
-          "turn.follow-up",
           "turn.interrupt",
-          "input.attachments",
           "request.structured-input",
           "model.discovery",
           "model.switch",
@@ -107,12 +106,14 @@ describe("ProviderAdapterManifestV1", () => {
           "stream.reasoning",
           "stream.tool-lifecycle",
           "stream.usage",
-          "stream.context",
         ],
       }),
     );
+    expect(pi.hostProtocol).toEqual({ minimum: 2, maximum: 2 });
     expect(pi.transport.sessionConcurrency).toBe("one-per-process");
     expect(pi.capabilities).not.toContain("request.approval");
+    expect(pi.capabilities).not.toContain("input.attachments");
+    expect(pi.capabilities).not.toContain("stream.context");
     expect(pi.capabilities).not.toContain("stream.subagents");
   });
 

@@ -1,29 +1,16 @@
-/**
- * Pi RPC adapter conformance against a deterministic protocol fixture.
- * Prompt acknowledgement precedes asynchronous events. Collectors stop on
- * protocol milestones, not assumed delta counts. Real Pi needs a separate smoke.
- */
 import * as NodeURL from "node:url";
-
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
-
-const { makeExternalProviderDriver } = await import(
-  new URL("../ExternalProviderDriver.ts", import.meta.url).href
-);
-const { makeExternalProviderProcessSupervisor } = await import(
-  new URL("../ExternalProviderProcessSupervisor.ts", import.meta.url).href
-);
-const pkg = (await import(new URL("./piAdapterPackage.mjs", import.meta.url).href)).default;
-
+import { PI_PROVIDER_ADAPTER_PACKAGE as pkg } from "@t3tools/provider-adapter-pi";
+import { makeExternalProviderDriver } from "../ExternalProviderDriver.ts";
+import { makeExternalProviderProcessSupervisor } from "../ExternalProviderProcessSupervisor.ts";
 const result = { checks: [], allEvents: [] };
 const check = (name, ok, detail) => {
-  result.checks.push({ name, ok, ...(detail === undefined ? {} : { detail }) });
+  result.checks.push({ name, ok, ...(detail === void 0 ? {} : { detail }) });
 };
 const terminal = (event) => event.type === "turn.completed" || event.type === "turn.aborted";
-
 const program = Effect.gen(function* () {
   const supervisor = yield* makeExternalProviderProcessSupervisor();
   const raw = yield* supervisor.processes.spawn({
@@ -41,7 +28,8 @@ const program = Effect.gen(function* () {
   );
   yield* raw.write(
     new TextEncoder().encode(
-      `${JSON.stringify({ id: "wire", type: "prompt", message: "hello" })}\n`,
+      `${JSON.stringify({ id: "wire", type: "prompt", message: "hello" })}
+`,
     ),
   );
   const wire = Array.from(yield* Fiber.join(wireFiber));
@@ -53,22 +41,75 @@ const program = Effect.gen(function* () {
   );
   yield* raw.close;
   check("fixture exits zero on stdin EOF", (yield* raw.exitCode) === 0);
+  const driver = makeExternalProviderDriver(pkg, {
+    binaryPath: process.execPath,
+    args: [NodeURL.fileURLToPath(new URL("./piHarness.mjs", import.meta.url))],
+  });
+  const unsafeFlags = [
+    "--",
+    "--help",
+    "-h",
+    "--version",
+    "-v",
+    "--export",
+    "--list-models",
+    "--mode",
+    "--mode=rpc",
+    "--session-dir=/tmp/outside",
+    "--session",
+    "--session-id=outside",
+    "--fork",
+    "--continue",
+    "--resume",
+    "--no-session",
+    "-c",
+    "-r=outside",
+  ];
+  const unsafeResults = yield* Effect.forEach(unsafeFlags, (unsafeFlag, index) => {
+    const unsafeConfig = {
+      binaryPath: process.execPath,
+      args: [NodeURL.fileURLToPath(new URL("./piHarness.mjs", import.meta.url)), unsafeFlag],
+    };
+    return makeExternalProviderDriver(pkg, unsafeConfig)
+      .create({
+        instanceId: `pi_unsafe_${index}`,
+        displayName: "Pi",
+        accentColor: void 0,
+        environment: [],
+        enabled: true,
+        config: unsafeConfig,
+      })
+      .pipe(Effect.result);
+  });
+  check(
+    "unsafe Pi session flags are rejected",
+    unsafeResults.every((result) => result._tag === "Failure"),
+  );
 
-  const driver = makeExternalProviderDriver(pkg, {});
   const instance = yield* driver.create({
     instanceId: "pi_ci",
     displayName: "Pi RPC",
-    accentColor: undefined,
+    accentColor: void 0,
     environment: [],
     enabled: true,
-    config: {},
+    config: {
+      binaryPath: process.execPath,
+      args: [NodeURL.fileURLToPath(new URL("./piHarness.mjs", import.meta.url))],
+    },
   });
-  const collectUntil = (predicate) =>
-    instance.adapter.streamEvents.pipe(
-      Stream.takeUntil(predicate),
-      Stream.runCollect,
-      Effect.forkChild,
-    );
+  const eventQueue = yield* instance.adapter.streamEvents.pipe(
+    Stream.toQueue({ capacity: "unbounded" }),
+  );
+  const takeUntil = (queue, predicate) =>
+    Effect.gen(function* () {
+      const events = [];
+      for (;;) {
+        const event = yield* Queue.take(queue);
+        events.push(event);
+        if (predicate(event)) return events;
+      }
+    });
+  const collectUntil = (predicate) => takeUntil(eventQueue, predicate).pipe(Effect.forkChild);
   const record = (events) => {
     result.allEvents.push(...events);
     return events;
@@ -93,19 +134,56 @@ const program = Effect.gen(function* () {
       );
       return events;
     });
-
   const snapshot = yield* instance.snapshot.getSnapshot;
   check(
     "probe discovers provider-qualified models",
     JSON.stringify(snapshot.models.map((model) => model.slug)) ===
       JSON.stringify(["anthropic/claude-sonnet-4", "openai/gpt-5.6", "custom/gpt-5.6"]),
   );
+  const anthropicReasoning = snapshot.models.find(
+    (model) => model.slug === "anthropic/claude-sonnet-4",
+  )?.capabilities.optionDescriptors?.[0];
+  const customReasoning = snapshot.models.find((model) => model.slug === "custom/gpt-5.6")
+    ?.capabilities.optionDescriptors?.[0];
+  check(
+    "reasoning levels are discovered per model",
+    anthropicReasoning?.type === "select" &&
+      anthropicReasoning.options.some((option) => option.id === "high") &&
+      customReasoning?.type === "select" &&
+      !customReasoning.options.some((option) => option.id === "high"),
+  );
   check("manifest identity stamped", snapshot.driver === "piRpc");
+  check(
+    "only full-access runtime mode is advertised",
+    snapshot.supportedRuntimeModes?.length === 1 &&
+      snapshot.supportedRuntimeModes[0] === "full-access",
+  );
+  const restrictedStart = yield* instance.adapter
+    .startSession({
+      threadId: "pi-restricted",
+      providerInstanceId: "pi_ci",
+      runtimeMode: "approval-required",
+    })
+    .pipe(Effect.result);
+  check("non-full-access startup is rejected", restrictedStart._tag === "Failure");
   check(
     "unsupported capabilities omitted",
     !pkg.manifest.capabilities.includes("turn.follow-up") &&
       !pkg.manifest.capabilities.includes("stream.context"),
   );
+  const concurrentSessions = yield* Effect.all(
+    [
+      instance.adapter.startSession({ threadId: "pi-concurrent", runtimeMode: "full-access" }),
+      instance.adapter.startSession({ threadId: "pi-concurrent", runtimeMode: "full-access" }),
+    ],
+    { concurrency: "unbounded" },
+  );
+  check(
+    "concurrent starts share one native session",
+    concurrentSessions[0]?.resumeCursor?.sessionId ===
+      concurrentSessions[1]?.resumeCursor?.sessionId,
+  );
+  yield* instance.adapter.stopSession("pi-concurrent");
 
   const session = yield* instance.adapter.startSession({
     threadId: "pi-ci-thread",
@@ -117,7 +195,22 @@ const program = Effect.gen(function* () {
     "session ready",
     session.status === "ready" && typeof session.resumeCursor?.sessionFile === "string",
   );
-
+  const attachmentTurn = yield* instance.adapter
+    .sendTurn({
+      threadId: "pi-ci-thread",
+      input: "do not discard this",
+      attachments: [{ kind: "file", path: "/tmp/not-read" }],
+    })
+    .pipe(Effect.result);
+  check("unsupported attachments are rejected", attachmentTurn._tag === "Failure");
+  const emptyTurn = yield* instance.adapter
+    .sendTurn({
+      threadId: "pi-ci-thread",
+      input: "   ",
+      attachments: [],
+    })
+    .pipe(Effect.result);
+  check("empty prompts are rejected", emptyTurn._tag === "Failure");
   const plain = yield* complete("hello pi");
   check(
     "plain prompt events",
@@ -135,7 +228,6 @@ const program = Effect.gen(function* () {
     "authoritative final usage",
     plain[3]?.payload.usage.usedTokens === 150 && plain[3]?.payload.usage.outputTokens === 30,
   );
-
   const heldFiber = yield* collectUntil((event) => event.type === "content.delta");
   const heldTurn = yield* send("!hold please");
   const held = yield* drain(heldFiber);
@@ -147,11 +239,11 @@ const program = Effect.gen(function* () {
     "steer stays in one turn",
     steeredTurn.turnId === heldTurn.turnId && steered.at(-1)?.turnId === heldTurn.turnId,
   );
-
   const tool = yield* complete("!tool ls");
   check(
     "tool item lifecycle",
     tool.some((event) => event.type === "item.started" && event.itemId === "call_1") &&
+      tool.some((event) => event.type === "item.updated" && event.itemId === "call_1") &&
       tool.some((event) => event.type === "item.completed" && event.itemId === "call_1"),
   );
   check(
@@ -162,7 +254,6 @@ const program = Effect.gen(function* () {
       ) &&
       tool.filter((event) => event.type === "turn.started").length === 1,
   );
-
   const retry = yield* complete("!retry transient");
   check(
     "retry settles once as success",
@@ -175,7 +266,6 @@ const program = Effect.gen(function* () {
     failed.at(-1)?.payload.state === "failed" &&
       failed.at(-1)?.payload.errorMessage === "Inference failed",
   );
-
   for (const [method, answer, expected] of [
     ["select", "alpha", "alpha"],
     ["confirm", "Yes", "true"],
@@ -210,12 +300,11 @@ const program = Effect.gen(function* () {
     "display updates do not create questions",
     !notifications.some((event) => event.type === "user-input.requested"),
   );
-
   const switched = yield* complete("switch model", {
     modelSelection: {
       instanceId: "pi_ci",
       model: "custom/gpt-5.6",
-      options: [{ id: "reasoningEffort", value: "high" }],
+      options: [{ id: "reasoningEffort", value: "low" }],
     },
   });
   check("model selection preserves provider", switched.at(-1)?.payload.state === "completed");
@@ -224,10 +313,9 @@ const program = Effect.gen(function* () {
   check(
     "read thread filters metadata and sibling branches",
     thread.turns.length > 5 &&
-      thread.turns.every((turn) => turn.id !== "off-branch" && turn.items[0]?.role !== undefined) &&
+      thread.turns.every((turn) => turn.id !== "off-branch" && turn.items[0]?.role !== void 0) &&
       thread.turns.some((turn) => turn.items[0]?.role === "assistant"),
   );
-
   const rejected = yield* send("!reject preflight").pipe(Effect.result);
   check("preflight rejection reported", rejected._tag === "Failure");
   const afterRejected = yield* complete("after rejection");
@@ -242,7 +330,6 @@ const program = Effect.gen(function* () {
       JSON.stringify(["turn.started", "turn.completed"]),
   );
   yield* complete("after handled prompt");
-
   const abortHoldFiber = yield* collectUntil((event) => event.type === "content.delta");
   yield* send("!hold forever");
   yield* drain(abortHoldFiber);
@@ -255,7 +342,6 @@ const program = Effect.gen(function* () {
     "new prompt works after abort",
     afterAbort.some((event) => event.payload.delta === "echo: after abort"),
   );
-
   const cancelledResume = yield* instance.adapter
     .startSession({
       threadId: "pi-cancelled",
@@ -284,11 +370,12 @@ const program = Effect.gen(function* () {
     runtimeMode: "full-access",
   });
   yield* instance.adapter.stopSession("pi-invalid-model");
-
   const rollback = yield* instance.adapter.rollbackThread("pi-ci-thread", 1).pipe(Effect.result);
   check("rollback not negotiated", rollback._tag === "Failure");
-
-  yield* instance.adapter.startSession({ threadId: "pi-exit", runtimeMode: "full-access" });
+  const crashedSession = yield* instance.adapter.startSession({
+    threadId: "pi-exit",
+    runtimeMode: "full-access",
+  });
   const exitFiber = yield* collectUntil(
     (event) => event.type === "runtime.error" && event.threadId === "pi-exit",
   );
@@ -297,22 +384,68 @@ const program = Effect.gen(function* () {
     .pipe(Effect.result);
   yield* drain(exitFiber);
   check("EOF releases pending RPC", exited._tag === "Failure");
+  check("crashed sessions are removed", !(yield* instance.adapter.hasSession("pi-exit")));
+  const recoveredSession = yield* instance.adapter.startSession({
+    threadId: "pi-exit",
+    runtimeMode: "full-access",
+    resumeCursor: crashedSession.resumeCursor,
+  });
+  check(
+    "crashed sessions can resume on a new process",
+    recoveredSession.resumeCursor?.sessionId === crashedSession.resumeCursor?.sessionId,
+  );
   yield* instance.adapter.stopSession("pi-exit");
-
+  const resumeCursor = session.resumeCursor;
   yield* instance.adapter.stopSession("pi-ci-thread");
   check("session removed after stop", !(yield* instance.adapter.hasSession("pi-ci-thread")));
+  const restarted = yield* driver.create({
+    instanceId: "pi_ci",
+    displayName: "Pi",
+    accentColor: void 0,
+    environment: [],
+    enabled: true,
+    config: {
+      binaryPath: process.execPath,
+      args: [NodeURL.fileURLToPath(new URL("./piHarness.mjs", import.meta.url))],
+    },
+  });
+  const resumed = yield* restarted.adapter.startSession({
+    threadId: "pi-ci-thread",
+    providerInstanceId: "pi_ci",
+    runtimeMode: "full-access",
+    resumeCursor,
+  });
+  check(
+    "resume survives adapter and process restart",
+    resumed.resumeCursor?.sessionFile === resumeCursor?.sessionFile &&
+      resumed.resumeCursor?.sessionId === resumeCursor?.sessionId,
+  );
+  const restartedEventQueue = yield* restarted.adapter.streamEvents.pipe(
+    Stream.toQueue({ capacity: "unbounded" }),
+  );
+  const resumedFiber = yield* takeUntil(restartedEventQueue, terminal).pipe(Effect.forkChild);
+  const resumedTurn = yield* restarted.adapter.sendTurn({
+    threadId: "pi-ci-thread",
+    input: "after native resume",
+    attachments: [],
+  });
+  const resumedEvents = Array.from(yield* Fiber.join(resumedFiber));
+  result.allEvents.push(...resumedEvents);
+  check(
+    "new prompt completes after native resume",
+    resumedEvents.some(
+      (event) =>
+        event.type === "content.delta" && event.payload.delta === "echo: after native resume",
+    ) &&
+      resumedEvents.at(-1)?.type === "turn.completed" &&
+      resumedEvents.at(-1)?.turnId === resumedTurn.turnId,
+  );
+  yield* restarted.adapter.stopSession("pi-ci-thread");
 }).pipe(Effect.scoped);
-
-await Effect.runPromise(program.pipe(Effect.provide(NodeServices.layer))).then(
-  () => {
-    result.eventCount = result.allEvents.length;
-    delete result.allEvents;
-    result.ok = result.checks.every((entry) => entry.ok);
-  },
-  (error) => {
-    result.ok = false;
-    result.error = String(error?.message ?? error);
-    result.stack = String(error?.stack ?? "").slice(0, 2000);
-  },
+const runPiConformance = program.pipe(
+  Effect.map(() => ({
+    checks: result.checks,
+    eventCount: result.allEvents.length,
+  })),
 );
-console.log(JSON.stringify(result));
+export { runPiConformance };

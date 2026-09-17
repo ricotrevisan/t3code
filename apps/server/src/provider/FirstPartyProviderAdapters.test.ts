@@ -1,5 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  PI_PROVIDER_ADAPTER_CAPABILITIES,
+  PI_PROVIDER_ADAPTER_DEFAULT_CONFIG,
+  PI_PROVIDER_ADAPTER_PACKAGE,
+  PI_PROVIDER_ADAPTER_PACKAGE_REFERENCE as PACKAGE_PI_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
+  PiProviderAdapterConfig,
+} from "@t3tools/provider-adapter-pi";
+import {
   PRIME_PROVIDER_ADAPTER_DEFAULT_CONFIG,
   PRIME_PROVIDER_ADAPTER_PACKAGE,
   PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE as PACKAGE_PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
@@ -17,6 +24,8 @@ import {
 } from "./DeepSeekHarnessAdapter.ts";
 import {
   FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
+  PI_PROVIDER_ADAPTER_MANIFEST,
+  PI_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
   PRIME_PROVIDER_ADAPTER_MANIFEST,
   PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
 } from "./FirstPartyProviderAdapters.ts";
@@ -103,6 +112,46 @@ describe("DeepSeek Harness first-party ACP package", () => {
   });
 });
 
+describe("Pi first-party provider adapter package", () => {
+  it("declares the Pi package identity and capability ceiling", () => {
+    expect(PI_PROVIDER_ADAPTER_MANIFEST).toBe(PI_PROVIDER_ADAPTER_PACKAGE.manifest);
+    expect(PI_PROVIDER_ADAPTER_PACKAGE_REFERENCE).toBe(
+      PACKAGE_PI_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
+    );
+    expect(PI_PROVIDER_ADAPTER_MANIFEST).toMatchObject({
+      protocolVersion: 1,
+      id: "pi-rpc",
+      version: "1.0.0",
+      driver: "piRpc",
+      displayName: "Pi",
+      hostProtocol: { minimum: 2, maximum: 2 },
+      transport: {
+        kind: "supervised-stdio",
+        protocol: "jsonl-rpc",
+        sessionConcurrency: "one-per-process",
+      },
+    });
+    expect(PI_PROVIDER_ADAPTER_MANIFEST.capabilities).toEqual(
+      PI_PROVIDER_ADAPTER_CAPABILITIES.features,
+    );
+  });
+
+  it("registers Pi through the external driver with real CLI defaults", () => {
+    const driver = FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS.find(
+      (candidate) => candidate.driverKind === PI_PROVIDER_ADAPTER_MANIFEST.driver,
+    );
+
+    expect(driver).toBeDefined();
+    expect(driver?.adapterPackage).toEqual(PI_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
+    expect(driver?.configSchema).toBe(PiProviderAdapterConfig);
+    expect(driver?.defaultConfig()).toEqual(PI_PROVIDER_ADAPTER_DEFAULT_CONFIG);
+    expect(PI_PROVIDER_ADAPTER_DEFAULT_CONFIG).toEqual({
+      binaryPath: "pi",
+      args: [],
+    });
+  });
+});
+
 describe("Prime first-party provider adapter package", () => {
   it("re-exports the package identity and exact capability ceiling", () => {
     expect(PRIME_PROVIDER_ADAPTER_MANIFEST).toBe(PRIME_PROVIDER_ADAPTER_PACKAGE.manifest);
@@ -139,7 +188,7 @@ describe("Prime first-party provider adapter package", () => {
       (candidate) => candidate.driverKind === PRIME_PROVIDER_ADAPTER_MANIFEST.driver,
     );
 
-    expect(FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS).toHaveLength(2);
+    expect(FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS).toHaveLength(3);
     expect(driver).toBeDefined();
     expect(driver?.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
     expect(driver?.configSchema).toBe(PrimeProviderAdapterConfig);

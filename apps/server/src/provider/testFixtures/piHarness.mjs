@@ -1,8 +1,11 @@
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+
 /**
  * Fake Pi RPC harness used by the pi-rpc adapter conformance fixtures.
  *
  * Speaks the Pi RPC protocol subset over stdio JSONL (strict LF framing):
- * commands `switch_session`, `get_state`, `get_available_models`,
+ * commands `switch_session`, `get_state`, `get_available_models`, `get_available_thinking_levels`,
  * `set_model`, `set_thinking_level`, `get_session_stats`, `get_entries`,
  * `prompt`, `steer`, `follow_up`, `abort`; plus the extension-UI
  * request/response sub-protocol. See the vendored Pi RPC doc for the real
@@ -13,8 +16,17 @@
  * - `!hold ...`  -> streams one delta then waits for `steer`/`abort`.
  * - `?select:...`-> opens an extension-UI select and waits for the response.
  */
+const sessionDirectoryFlag = process.argv.indexOf("--session-dir");
+const sessionDirectory =
+  sessionDirectoryFlag >= 0 && process.argv[sessionDirectoryFlag + 1]
+    ? process.argv[sessionDirectoryFlag + 1]
+    : "/tmp/pi-sessions";
+NodeFS.mkdirSync(sessionDirectory, { recursive: true });
+const initialSessionFile = NodePath.join(sessionDirectory, "demo.jsonl");
+NodeFS.closeSync(NodeFS.openSync(initialSessionFile, "a"));
+
 const state = {
-  sessionFile: "/tmp/pi-sessions/demo.jsonl",
+  sessionFile: initialSessionFile,
   sessionId: "pi-session-1",
   sessionName: undefined,
   model: {
@@ -113,6 +125,13 @@ const runTurn = (message, reply) => {
       toolCallId: "call_1",
       toolName: "bash",
       args: { command: "ls" },
+    });
+    emit({
+      type: "tool_execution_update",
+      toolCallId: "call_1",
+      toolName: "bash",
+      args: { command: "ls" },
+      partialResult: { content: [{ type: "text", text: "file" }] },
     });
     emit({
       type: "tool_execution_end",
@@ -214,6 +233,8 @@ process.stdin.on("data", (chunk) => {
           break;
         }
         state.sessionFile = command.sessionPath;
+        NodeFS.mkdirSync(NodePath.dirname(state.sessionFile), { recursive: true });
+        NodeFS.closeSync(NodeFS.openSync(state.sessionFile, "a"));
         state.entries = [
           {
             type: "message",
@@ -242,6 +263,16 @@ process.stdin.on("data", (chunk) => {
       case "get_available_models":
         respond(id, type, true, { models });
         break;
+      case "get_available_thinking_levels": {
+        const levels =
+          state.model.provider === "custom"
+            ? ["off", "low"]
+            : state.model.provider === "openai"
+              ? ["off", "medium"]
+              : ["off", "low", "medium", "high"];
+        respond(id, type, true, { levels });
+        break;
+      }
       case "set_model": {
         const model = models.find(
           (entry) => entry.provider === command.provider && entry.id === command.modelId,

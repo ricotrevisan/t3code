@@ -12,6 +12,7 @@ import {
   ProviderAdapterManifestV1,
   type ProviderAdapterManifestV1 as ProviderAdapterManifest,
 } from "@t3tools/contracts";
+import { PI_PROVIDER_ADAPTER_MANIFEST } from "@t3tools/provider-adapter-pi";
 import { PRIME_PROVIDER_ADAPTER_MANIFEST } from "@t3tools/provider-adapter-prime";
 import * as Schema from "effect/Schema";
 
@@ -24,6 +25,7 @@ const decodeManifestCatalog = Schema.decodeUnknownSync(ProviderAdapterManifestCa
 export const FIRST_PARTY_PROVIDER_ADAPTER_MANIFESTS: ReadonlyArray<ProviderAdapterManifest> = [
   decodeManifest(PRIME_PROVIDER_ADAPTER_MANIFEST),
   decodeManifest(DEEPSEEK_HARNESS_ADAPTER_MANIFEST),
+  decodeManifest(PI_PROVIDER_ADAPTER_MANIFEST),
 ];
 
 const compareString = (left: string, right: string): number =>
