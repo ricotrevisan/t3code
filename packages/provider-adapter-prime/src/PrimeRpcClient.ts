@@ -1,18 +1,12 @@
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
-import { loadDirenvExportedEnv } from "../../workspace/workspaceDirenvEnv.ts";
-import * as Cause from "effect/Cause";
+import type { ProviderAdapterProcessV1 } from "@t3tools/provider-adapter";
 import * as Deferred from "effect/Deferred";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
-import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 const PrimeRpcResponse = Schema.Struct({
   id: Schema.String,
@@ -57,13 +51,6 @@ export interface PrimeRpcClient {
   readonly close: Effect.Effect<void>;
 }
 
-export interface PrimeRpcSpawnOptions {
-  readonly command: string;
-  readonly args?: ReadonlyArray<string>;
-  readonly cwd?: string;
-  readonly environment?: NodeJS.ProcessEnv;
-}
-
 const encoder = new TextEncoder();
 
 const failPending = (
@@ -76,63 +63,17 @@ const failPending = (
     yield* Effect.forEach(waiters, (waiter) => Deferred.fail(waiter, error), { discard: true });
   });
 
-export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
-  options: PrimeRpcSpawnOptions,
-): Effect.fn.Return<
-  PrimeRpcClient,
-  PrimeRpcError,
-  ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
-> {
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const args = options.args ?? [];
-  const direnvEnv = loadDirenvExportedEnv(options.cwd, {
-    env: options.environment ?? process.env,
-  });
-  const environment =
-    options.environment !== undefined
-      ? { ...options.environment, ...direnvEnv }
-      : Object.keys(direnvEnv).length > 0
-        ? direnvEnv
-        : undefined;
-  const spawnCommand = yield* resolveSpawnCommand(
-    options.command,
-    args,
-    environment ? { env: environment, extendEnv: true } : {},
-  );
-  const outgoing = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
+/** Build the Prime JSONL protocol on top of a host-owned process. */
+export const makePrimeRpcClient = Effect.fn("PrimeRpcClient.make")(function* (
+  process: ProviderAdapterProcessV1,
+): Effect.fn.Return<PrimeRpcClient, never, Scope.Scope> {
   const incoming = yield* PubSub.unbounded<unknown>({ replay: 64 });
   const pending = new Map<string, Deferred.Deferred<PrimeRpcResponse, PrimeRpcError>>();
   const closed = yield* Ref.make(false);
+  const processCloseStarted = yield* Ref.make(false);
   let requestSequence = 0;
   let stderr = "";
   const decoder = new TextDecoder();
-
-  const child = yield* spawner
-    .spawn(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        cwd: options.cwd,
-        ...(environment ? { env: environment, extendEnv: true } : { extendEnv: true }),
-        shell: spawnCommand.shell,
-        stdin: {
-          stream: Stream.fromQueue(outgoing),
-          endOnDone: true,
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-        killSignal: "SIGTERM",
-        forceKillAfter: Duration.seconds(2),
-      }),
-    )
-    .pipe(
-      Effect.mapError(
-        (cause) =>
-          new PrimeRpcError({
-            operation: "spawn",
-            detail: "Failed to start the process.",
-            cause,
-          }),
-      ),
-    );
 
   const dispatchLine = (line: string) =>
     Effect.gen(function* () {
@@ -172,7 +113,7 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
   // Split stdout on `\n` only. Node readline also splits on U+2028/U+2029.
   yield* Effect.gen(function* () {
     let buffer = "";
-    yield* Stream.runForEach(child.stdout, (chunk) =>
+    yield* Stream.runForEach(process.stdout, (chunk) =>
       Effect.gen(function* () {
         buffer += decoder.decode(chunk, { stream: true });
         while (true) {
@@ -195,7 +136,7 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
     Effect.forkScoped,
   );
 
-  yield* child.stderr.pipe(
+  yield* process.stderr.pipe(
     Stream.decodeText(),
     Stream.runForEach((chunk) =>
       Effect.sync(() => {
@@ -206,25 +147,39 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
     Effect.forkScoped,
   );
 
-  yield* child.exitCode.pipe(
-    Effect.flatMap((exitCode) =>
-      Effect.gen(function* () {
-        const failure = new PrimeRpcError({
-          operation: "process",
-          detail: `Process exited with code ${Number(exitCode)}.${stderr.trim() ? ` ${stderr.trim()}` : ""}`,
-        });
-        yield* failPending(pending, failure);
-        yield* PubSub.shutdown(incoming);
-      }),
-    ),
-    Effect.catch((cause) => Effect.logDebug("Prime RPC exit monitor failed.", { cause })),
+  yield* process.exitCode.pipe(
+    Effect.matchEffect({
+      onFailure: (cause) =>
+        Effect.gen(function* () {
+          yield* Ref.set(closed, true);
+          yield* failPending(
+            pending,
+            new PrimeRpcError({
+              operation: "process",
+              detail: `Could not read the process exit code.${stderr.trim() ? ` ${stderr.trim()}` : ""}`,
+              cause,
+            }),
+          );
+          yield* PubSub.shutdown(incoming);
+        }),
+      onSuccess: (exitCode) =>
+        Effect.gen(function* () {
+          yield* Ref.set(closed, true);
+          yield* failPending(
+            pending,
+            new PrimeRpcError({
+              operation: "process",
+              detail: `Process exited with code ${exitCode}.${stderr.trim() ? ` ${stderr.trim()}` : ""}`,
+            }),
+          );
+          yield* PubSub.shutdown(incoming);
+        }),
+    }),
     Effect.forkScoped,
   );
 
   const close = Effect.gen(function* () {
-    if (yield* Ref.getAndSet(closed, true)) {
-      return;
-    }
+    yield* Ref.set(closed, true);
     yield* failPending(
       pending,
       new PrimeRpcError({
@@ -232,15 +187,10 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
         detail: "RPC process closed.",
       }),
     );
-    yield* Queue.end(outgoing);
-    const exited = yield* child.exitCode.pipe(
-      Effect.timeoutOption(Duration.seconds(2)),
-      Effect.catch(() => Effect.succeedNone),
-    );
-    if (Option.isNone(exited)) {
-      yield* child.kill().pipe(Effect.ignore);
-    }
     yield* PubSub.shutdown(incoming);
+    if (!(yield* Ref.getAndSet(processCloseStarted, true))) {
+      yield* process.close;
+    }
   });
 
   yield* Effect.addFinalizer(() => close);
@@ -266,11 +216,20 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
             }),
         ),
       );
-      pending.set(id, response);
-      yield* Queue.offer(outgoing, encoder.encode(`${payload}\n`));
-      const awaited = Deferred.await(response);
-      const result = yield* (
-        requestOptions?.timeoutMs === null
+      const result = yield* Effect.gen(function* () {
+        pending.set(id, response);
+        yield* process.write(encoder.encode(`${payload}\n`)).pipe(
+          Effect.mapError(
+            (cause) =>
+              new PrimeRpcError({
+                operation: command.type,
+                detail: "Failed to write command.",
+                cause,
+              }),
+          ),
+        );
+        const awaited = Deferred.await(response);
+        return yield* requestOptions?.timeoutMs === null
           ? awaited
           : awaited.pipe(
               Effect.timeoutOption(requestOptions?.timeoutMs ?? 30_000),
@@ -283,8 +242,8 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
                   onSome: Effect.succeed,
                 }),
               ),
-            )
-      ).pipe(Effect.ensuring(Effect.sync(() => pending.delete(id))));
+            );
+      }).pipe(Effect.ensuring(Effect.sync(() => pending.delete(id))));
       if (!result.success) {
         return yield* new PrimeRpcError({
           operation: command.type,
@@ -312,11 +271,20 @@ export const spawnPrimeRpcClient = Effect.fn("PrimeRpcClient.spawn")(function* (
             }),
         ),
       );
-      yield* Queue.offer(outgoing, encoder.encode(`${payload}\n`));
+      yield* process.write(encoder.encode(`${payload}\n`)).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PrimeRpcError({
+              operation: "extension_ui_response",
+              detail: "Failed to write response.",
+              cause,
+            }),
+        ),
+      );
     });
 
   return {
-    pid: Number(child.pid),
+    pid: process.pid,
     request,
     respondToExtensionUi,
     events: Stream.fromPubSub(incoming),
