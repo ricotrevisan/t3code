@@ -140,6 +140,7 @@ const fakeInstanceRegistryLayer = Layer.succeed(ProviderInstanceRegistry.Provide
     Effect.succeed(fakeInstances.find((instance) => instance.instanceId === instanceId)),
   listInstances: Effect.succeed(fakeInstances),
   listUnavailable: Effect.succeed([]),
+  listAdapterManifests: Effect.succeed([]),
   streamChanges: Stream.empty,
   // Tests never drive changes through this fake; acquire a throwaway
   // subscription on an unused PubSub so the shape is satisfied.

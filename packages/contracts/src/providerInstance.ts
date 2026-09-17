@@ -36,6 +36,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProviderAdapterPackageReference } from "./providerAdapterIdentity.ts";
 
 const PROVIDER_SLUG_MAX_CHARS = 64;
 /**
@@ -123,6 +124,8 @@ export type ProviderInstanceEnvironment = typeof ProviderInstanceEnvironment.Typ
  */
 export const ProviderInstanceConfig = Schema.Struct({
   driver: ProviderDriverKind,
+  /** Required by the host when `driver` comes from a trusted local package. */
+  adapterPackage: Schema.optional(ProviderAdapterPackageReference),
   displayName: Schema.optional(TrimmedNonEmptyString),
   accentColor: Schema.optional(TrimmedNonEmptyString),
   environment: Schema.optionalKey(ProviderInstanceEnvironment),

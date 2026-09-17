@@ -1,14 +1,21 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+import {
+  ProviderAdapterV1Error,
+  type ProviderAdapterCreateInputV1,
+  type ProviderAdapterHostV2,
+  type ProviderAdapterProcessV1,
+  type ProviderAdapterV1,
+} from "@t3tools/provider-adapter";
 import {
   EventId,
   type ModelSelection,
-  type PrimeSettings,
   type ProviderApprovalDecision,
   ProviderDriverKind,
+  type ProviderAdapterProtocolCapabilitiesV1,
   type ProviderRuntimeEvent,
   type ProviderSendTurnInput,
   type ProviderSession,
-  ProviderInstanceId,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -18,47 +25,55 @@ import {
 } from "@t3tools/contracts";
 import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
-import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as Encoding from "effect/Encoding";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
-import { resolveAttachmentPath } from "../../attachmentStore.ts";
-import { ServerConfig } from "../../config.ts";
-import {
-  ProviderAdapterRequestError,
-  ProviderAdapterSessionNotFoundError,
-  ProviderAdapterValidationError,
-} from "../Errors.ts";
-import { spawnPrimeRpcClient, type PrimeRpcClient } from "../prime/PrimeRpcClient.ts";
+import { makePrimeRpcClient, type PrimeRpcClient } from "./PrimeRpcClient.ts";
 import {
   isPrimeApprovalExtensionHandshake,
   preparePrimeApprovalExtension,
   PRIME_APPROVAL_EXTENSION_MODE_FLAG,
-} from "../prime/primeApprovalExtension.ts";
+} from "./primeApprovalExtension.ts";
 import {
   primePackageCatalogExtensionArgs,
   resolvePrimeAgentDir,
-} from "../prime/primePackageCatalogExtensions.ts";
-import { preparePrimeOpenRouterCatalogExtension } from "../prime/primeOpenRouterCatalogExtension.ts";
+} from "./primePackageCatalogExtensions.ts";
+import { preparePrimeOpenRouterCatalogExtension } from "./primeOpenRouterCatalogExtension.ts";
 import {
   parsePrimeModelSlug,
   primeModelSlug,
   PRIME_THINKING_LEVEL_OPTION_ID,
   resolvePrimeSessionThinkingLevel,
-} from "../prime/primeModels.ts";
-import { type PrimeAdapterShape } from "../Services/PrimeAdapter.ts";
+} from "./primeModels.ts";
 
 const PROVIDER = ProviderDriverKind.make("primeAgent");
 const PRIME_RESUME_VERSION = 1 as const;
+
+export const PRIME_ADAPTER_PROTOCOL_CAPABILITIES = {
+  protocolVersion: 1,
+  features: [
+    "session.resume",
+    "turn.steer",
+    "turn.interrupt",
+    "input.attachments",
+    "request.approval",
+    "request.structured-input",
+    "model.discovery",
+    "model.switch",
+    "reasoning.selection",
+    "stream.reasoning",
+    "stream.tool-lifecycle",
+    "stream.usage",
+    "stream.subagents",
+  ],
+} as const satisfies ProviderAdapterProtocolCapabilitiesV1;
 
 const PrimeState = Schema.Struct({
   sessionFile: Schema.String,
@@ -245,9 +260,9 @@ const decodeExtensionUserInputRequest = Schema.decodeUnknownExit(PrimeExtensionU
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
-export interface PrimeAdapterLiveOptions {
-  readonly environment?: NodeJS.ProcessEnv;
-  readonly instanceId?: ProviderInstanceId;
+export interface PrimeAdapterConfig {
+  readonly binaryPath: string;
+  readonly launchArgs: string;
 }
 
 interface PendingPrimeApproval {
@@ -273,6 +288,7 @@ interface PrimeSubagentState {
 interface PrimeSessionContext {
   readonly threadId: ThreadId;
   readonly rpc: PrimeRpcClient;
+  readonly process: ProviderAdapterProcessV1;
   readonly scope: Scope.Closeable;
   session: ProviderSession;
   currentModelSlug: string | undefined;
@@ -449,13 +465,6 @@ function parsePrimeResume(
   };
 }
 
-function isPathInsideDirectory(path: Path.Path, directory: string, file: string): boolean {
-  const resolvedDirectory = path.resolve(directory);
-  const resolvedFile = path.resolve(file);
-  const relative = path.relative(resolvedDirectory, resolvedFile);
-  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
-}
-
 function modelSlugFromPrimeState(state: typeof PrimeState.Type): string | undefined {
   if (!state.model) {
     return undefined;
@@ -562,9 +571,8 @@ function usageFromMessages(messages: ReadonlyArray<unknown>): unknown | undefine
 }
 
 function toRpcRequestError(method: string, cause: { readonly message: string }) {
-  return new ProviderAdapterRequestError({
-    provider: PROVIDER,
-    method,
+  return new ProviderAdapterV1Error({
+    operation: method,
     detail: cause.message,
     cause,
   });
@@ -585,17 +593,16 @@ function isUnsafeSupervisedLaunchArg(value: string): boolean {
   );
 }
 
-export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAdapterLiveOptions) {
+export function makePrimeAdapter(
+  primeSettings: PrimeAdapterConfig,
+  adapterInput: ProviderAdapterCreateInputV1<PrimeAdapterConfig>,
+  host: ProviderAdapterHostV2,
+) {
   return Effect.gen(function* () {
-    const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("primeAgent");
-    const crypto = yield* Crypto.Crypto;
-    const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const serverConfig = yield* ServerConfig;
+    const boundInstanceId = adapterInput.instanceId;
     const sessions = new Map<ThreadId, PrimeSessionContext>();
     const runtimeEvents = yield* PubSub.unbounded<ProviderRuntimeEvent>();
-    const randomUUIDv4 = crypto.randomUUIDv4.pipe(Effect.orDie);
+    const randomUUIDv4 = Effect.sync(NodeCrypto.randomUUID);
     const stamp = Effect.all({
       eventId: randomUUIDv4.pipe(Effect.map(EventId.make)),
       createdAt: nowIso,
@@ -633,10 +640,15 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
 
     const requireSession = (
       threadId: ThreadId,
-    ): Effect.Effect<PrimeSessionContext, ProviderAdapterSessionNotFoundError> => {
+    ): Effect.Effect<PrimeSessionContext, ProviderAdapterV1Error> => {
       const session = sessions.get(threadId);
       return session === undefined || session.stopped
-        ? Effect.fail(new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId }))
+        ? Effect.fail(
+            new ProviderAdapterV1Error({
+              operation: "session",
+              detail: `Prime session '${threadId}' was not found.`,
+            }),
+          )
         : Effect.succeed(session);
     };
 
@@ -648,9 +660,8 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
     ) {
       const pending = ctx.pendingApprovals.get(requestId);
       if (pending === undefined) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "respondToRequest",
+        return yield* new ProviderAdapterV1Error({
+          operation: "respondToRequest",
           detail: `Prime approval request '${requestId}' is not pending.`,
         });
       }
@@ -701,9 +712,8 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
     ) {
       const pending = ctx.pendingUserInputs.get(requestId);
       if (pending === undefined) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "respondToUserInput",
+        return yield* new ProviderAdapterV1Error({
+          operation: "respondToUserInput",
           detail: `Prime user-input request '${requestId}' is not pending.`,
         });
       }
@@ -749,72 +759,6 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         concurrency: 1,
       });
 
-    const requireSessionFileInsideThreadDir = (input: {
-      readonly threadSessionDir: string;
-      readonly sessionFile: string;
-      readonly detail: string;
-    }) =>
-      Effect.gen(function* () {
-        if (!isPathInsideDirectory(path, input.threadSessionDir, input.sessionFile)) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "resume",
-            detail: input.detail,
-          });
-        }
-      });
-
-    const requirePersistedResumeFile = (input: {
-      readonly threadSessionDir: string;
-      readonly sessionFile: string;
-    }) =>
-      Effect.gen(function* () {
-        yield* requireSessionFileInsideThreadDir({
-          threadSessionDir: input.threadSessionDir,
-          sessionFile: input.sessionFile,
-          detail: "Prime session file is outside this thread's session directory.",
-        });
-        const exists = yield* fileSystem.exists(input.sessionFile).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "resume",
-                detail: "Could not inspect the Prime session file.",
-                cause,
-              }),
-          ),
-        );
-        if (!exists) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "resume",
-            detail: "Prime session file is missing; cannot resume.",
-          });
-        }
-        const realDirectory = yield* fileSystem
-          .realPath(input.threadSessionDir)
-          .pipe(Effect.orElseSucceed(() => path.resolve(input.threadSessionDir)));
-        const realFile = yield* fileSystem.realPath(input.sessionFile).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "resume",
-                detail: "Prime session file is missing; cannot resume.",
-                cause,
-              }),
-          ),
-        );
-        if (!isPathInsideDirectory(path, realDirectory, realFile)) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "resume",
-            detail: "Prime session file is outside this thread's session directory.",
-          });
-        }
-      });
-
     const applyModelSelection = (input: {
       readonly rpc: PrimeRpcClient;
       readonly modelSelection: ModelSelection | undefined;
@@ -830,10 +774,9 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         }
         const parsed = parsePrimeModelSlug(requested.model);
         if (parsed === undefined) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "set_model",
-            issue: `Prime model '${requested.model}' must be a provider/id slug.`,
+            detail: `Prime model '${requested.model}' must be a provider/id slug.`,
           });
         }
         const nextSlug = primeModelSlug({ provider: parsed.provider, id: parsed.modelId });
@@ -870,18 +813,16 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
       const response = yield* rpc.request({ type: "get_commands" }, { timeoutMs: 5_000 }).pipe(
         Effect.mapError(
           (cause) =>
-            new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "get_commands",
+            new ProviderAdapterV1Error({
+              operation: "get_commands",
               detail: "Prime approval extension handshake failed.",
               cause,
             }),
         ),
       );
       if (!isPrimeApprovalExtensionHandshake(response.data, extensionPath)) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "get_commands",
+        return yield* new ProviderAdapterV1Error({
+          operation: "get_commands",
           detail: "Prime approval extension handshake did not identify the T3-owned extension.",
         });
       }
@@ -1536,9 +1477,9 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         if (ctx.stopped || sessions.get(ctx.threadId) !== ctx) {
           return;
         }
-        yield* cancelPendingRequests(ctx, { sendResponse: false }).pipe(Effect.ignore);
         ctx.stopped = true;
         sessions.delete(ctx.threadId);
+        yield* cancelPendingRequests(ctx, { sendResponse: false }).pipe(Effect.ignore);
         const turnId = ctx.activeTurnId;
         ctx.activeTurnId = undefined;
         const message = "Prime RPC process exited.";
@@ -1576,6 +1517,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         yield* cancelPendingRequests(ctx);
         ctx.stopped = true;
         sessions.delete(ctx.threadId);
+        yield* ctx.process.expectExit;
         const turnId = ctx.activeTurnId;
         yield* abortIfBusy(ctx);
         ctx.activeTurnId = undefined;
@@ -1598,39 +1540,44 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         });
       });
 
-    const startSession: PrimeAdapterShape["startSession"] = (input) =>
+    const startSession: ProviderAdapterV1["startSession"] = (input) =>
       Effect.gen(function* () {
         if (input.provider !== undefined && input.provider !== PROVIDER) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "startSession",
-            issue: `Expected driver '${PROVIDER}' but received '${input.provider}'.`,
+            detail: `Expected driver '${PROVIDER}' but received '${input.provider}'.`,
           });
         }
-        const cwd = (input.cwd?.trim() || serverConfig.cwd).trim();
+        const cwd = yield* host.workspaces.resolveCwd(input.cwd).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterV1Error({
+                operation: "startSession",
+                detail: cause.detail,
+                cause,
+              }),
+          ),
+        );
         if (!cwd) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "startSession",
-            issue: "cwd is required and must be non-empty.",
+            detail: "cwd is required and must be non-empty.",
           });
         }
         const supervised = input.runtimeMode === "approval-required";
         if (!supervised && input.runtimeMode !== "full-access") {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "startSession",
-            issue: `Prime Agent does not support runtime mode '${input.runtimeMode}'.`,
+            detail: `Prime Agent does not support runtime mode '${input.runtimeMode}'.`,
           });
         }
         const launchArgs = tokenizeCliArgs(primeSettings.launchArgs);
         if (supervised) {
           const unsafeArg = launchArgs.find(isUnsafeSupervisedLaunchArg);
           if (unsafeArg !== undefined) {
-            return yield* new ProviderAdapterValidationError({
-              provider: PROVIDER,
+            return yield* new ProviderAdapterV1Error({
               operation: "startSession",
-              issue: `Launch argument '${unsafeArg}' can override the T3 approval extension.`,
+              detail: `Launch argument '${unsafeArg}' can override the T3 approval extension.`,
             });
           }
         }
@@ -1639,49 +1586,36 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           yield* stopSessionInternal(existing);
         }
 
-        const threadSessionDir = path.join(
-          serverConfig.baseDir,
-          "prime-agent",
-          "sessions",
-          String(input.threadId),
-        );
-        const daemonSocket = path.join(serverConfig.baseDir, "prime-agent", "daemon.sock");
-        yield* fileSystem.makeDirectory(threadSessionDir, { recursive: true }).pipe(
-          Effect.andThen(fileSystem.makeDirectory(path.dirname(daemonSocket), { recursive: true })),
+        const sessionStorage = yield* host.storage.prepareSession(input.threadId).pipe(
           Effect.mapError(
             (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "prepare",
+              new ProviderAdapterV1Error({
+                operation: "prepare",
                 detail: "Could not prepare the Prime Agent session directory.",
                 cause,
               }),
           ),
         );
+        const threadSessionDir = sessionStorage.sessionDirectory;
+        const daemonSocket = `${sessionStorage.sharedDirectory.replace(/[\\/]$/, "")}/daemon.sock`;
         const catalogExtensionPath = yield* preparePrimeOpenRouterCatalogExtension(
-          serverConfig.baseDir,
+          host.storage,
         ).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, path),
           Effect.mapError(
             (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "prepare",
+              new ProviderAdapterV1Error({
+                operation: "prepare",
                 detail: "Could not install the OpenRouter catalog extension.",
                 cause,
               }),
           ),
         );
         const approvalExtensionPath = supervised
-          ? yield* preparePrimeApprovalExtension(serverConfig.baseDir).pipe(
-              Effect.provideService(FileSystem.FileSystem, fileSystem),
-              Effect.provideService(Path.Path, path),
+          ? yield* preparePrimeApprovalExtension(host.storage).pipe(
               Effect.mapError(
                 (cause) =>
-                  new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method: "prepare",
+                  new ProviderAdapterV1Error({
+                    operation: "prepare",
                     detail: "Could not install the T3 approval extension.",
                     cause,
                   }),
@@ -1689,13 +1623,29 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
             )
           : undefined;
 
-        const resume = parsePrimeResume(input.resumeCursor);
-        if (resume !== undefined) {
-          yield* requirePersistedResumeFile({
-            threadSessionDir,
-            sessionFile: resume.sessionFile,
-          });
-        }
+        const parsedResume = parsePrimeResume(input.resumeCursor);
+        const resume =
+          parsedResume === undefined
+            ? undefined
+            : {
+                ...parsedResume,
+                sessionFile: yield* host.storage
+                  .validateSessionFile({
+                    threadId: input.threadId,
+                    path: parsedResume.sessionFile,
+                    mustExist: true,
+                  })
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderAdapterV1Error({
+                          operation: "resume",
+                          detail: cause.detail,
+                          cause,
+                        }),
+                    ),
+                  ),
+              };
 
         const sessionScope = yield* Scope.make("sequential");
         let sessionScopeTransferred = false;
@@ -1706,7 +1656,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const disableDiscoveredExtensions = approvalExtensionPath !== undefined;
         const packageCatalogExtensionArgs = disableDiscoveredExtensions
           ? primePackageCatalogExtensionArgs(
-              resolvePrimeAgentDir(options?.environment ?? process.env),
+              resolvePrimeAgentDir(adapterInput.environment ?? process.env),
             )
           : [];
         const args = [
@@ -1732,15 +1682,23 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
               ]
             : []),
         ];
-        const rpc = yield* spawnPrimeRpcClient({
-          command: primeSettings.binaryPath || "prime-agent",
-          args,
-          cwd,
-          ...(options?.environment ? { environment: options.environment } : {}),
-        }).pipe(
+        const primeProcess = yield* host.processes
+          .spawn({
+            command: primeSettings.binaryPath || "prime-agent",
+            args,
+            cwd,
+            environment: adapterInput.environment,
+            purpose: { kind: "session", threadId: input.threadId },
+          })
+          .pipe(
+            Effect.provideService(Scope.Scope, sessionScope),
+            Effect.mapError((cause) => toRpcRequestError("spawn", cause)),
+          );
+        // Prime translates RPC shutdown into its canonical interrupted/exited events.
+        // Detach host crash projection so the same process exit cannot also emit runtime.error.
+        yield* primeProcess.detachSession(input.threadId);
+        const rpc = yield* makePrimeRpcClient(primeProcess).pipe(
           Effect.provideService(Scope.Scope, sessionScope),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-          Effect.mapError((cause) => toRpcRequestError("spawn", cause)),
         );
 
         if (approvalExtensionPath !== undefined) {
@@ -1753,23 +1711,32 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const state = yield* decodePrimeState(stateResponse.data).pipe(
           Effect.mapError(
             (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "get_state",
+              new ProviderAdapterV1Error({
+                operation: "get_state",
                 detail: "Prime returned an invalid state snapshot.",
                 cause,
               }),
           ),
         );
-        yield* requireSessionFileInsideThreadDir({
-          threadSessionDir,
-          sessionFile: state.sessionFile,
-          detail: "Prime returned a session file outside this thread's session directory.",
-        });
+        const sessionFile = yield* host.storage
+          .validateSessionFile({
+            threadId: input.threadId,
+            path: state.sessionFile,
+            mustExist: false,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterV1Error({
+                  operation: "get_state",
+                  detail: cause.detail,
+                  cause,
+                }),
+            ),
+          );
         if (resume !== undefined && state.sessionId !== resume.sessionId) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "resume",
+          return yield* new ProviderAdapterV1Error({
+            operation: "resume",
             detail: "Prime session id did not match the persisted resume cursor.",
           });
         }
@@ -1784,7 +1751,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const resumeCursor = {
           schemaVersion: PRIME_RESUME_VERSION,
           sessionId: state.sessionId,
-          sessionFile: state.sessionFile,
+          sessionFile,
         };
         const createdAt = yield* nowIso;
         const session: ProviderSession = {
@@ -1802,6 +1769,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const ctx: PrimeSessionContext = {
           threadId: input.threadId,
           rpc,
+          process: primeProcess,
           scope: sessionScope,
           session,
           currentModelSlug: selected.slug,
@@ -1858,38 +1826,24 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         return session;
       }).pipe(Effect.scoped);
 
-    const buildTurnAttachments = (input: ProviderSendTurnInput) =>
-      Effect.forEach(input.attachments ?? [], (attachment) => {
-        const attachmentPath = resolveAttachmentPath({
-          attachmentsDir: serverConfig.attachmentsDir,
-          attachment,
-        });
-        if (!attachmentPath) {
-          return Effect.fail(
-            new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "prompt",
-              detail: `Invalid attachment id '${attachment.id}'.`,
-            }),
-          );
-        }
-        return fileSystem.readFile(attachmentPath).pipe(
-          Effect.map((bytes) => ({
+    const buildTurnAttachments = (turnInput: ProviderSendTurnInput) =>
+      Effect.forEach(turnInput.attachments ?? [], (attachment) =>
+        host.attachments.read(attachment).pipe(
+          Effect.map(({ bytes }) => ({
             type: "image" as const,
-            data: Buffer.from(bytes).toString("base64"),
+            data: Encoding.encodeBase64(bytes),
             mimeType: attachment.mimeType,
           })),
           Effect.mapError(
             (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "prompt",
-                detail: cause.message,
+              new ProviderAdapterV1Error({
+                operation: "prompt",
+                detail: cause.detail,
                 cause,
               }),
           ),
-        );
-      });
+        ),
+      );
 
     const steerRunningTurn = (
       ctx: PrimeSessionContext,
@@ -1900,10 +1854,9 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const message = input.input?.trim() ?? "";
         const images = yield* buildTurnAttachments(input);
         if (!message && images.length === 0) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "sendTurn",
-            issue: "Turn requires non-empty text or at least one image.",
+            detail: "Turn requires non-empty text or at least one image.",
           });
         }
         yield* ctx.rpc
@@ -1937,10 +1890,9 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const message = input.input?.trim() ?? "";
         const images = yield* buildTurnAttachments(input);
         if (!message && images.length === 0) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "sendTurn",
-            issue: "Turn requires non-empty text or at least one image.",
+            detail: "Turn requires non-empty text or at least one image.",
           });
         }
         ctx.parentCycleOpen = true;
@@ -1973,7 +1925,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         };
       });
 
-    const sendTurn: PrimeAdapterShape["sendTurn"] = (input) =>
+    const sendTurn: ProviderAdapterV1["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
         if (ctx.activeTurnId !== undefined) {
@@ -1998,10 +1950,9 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const message = input.input?.trim() ?? "";
         const images = yield* buildTurnAttachments(input);
         if (!message && images.length === 0) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "sendTurn",
-            issue: "Turn requires non-empty text or at least one image.",
+            detail: "Turn requires non-empty text or at least one image.",
           });
         }
 
@@ -2082,7 +2033,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         };
       });
 
-    const interruptTurn: PrimeAdapterShape["interruptTurn"] = (threadId, turnId) =>
+    const interruptTurn: ProviderAdapterV1["interruptTurn"] = (threadId, turnId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
         const activeTurnId = ctx.activeTurnId;
@@ -2112,7 +2063,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         });
       });
 
-    const respondToRequest: PrimeAdapterShape["respondToRequest"] = (
+    const respondToRequest: ProviderAdapterV1["respondToRequest"] = (
       threadId,
       approvalRequestId,
       decision,
@@ -2121,16 +2072,15 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const ctx = yield* requireSession(threadId);
         const requestId = String(approvalRequestId);
         if (decision === "acceptForSession") {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "respondToRequest",
+          return yield* new ProviderAdapterV1Error({
+            operation: "respondToRequest",
             detail: "Prime Agent does not support persistent approval decisions yet.",
           });
         }
         yield* resolvePrimeApproval(ctx, requestId, decision);
       });
 
-    const respondToUserInput: PrimeAdapterShape["respondToUserInput"] = (
+    const respondToUserInput: ProviderAdapterV1["respondToUserInput"] = (
       threadId,
       approvalRequestId,
       answers,
@@ -2140,25 +2090,22 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         const requestId = String(approvalRequestId);
         const pending = ctx.pendingUserInputs.get(requestId);
         if (pending === undefined) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "respondToUserInput",
+          return yield* new ProviderAdapterV1Error({
+            operation: "respondToUserInput",
             detail: `Prime user-input request '${requestId}' is not pending.`,
           });
         }
         const answer = answers[requestId];
         if (typeof answer !== "string") {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "respondToUserInput",
-            issue: `Prime user-input request '${requestId}' requires a text answer.`,
+            detail: `Prime user-input request '${requestId}' requires a text answer.`,
           });
         }
         if (pending.request.method === "select" && !pending.options.includes(answer)) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
+          return yield* new ProviderAdapterV1Error({
             operation: "respondToUserInput",
-            issue: `Prime selection '${requestId}' requires one of its offered options.`,
+            detail: `Prime selection '${requestId}' requires one of its offered options.`,
           });
         }
         yield* resolvePrimeUserInput(ctx, requestId, answer);
@@ -2172,8 +2119,7 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
     );
 
     return {
-      provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: PRIME_ADAPTER_PROTOCOL_CAPABILITIES,
       startSession,
       sendTurn,
       interruptTurn,
@@ -2188,10 +2134,9 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
         requireSession(threadId).pipe(
           Effect.flatMap(() =>
             Effect.fail(
-              new ProviderAdapterValidationError({
-                provider: PROVIDER,
+              new ProviderAdapterV1Error({
                 operation: "rollbackThread",
-                issue: "Prime Agent does not expose durable turn rollback yet.",
+                detail: "Prime Agent does not expose durable turn rollback yet.",
               }),
             ),
           ),
@@ -2199,6 +2144,6 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
       stopAll: () =>
         Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true }),
       streamEvents: Stream.fromPubSub(runtimeEvents),
-    } satisfies PrimeAdapterShape;
+    } satisfies ProviderAdapterV1;
   });
 }

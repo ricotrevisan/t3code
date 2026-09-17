@@ -24,6 +24,12 @@ import {
 import { EditorId, FileManagerRevealKind, RemoteOpenTarget } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { RuntimeMode } from "./orchestration.ts";
+import {
+  ProviderAdapterConfigSchema,
+  ProviderAdapterManifestCatalog,
+  ProviderAdapterPackageReference,
+  ProviderAdapterProtocolCapabilitiesV1,
+} from "./providerAdapter.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
 import { ServerSettings } from "./settings.ts";
@@ -193,6 +199,12 @@ export const ServerProvider = Schema.Struct({
   // Open driver kind slug that selects the implementation handling this
   // instance. It is metadata/capability context, not a routing key.
   driver: ProviderDriverKind,
+  /** Server-side adapter package identity. Module paths are never sent to clients. */
+  adapterPackage: Schema.optional(ProviderAdapterPackageReference),
+  /** Declarative package configuration schema; contains no executable adapter code. */
+  adapterConfigSchema: Schema.optional(ProviderAdapterConfigSchema),
+  /** Capabilities negotiated by this configured package instance. */
+  adapterCapabilities: Schema.optional(ProviderAdapterProtocolCapabilitiesV1),
   displayName: Schema.optional(TrimmedNonEmptyString),
   accentColor: Schema.optional(TrimmedNonEmptyString),
   badgeLabel: Schema.optional(TrimmedNonEmptyString),
@@ -555,6 +567,11 @@ export const ServerConfig = Schema.Struct({
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,
   providers: ServerProviders,
+  /**
+   * Safe declarative metadata for provider adapter packages loaded by this server.
+   * Absent on older servers. Executable registration details stay server-local.
+   */
+  providerAdapterManifests: Schema.optionalKey(ProviderAdapterManifestCatalog),
   // Editor ids grow over time; drop ones this build does not know rather than
   // failing the whole config decode.
   availableEditors: ForwardCompatibleArray(EditorId),

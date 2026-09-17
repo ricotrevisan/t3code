@@ -73,6 +73,7 @@ function toRuntimeBinding(
           // from a driver kind.
           providerInstanceId: runtime.providerInstanceId ?? defaultInstanceIdForDriver(provider),
           adapterKey: runtime.adapterKey,
+          ...(runtime.adapterPackage !== null ? { adapterPackage: runtime.adapterPackage } : {}),
           runtimeMode: runtime.runtimeMode,
           status: runtime.status,
           resumeCursor: runtime.resumeCursor,
@@ -136,6 +137,12 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
             (providerChanged
               ? binding.provider
               : (existingRuntime?.adapterKey ?? binding.provider)),
+          adapterPackage:
+            binding.adapterPackage !== undefined
+              ? binding.adapterPackage
+              : !providerChanged
+                ? (existingRuntime?.adapterPackage ?? null)
+                : null,
           runtimeMode: binding.runtimeMode ?? existingRuntime?.runtimeMode ?? "full-access",
           status: binding.status ?? existingRuntime?.status ?? "running",
           lastSeenAt: now,

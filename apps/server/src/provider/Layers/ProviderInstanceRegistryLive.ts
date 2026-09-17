@@ -35,6 +35,7 @@
 import {
   providerInstanceConfigEnabledFlag,
   ProviderInstanceId,
+  type ProviderAdapterManifestV1,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
   type ProviderDriverKind,
@@ -51,6 +52,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import { normalizeProviderAdapterManifests } from "../ProviderAdapterManifestCatalog.ts";
 import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
 import {
   ProviderInstanceRegistry,
@@ -93,6 +95,36 @@ interface RegistryState {
 const entryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boolean =>
   Equal.equals(a, b);
 
+const adapterPackageRefEqual = (
+  left: NonNullable<ProviderInstanceConfig["adapterPackage"]>,
+  right: NonNullable<ProviderInstanceConfig["adapterPackage"]>,
+): boolean =>
+  left.id === right.id &&
+  left.version === right.version &&
+  left.protocolVersion === right.protocolVersion;
+
+const formatAdapterPackageRef = (
+  reference: NonNullable<ProviderInstanceConfig["adapterPackage"]>,
+): string => `${reference.id}@${reference.version} (protocol ${reference.protocolVersion})`;
+
+const adapterPackageMismatchReason = (input: {
+  readonly driver: ProviderDriverKind;
+  readonly configured: ProviderInstanceConfig["adapterPackage"];
+  readonly loaded: ProviderInstanceConfig["adapterPackage"];
+}): string | undefined => {
+  if (input.loaded === undefined) {
+    return input.configured === undefined
+      ? undefined
+      : `Configured adapter package '${formatAdapterPackageRef(input.configured)}' is not loaded for driver '${input.driver}'.`;
+  }
+  if (input.configured === undefined) {
+    return `External driver '${input.driver}' requires an explicit adapter package reference.`;
+  }
+  return adapterPackageRefEqual(input.loaded, input.configured)
+    ? undefined
+    : `Configured adapter package '${formatAdapterPackageRef(input.configured)}' does not match loaded package '${formatAdapterPackageRef(input.loaded)}'.`;
+};
+
 /**
  * Resolve an entry's enabled state. An explicit false on either the
  * envelope or the raw config blob wins (most restrictive) — old settings
@@ -116,6 +148,7 @@ const resolveEntryEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown
  */
 const buildEntry = <R>(input: {
   readonly driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>;
+  readonly unavailableDriverReasons: ReadonlyMap<ProviderDriverKind, string>;
   readonly parentScope: Scope.Scope;
   readonly instanceId: ProviderInstanceId;
   readonly rawInstanceId: string;
@@ -127,7 +160,8 @@ const buildEntry = <R>(input: {
   R
 > =>
   Effect.gen(function* () {
-    const { driversById, parentScope, instanceId, rawInstanceId, entry } = input;
+    const { driversById, unavailableDriverReasons, parentScope, instanceId, rawInstanceId, entry } =
+      input;
     const driver = driversById.get(entry.driver);
     if (!driver) {
       return {
@@ -137,7 +171,31 @@ const buildEntry = <R>(input: {
           instanceId,
           displayName: entry.displayName,
           accentColor: entry.accentColor,
-          reason: `Driver '${entry.driver}' is not registered in this build.`,
+          adapterPackage: entry.adapterPackage,
+          reason:
+            unavailableDriverReasons.get(entry.driver) ??
+            `Driver '${entry.driver}' is not registered in this build.`,
+        }),
+      };
+    }
+
+    const loadedAdapterPackage = driver.adapterPackage;
+    const configuredAdapterPackage = entry.adapterPackage;
+    const packageMismatchReason = adapterPackageMismatchReason({
+      driver: entry.driver,
+      configured: configuredAdapterPackage,
+      loaded: loadedAdapterPackage,
+    });
+    if (packageMismatchReason !== undefined) {
+      return {
+        kind: "unavailable" as const,
+        snapshot: yield* buildUnavailableProviderSnapshot({
+          driverKind: entry.driver,
+          instanceId,
+          displayName: entry.displayName,
+          accentColor: entry.accentColor,
+          adapterPackage: configuredAdapterPackage ?? loadedAdapterPackage,
+          reason: packageMismatchReason,
         }),
       };
     }
@@ -159,6 +217,7 @@ const buildEntry = <R>(input: {
           instanceId,
           displayName: entry.displayName,
           accentColor: entry.accentColor,
+          adapterPackage: entry.adapterPackage,
           reason: `Invalid config for instance '${rawInstanceId}': ${detail}`,
         }),
       };
@@ -197,6 +256,7 @@ const buildEntry = <R>(input: {
           instanceId,
           displayName: entry.displayName,
           accentColor: entry.accentColor,
+          adapterPackage: entry.adapterPackage,
           reason: `Driver '${entry.driver}' failed to create instance: ${createResult.failure.detail}`,
         }),
       };
@@ -219,9 +279,10 @@ const buildEntry = <R>(input: {
 const makeReconcile = <R>(input: {
   readonly state: RegistryState;
   readonly driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>;
+  readonly unavailableDriverReasons: ReadonlyMap<ProviderDriverKind, string>;
   readonly parentScope: Scope.Scope;
 }): ((configMap: ProviderInstanceConfigMap) => Effect.Effect<void, never, R>) => {
-  const { state, driversById, parentScope } = input;
+  const { state, driversById, unavailableDriverReasons, parentScope } = input;
   return (configMap: ProviderInstanceConfigMap) =>
     Effect.gen(function* () {
       const previousEntries = yield* Ref.get(state.entries);
@@ -274,6 +335,7 @@ const makeReconcile = <R>(input: {
 
         const result = yield* buildEntry({
           driversById,
+          unavailableDriverReasons,
           parentScope,
           instanceId,
           rawInstanceId,
@@ -337,6 +399,8 @@ const makeReconcile = <R>(input: {
  */
 export const makeProviderInstanceRegistry = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly adapterManifests?: ReadonlyArray<ProviderAdapterManifestV1>;
+  readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
   readonly configMap: ProviderInstanceConfigMap;
 }): Effect.Effect<
   {
@@ -350,6 +414,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
     const driversById = new Map<ProviderDriverKind, AnyProviderDriver<R>>(
       input.drivers.map((driver) => [driver.driverKind, driver]),
     );
+    const adapterManifests = normalizeProviderAdapterManifests(input.adapterManifests ?? []);
 
     // Capture the enclosing scope so per-instance child scopes can be
     // attached to it at `reconcile` time. Without this, `reconcile`
@@ -369,7 +434,12 @@ export const makeProviderInstanceRegistry = <R>(input: {
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
 
     const state: RegistryState = { entries, unavailable, changes };
-    const reconcileWithR = makeReconcile({ state, driversById, parentScope });
+    const reconcileWithR = makeReconcile({
+      state,
+      driversById,
+      unavailableDriverReasons: input.unavailableDriverReasons ?? new Map(),
+      parentScope,
+    });
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
       reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
 
@@ -388,6 +458,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
       listUnavailable: Ref.get(unavailable).pipe(
         Effect.map((map) => Array.from(map.values()) as ReadonlyArray<ServerProvider>),
       ),
+      listAdapterManifests: Effect.succeed(adapterManifests),
       // Getters: each read constructs a fresh Stream / Effect descriptor
       // so multiple consumers don't share a single already-started
       // Channel or subscription. Matches the pattern `ProviderRegistry`
@@ -411,6 +482,26 @@ export const makeProviderInstanceRegistry = <R>(input: {
   });
 
 /**
+ * Assemble a `ProviderInstanceRegistry` Layer bound to a fixed set of
+ * drivers and a pre-resolved `ProviderInstanceConfigMap`. Used by tests
+ * that want explicit control over the registry's source-of-truth without
+ * wiring up the settings watcher.
+ *
+ * Only exposes the public registry tag — hot-reload consumers should use
+ * `ProviderInstanceRegistryMutableLayer` (below) or the hydration layer.
+ */
+export const ProviderInstanceRegistryLayer = <R>(input: {
+  readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly adapterManifests?: ReadonlyArray<ProviderAdapterManifestV1>;
+  readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
+  readonly configMap: ProviderInstanceConfigMap;
+}): Layer.Layer<ProviderInstanceRegistry, never, R> =>
+  Layer.effect(
+    ProviderInstanceRegistry,
+    makeProviderInstanceRegistry(input).pipe(Effect.map((built) => built.registry)),
+  ) as Layer.Layer<ProviderInstanceRegistry, never, R>;
+
+/**
  * Layer variant that also exposes the mutator tag. Consumed by
  * `ProviderInstanceRegistryHydrationLive` to reconcile on settings
  * changes. Tests that exercise the mutator directly can pair this Layer
@@ -418,6 +509,8 @@ export const makeProviderInstanceRegistry = <R>(input: {
  */
 export const ProviderInstanceRegistryMutableLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
+  readonly adapterManifests?: ReadonlyArray<ProviderAdapterManifestV1>;
+  readonly unavailableDriverReasons?: ReadonlyMap<ProviderDriverKind, string>;
   readonly configMap: ProviderInstanceConfigMap;
 }): Layer.Layer<ProviderInstanceRegistry | ProviderInstanceRegistryMutator, never, R> =>
   Layer.effectContext(

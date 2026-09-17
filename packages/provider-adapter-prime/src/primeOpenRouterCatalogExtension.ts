@@ -1,6 +1,5 @@
+import type { ProviderAdapterHostV2 } from "@t3tools/provider-adapter";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
 
 const PRIME_OPENROUTER_CATALOG_EXTENSION_FILE_NAME = "t3-openrouter-catalog.ts";
 
@@ -114,14 +113,10 @@ export default async function t3OpenRouterCatalogExtension(pi: ExtensionAPI) {
 
 export const preparePrimeOpenRouterCatalogExtension = Effect.fn(
   "preparePrimeOpenRouterCatalogExtension",
-)(function* (baseDir: string) {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const extensionDirectory = path.resolve(baseDir, "prime-agent", "extensions");
-  const extensionPath = path.join(extensionDirectory, PRIME_OPENROUTER_CATALOG_EXTENSION_FILE_NAME);
-
-  yield* fileSystem.makeDirectory(extensionDirectory, { recursive: true });
-  yield* fileSystem.writeFileString(extensionPath, PRIME_OPENROUTER_CATALOG_EXTENSION_SOURCE);
-
-  return extensionPath;
+)(function* (storage: ProviderAdapterHostV2["storage"]) {
+  return yield* storage.materializeArtifact({
+    key: "openrouter-catalog",
+    fileName: PRIME_OPENROUTER_CATALOG_EXTENSION_FILE_NAME,
+    content: PRIME_OPENROUTER_CATALOG_EXTENSION_SOURCE,
+  });
 });

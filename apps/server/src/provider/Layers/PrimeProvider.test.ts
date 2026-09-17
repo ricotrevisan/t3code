@@ -4,18 +4,24 @@ import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { PrimeSettings } from "@t3tools/contracts";
+import { PrimeSettings, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  checkPrimeProviderStatus,
+  loggedInPrimeProvidersFromAuthData,
+  makePrimeProviderSnapshot,
+  mapPrimeAvailableModels,
+  PRIME_ADAPTER_PROTOCOL_CAPABILITIES,
+  resolvePrimeSessionThinkingLevel,
+  PRIME_PROVIDER_ADAPTER_PACKAGE,
+} from "@t3tools/provider-adapter-prime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-import {
-  loggedInPrimeProvidersFromAuthData,
-  mapPrimeAvailableModels,
-  resolvePrimeSessionThinkingLevel,
-} from "../prime/primeModels.ts";
-import { buildInitialPrimeProviderSnapshot, checkPrimeProviderStatus } from "./PrimeProvider.ts";
+import { ServerConfig } from "../../config.ts";
+import { makeExternalProviderAdapterHostV2 } from "../ExternalProviderAdapterHost.ts";
 
 const decodePrimeSettings = Schema.decodeSync(PrimeSettings);
 
@@ -29,6 +35,49 @@ const PATH_TRAP_ENV: NodeJS.ProcessEnv = {
   PATH: "/definitely/not/a/prime-agent-path",
   PRIME_AGENT_CODING_AGENT_DIR: "/definitely/not/a-prime-agent-dir",
 };
+
+const primeProviderTestLayer = ServerConfig.layerTest(process.cwd(), {
+  prefix: "t3code-prime-provider-test-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
+
+const PRIME_SNAPSHOT_OPTIONS = {
+  packageId: PRIME_PROVIDER_ADAPTER_PACKAGE.manifest.id,
+  packageVersion: PRIME_PROVIDER_ADAPTER_PACKAGE.manifest.version,
+  manifestConfigSchema: PRIME_PROVIDER_ADAPTER_PACKAGE.manifest.configSchema,
+  capabilities: PRIME_ADAPTER_PROTOCOL_CAPABILITIES,
+};
+
+const makePrimeProviderFixture = Effect.fn("makePrimeProviderFixture")(function* (
+  settings: PrimeSettings,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const instanceId = ProviderInstanceId.make("primeAgent");
+  const input = {
+    instanceId,
+    displayName: undefined,
+    accentColor: undefined,
+    environment,
+    enabled: settings.enabled,
+    config: {
+      binaryPath: settings.binaryPath,
+      launchArgs: settings.launchArgs,
+    },
+  };
+  const broker = yield* makeExternalProviderAdapterHostV2({
+    packageId: PRIME_PROVIDER_ADAPTER_PACKAGE.manifest.id,
+    instanceId,
+    storageKey: PRIME_PROVIDER_ADAPTER_PACKAGE.storageKey,
+  });
+  return { broker, input };
+});
+
+const checkPrimeStatus = Effect.fn("checkPrimeStatus")(function* (
+  settings: PrimeSettings,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const { broker, input } = yield* makePrimeProviderFixture(settings, environment);
+  return yield* checkPrimeProviderStatus(input, broker.host, PRIME_SNAPSHOT_OPTIONS);
+});
 
 function shSingleQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -49,7 +98,6 @@ const makeApprovalHandshakeFixture = Effect.fn("makeApprovalHandshakeFixture")(f
   const path = yield* Path.Path;
   const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-approval-probe-" });
   const binaryPath = path.join(dir, "prime-agent");
-  const approvalExtensionBaseDir = path.join(dir, "t3-home");
   const requestLogPath = path.join(dir, "requests.jsonl");
   yield* fs.writeFileString(
     binaryPath,
@@ -63,7 +111,7 @@ const makeApprovalHandshakeFixture = Effect.fn("makeApprovalHandshakeFixture")(f
     ].join("\n"),
   );
   yield* fs.chmod(binaryPath, 0o755);
-  return { approvalExtensionBaseDir, binaryPath, kind, requestLogPath };
+  return { binaryPath, kind, requestLogPath };
 });
 
 describe("mapPrimeAvailableModels", () => {
@@ -175,401 +223,425 @@ describe("loggedInPrimeProvidersFromAuthData", () => {
   });
 });
 
-describe("buildInitialPrimeProviderSnapshot", () => {
-  it.effect("returns a disabled snapshot when settings.enabled is false", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* buildInitialPrimeProviderSnapshot(
-        decodePrimeSettings({ enabled: false }),
-      );
-      expect(snapshot.enabled).toBe(false);
-      expect(snapshot.status).toBe("disabled");
-      expect(snapshot.installed).toBe(false);
-      expect(snapshot.message).toContain("disabled");
-      expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
-    }),
-  );
+it.layer(primeProviderTestLayer, { excludeTestServices: true })(
+  "makePrimeProviderSnapshot",
+  (it) => {
+    it.effect("returns a disabled snapshot when settings.enabled is false", () =>
+      Effect.gen(function* () {
+        const { broker, input } = yield* makePrimeProviderFixture(
+          decodePrimeSettings({ enabled: false }),
+        );
+        const provider = yield* makePrimeProviderSnapshot(
+          input,
+          broker.host,
+          PRIME_SNAPSHOT_OPTIONS,
+        );
+        const snapshot = yield* provider.getSnapshot;
+        expect(snapshot.enabled).toBe(false);
+        expect(snapshot.status).toBe("disabled");
+        expect(snapshot.installed).toBe(false);
+        expect(snapshot.message).toContain("disabled");
+        expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
+      }),
+    );
 
-  it.effect("returns a disabled snapshot by default — Prime Agent is opt-in", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* buildInitialPrimeProviderSnapshot(decodePrimeSettings({}));
-      expect(snapshot.enabled).toBe(false);
-      expect(snapshot.status).toBe("disabled");
-      expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
-    }),
-  );
+    it.effect("returns a disabled snapshot by default — Prime Agent is opt-in", () =>
+      Effect.gen(function* () {
+        const { broker, input } = yield* makePrimeProviderFixture(decodePrimeSettings({}));
+        const provider = yield* makePrimeProviderSnapshot(
+          input,
+          broker.host,
+          PRIME_SNAPSHOT_OPTIONS,
+        );
+        const snapshot = yield* provider.getSnapshot;
+        expect(snapshot.enabled).toBe(false);
+        expect(snapshot.status).toBe("disabled");
+        expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
+      }),
+    );
 
-  it.effect("returns a pending snapshot when enabled", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* buildInitialPrimeProviderSnapshot(
-        decodePrimeSettings({ enabled: true }),
-      );
-      expect(snapshot.enabled).toBe(true);
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.status).toBe("warning");
-      expect(snapshot.version).toBeNull();
-      expect(snapshot.message).toContain("Checking Prime Agent");
-      expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
-    }),
-  );
-});
+    it.effect("returns a pending snapshot when enabled", () =>
+      Effect.gen(function* () {
+        const { broker, input } = yield* makePrimeProviderFixture(
+          decodePrimeSettings({ enabled: true }),
+          PATH_TRAP_ENV,
+        );
+        const provider = yield* makePrimeProviderSnapshot(
+          input,
+          broker.host,
+          PRIME_SNAPSHOT_OPTIONS,
+        );
+        const snapshot = yield* provider.getSnapshot;
+        expect(snapshot.enabled).toBe(true);
+        expect(snapshot.installed).toBe(true);
+        expect(snapshot.status).toBe("warning");
+        expect(snapshot.version).toBeNull();
+        expect(snapshot.message).toContain("Checking Prime Agent");
+        expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
+      }),
+    );
+  },
+);
 
-it.layer(NodeServices.layer)("checkPrimeProviderStatus", (it) => {
-  it.effect("reports the binary as missing when the binary path does not resolve", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* checkPrimeProviderStatus(
-        decodePrimeSettings({
-          enabled: true,
-          binaryPath: "/definitely/not/installed/prime-agent",
-        }),
-        PATH_TRAP_ENV,
-      );
-      expect(snapshot.enabled).toBe(true);
-      expect(snapshot.installed).toBe(false);
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.version).toBeNull();
-      expect(snapshot.message).toMatch(/not installed|not on PATH/);
-    }),
-  );
+it.layer(primeProviderTestLayer, { excludeTestServices: true })(
+  "checkPrimeProviderStatus",
+  (it) => {
+    it.effect("reports the binary as missing when the binary path does not resolve", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* checkPrimeStatus(
+          decodePrimeSettings({
+            enabled: true,
+            binaryPath: "/definitely/not/installed/prime-agent",
+          }),
+          PATH_TRAP_ENV,
+        );
+        expect(snapshot.enabled).toBe(true);
+        expect(snapshot.installed).toBe(false);
+        expect(snapshot.status).toBe("error");
+        expect(snapshot.version).toBeNull();
+        expect(snapshot.message).toMatch(/not installed|not on PATH/);
+      }),
+    );
 
-  it.effect("does not probe PATH prime-agent when binaryPath is an explicit missing file", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-path-trap-" });
-          const trapPath = path.join(dir, "prime-agent");
-          const markerPath = path.join(dir, "invoked");
-          yield* fs.writeFileString(
-            trapPath,
-            ["#!/bin/sh", `printf invoked > ${shSingleQuote(markerPath)}`, "exit 0", ""].join("\n"),
-          );
-          yield* fs.chmod(trapPath, 0o755);
-
-          return yield* checkPrimeProviderStatus(
-            decodePrimeSettings({
-              enabled: true,
-              binaryPath: "/definitely/not/installed/prime-agent",
-            }),
-            { ...process.env, PATH: dir },
-          ).pipe(
-            Effect.tap(() =>
-              fs.exists(markerPath).pipe(
-                Effect.flatMap((exists) => {
-                  expect(exists).toBe(false);
-                  return Effect.void;
-                }),
+    it.effect("does not probe PATH prime-agent when binaryPath is an explicit missing file", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-path-trap-" });
+            const trapPath = path.join(dir, "prime-agent");
+            const markerPath = path.join(dir, "invoked");
+            yield* fs.writeFileString(
+              trapPath,
+              ["#!/bin/sh", `printf invoked > ${shSingleQuote(markerPath)}`, "exit 0", ""].join(
+                "\n",
               ),
-            ),
-          );
-        }),
-      );
+            );
+            yield* fs.chmod(trapPath, 0o755);
 
-      expect(snapshot.installed).toBe(false);
-      expect(snapshot.status).toBe("error");
-    }),
-  );
+            return yield* checkPrimeStatus(
+              decodePrimeSettings({
+                enabled: true,
+                binaryPath: "/definitely/not/installed/prime-agent",
+              }),
+              { ...process.env, PATH: dir },
+            ).pipe(
+              Effect.tap(() =>
+                fs.exists(markerPath).pipe(
+                  Effect.flatMap((exists) => {
+                    expect(exists).toBe(false);
+                    return Effect.void;
+                  }),
+                ),
+              ),
+            );
+          }),
+        );
 
-  it.effect("reports the version string from a fixture binary --version", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-version-" });
-          const binaryPath = path.join(dir, "prime-agent");
-          yield* fs.writeFileString(
-            binaryPath,
-            [
-              "#!/bin/sh",
-              `exec ${shSingleQuote(process.execPath)} ${shSingleQuote(mockAgentPath)} "$@"`,
-              "",
-            ].join("\n"),
-          );
-          yield* fs.chmod(binaryPath, 0o755);
+        expect(snapshot.installed).toBe(false);
+        expect(snapshot.status).toBe("error");
+      }),
+    );
 
-          return yield* checkPrimeProviderStatus(
-            decodePrimeSettings({ enabled: true, binaryPath }),
-            PATH_TRAP_ENV,
-            { approvalExtensionBaseDir: path.join(dir, "t3-home") },
-          );
-        }),
-      );
+    it.effect("reports the version string from a fixture binary --version", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-version-" });
+            const binaryPath = path.join(dir, "prime-agent");
+            yield* fs.writeFileString(
+              binaryPath,
+              [
+                "#!/bin/sh",
+                `exec ${shSingleQuote(process.execPath)} ${shSingleQuote(mockAgentPath)} "$@"`,
+                "",
+              ].join("\n"),
+            );
+            yield* fs.chmod(binaryPath, 0o755);
 
-      expect(snapshot.enabled).toBe(true);
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.status).toBe("ready");
-      expect(snapshot.version).toBe("0.0.1");
-      expect(snapshot.auth.status).toBe("authenticated");
-      expect(snapshot.requiresNewThreadForModelChange).toBe(false);
-      expect(snapshot.supportedRuntimeModes).toEqual(["full-access", "approval-required"]);
-      expect(snapshot.models.map((model) => model.slug)).toEqual([
-        "anthropic/claude-sonnet-4",
-        "openai-codex/gpt-5.6-sol",
-        "local/no-think",
-        "openrouter/stealth/ox-alpha",
-      ]);
-      const sol = snapshot.models.find((model) => model.slug === "openai-codex/gpt-5.6-sol");
-      expect(sol?.capabilities?.optionDescriptors?.[0]?.id).toBe("thinkingLevel");
-      expect(
-        sol?.capabilities?.optionDescriptors?.[0]?.type === "select"
-          ? sol.capabilities.optionDescriptors[0].options.map((option) => option.id)
-          : [],
-      ).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
-    }),
-  );
+            return yield* checkPrimeStatus(
+              decodePrimeSettings({ enabled: true, binaryPath }),
+              PATH_TRAP_ENV,
+            );
+          }),
+        );
 
-  it.effect("hides models for Prime providers that are not in auth.json", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-version-" });
-          const agentDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-auth-" });
-          const binaryPath = path.join(dir, "prime-agent");
-          yield* fs.writeFileString(
-            binaryPath,
-            [
-              "#!/bin/sh",
-              `exec ${shSingleQuote(process.execPath)} ${shSingleQuote(mockAgentPath)} "$@"`,
-              "",
-            ].join("\n"),
-          );
-          yield* fs.chmod(binaryPath, 0o755);
-          yield* fs.writeFileString(
-            path.join(agentDir, "auth.json"),
-            '{"openai-codex":{"type":"oauth"}}',
-          );
+        expect(snapshot.enabled).toBe(true);
+        expect(snapshot.installed).toBe(true);
+        expect(snapshot.status).toBe("ready");
+        expect(snapshot.version).toBe("0.0.1");
+        expect(snapshot.auth.status).toBe("authenticated");
+        expect(snapshot.requiresNewThreadForModelChange).toBe(false);
+        expect(snapshot.supportedRuntimeModes).toEqual(["full-access", "approval-required"]);
+        expect(snapshot.models.map((model) => model.slug)).toEqual([
+          "anthropic/claude-sonnet-4",
+          "openai-codex/gpt-5.6-sol",
+          "local/no-think",
+          "openrouter/stealth/ox-alpha",
+        ]);
+        const sol = snapshot.models.find((model) => model.slug === "openai-codex/gpt-5.6-sol");
+        expect(sol?.capabilities?.optionDescriptors?.[0]?.id).toBe("thinkingLevel");
+        expect(
+          sol?.capabilities?.optionDescriptors?.[0]?.type === "select"
+            ? sol.capabilities.optionDescriptors[0].options.map((option) => option.id)
+            : [],
+        ).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
+      }),
+    );
 
-          return yield* checkPrimeProviderStatus(
-            decodePrimeSettings({ enabled: true, binaryPath }),
-            {
+    it.effect("hides models for Prime providers that are not in auth.json", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-version-" });
+            const agentDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-auth-" });
+            const binaryPath = path.join(dir, "prime-agent");
+            yield* fs.writeFileString(
+              binaryPath,
+              [
+                "#!/bin/sh",
+                `exec ${shSingleQuote(process.execPath)} ${shSingleQuote(mockAgentPath)} "$@"`,
+                "",
+              ].join("\n"),
+            );
+            yield* fs.chmod(binaryPath, 0o755);
+            yield* fs.writeFileString(
+              path.join(agentDir, "auth.json"),
+              '{"openai-codex":{"type":"oauth"}}',
+            );
+
+            return yield* checkPrimeStatus(decodePrimeSettings({ enabled: true, binaryPath }), {
               ...PATH_TRAP_ENV,
               PRIME_AGENT_CODING_AGENT_DIR: agentDir,
-            },
-          );
-        }),
-      );
+            });
+          }),
+        );
 
-      expect(snapshot.status).toBe("ready");
-      expect(snapshot.auth.status).toBe("authenticated");
-      expect(snapshot.models.map((model) => model.slug)).toEqual(["openai-codex/gpt-5.6-sol"]);
-    }),
-  );
+        expect(snapshot.status).toBe("ready");
+        expect(snapshot.auth.status).toBe("authenticated");
+        expect(snapshot.models.map((model) => model.slug)).toEqual(["openai-codex/gpt-5.6-sol"]);
+      }),
+    );
 
-  it.effect("forwards installed Prime package catalogs when listing models", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* Effect.scoped(
+    it.effect("forwards installed Prime package catalogs when listing models", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-package-list-" });
+            const agentDir = yield* fs.makeTempDirectoryScoped({
+              prefix: "t3code-prime-package-agent-",
+            });
+            const binaryPath = path.join(dir, "prime-agent");
+            const requestLogPath = path.join(dir, "requests.jsonl");
+            const xaiRoot = path.join(agentDir, "npm", "node_modules", "pi-xai-oauth");
+            const xaiExtension = path.join(xaiRoot, "extensions", "xai-oauth.ts");
+            yield* fs.makeDirectory(path.join(xaiRoot, "extensions"), { recursive: true });
+            yield* fs.writeFileString(
+              path.join(xaiRoot, "package.json"),
+              // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed package manifest fixture.
+              JSON.stringify({
+                name: "pi-xai-oauth",
+                pi: { extensions: ["./extensions"] },
+              }),
+            );
+            yield* fs.writeFileString(xaiExtension, "export default async function () {}");
+            yield* fs.writeFileString(
+              path.join(agentDir, "settings.json"),
+              // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed Prime settings fixture.
+              JSON.stringify({ packages: ["npm:pi-xai-oauth"] }),
+            );
+            yield* fs.writeFileString(
+              binaryPath,
+              [
+                "#!/bin/sh",
+                `exec ${shSingleQuote(process.execPath)} ${shSingleQuote(mockAgentPath)} "$@"`,
+                "",
+              ].join("\n"),
+            );
+            yield* fs.chmod(binaryPath, 0o755);
+
+            const result = yield* checkPrimeStatus(
+              decodePrimeSettings({ enabled: true, binaryPath }),
+              {
+                ...PATH_TRAP_ENV,
+                PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+                T3_PRIME_MOCK_REQUEST_LOG_PATH: requestLogPath,
+              },
+            );
+
+            const invocations = (yield* fs.readFileString(requestLogPath))
+              .trim()
+              .split("\n")
+              .map(
+                (line) => JSON.parse(line) as { args: Array<string>; command: { type?: unknown } },
+              );
+            const listArgs = invocations.find(
+              (entry) => entry.command.type === "get_available_models",
+            )?.args;
+            expect(listArgs).toBeDefined();
+            expect(listArgs).toContain("--no-extensions");
+            const extensionPaths = (listArgs ?? []).flatMap((arg, index, args) =>
+              arg === "--extension" && args[index + 1] ? [args[index + 1]!] : [],
+            );
+            expect(extensionPaths).toContain(xaiExtension);
+            expect(extensionPaths.some((value) => value.endsWith("t3-openrouter-catalog.ts"))).toBe(
+              true,
+            );
+
+            return result;
+          }),
+        );
+
+        expect(snapshot.status).toBe("ready");
+        expect(snapshot.models.length).toBeGreaterThan(0);
+      }),
+    );
+
+    it.effect("does not fall back to a hardcoded model list when listing fails", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-models-fail-" });
+            const binaryPath = path.join(dir, "prime-agent");
+            yield* fs.writeFileString(
+              binaryPath,
+              [
+                "#!/bin/sh",
+                'if [ "$1" = "--version" ]; then printf "0.0.9\\n"; exit 0; fi',
+                "exit 1",
+                "",
+              ].join("\n"),
+            );
+            yield* fs.chmod(binaryPath, 0o755);
+
+            return yield* checkPrimeStatus(
+              decodePrimeSettings({ enabled: true, binaryPath }),
+              PATH_TRAP_ENV,
+            );
+          }),
+        );
+
+        expect(snapshot.installed).toBe(true);
+        expect(snapshot.version).toBe("0.0.9");
+        expect(snapshot.status).toBe("warning");
+        expect(snapshot.models).toEqual([]);
+        expect(snapshot.message).toContain("could not list models");
+      }),
+    );
+
+    it.effect("reports an installed CLI as unhealthy when --version exits non-zero", () =>
+      Effect.gen(function* () {
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-version-fail-" });
+            const binaryPath = path.join(dir, "prime-agent");
+            yield* fs.writeFileString(
+              binaryPath,
+              ["#!/bin/sh", 'printf "broken prime install\\n" >&2', "exit 2", ""].join("\n"),
+            );
+            yield* fs.chmod(binaryPath, 0o755);
+
+            return yield* checkPrimeStatus(
+              decodePrimeSettings({ enabled: true, binaryPath }),
+              PATH_TRAP_ENV,
+            );
+          }),
+        );
+
+        expect(snapshot.enabled).toBe(true);
+        expect(snapshot.installed).toBe(true);
+        expect(snapshot.status).toBe("error");
+        expect(snapshot.message).toBe("Prime Agent is installed but failed to run.");
+        expect(snapshot.message).not.toContain("broken prime install");
+      }),
+    );
+
+    it.effect("advertises approval-required only after the exact extension handshake", () =>
+      Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-package-list-" });
-          const agentDir = yield* fs.makeTempDirectoryScoped({
-            prefix: "t3code-prime-package-agent-",
-          });
-          const binaryPath = path.join(dir, "prime-agent");
-          const requestLogPath = path.join(dir, "requests.jsonl");
-          const xaiRoot = path.join(agentDir, "npm", "node_modules", "pi-xai-oauth");
-          const xaiExtension = path.join(xaiRoot, "extensions", "xai-oauth.ts");
-          yield* fs.makeDirectory(path.join(xaiRoot, "extensions"), { recursive: true });
-          yield* fs.writeFileString(
-            path.join(xaiRoot, "package.json"),
-            // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed package manifest fixture.
-            JSON.stringify({
-              name: "pi-xai-oauth",
-              pi: { extensions: ["./extensions"] },
-            }),
-          );
-          yield* fs.writeFileString(xaiExtension, "export default async function () {}");
-          yield* fs.writeFileString(
-            path.join(agentDir, "settings.json"),
-            // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed Prime settings fixture.
-            JSON.stringify({ packages: ["npm:pi-xai-oauth"] }),
-          );
-          yield* fs.writeFileString(
-            binaryPath,
-            [
-              "#!/bin/sh",
-              `exec ${shSingleQuote(process.execPath)} ${shSingleQuote(mockAgentPath)} "$@"`,
-              "",
-            ].join("\n"),
-          );
-          yield* fs.chmod(binaryPath, 0o755);
-
-          const result = yield* checkPrimeProviderStatus(
-            decodePrimeSettings({ enabled: true, binaryPath }),
+          const fixture = yield* makeApprovalHandshakeFixture("valid");
+          const snapshot = yield* checkPrimeStatus(
+            decodePrimeSettings({ enabled: true, binaryPath: fixture.binaryPath }),
             {
               ...PATH_TRAP_ENV,
-              PRIME_AGENT_CODING_AGENT_DIR: agentDir,
-              T3_PRIME_MOCK_REQUEST_LOG_PATH: requestLogPath,
+              T3_PRIME_MOCK_APPROVAL_HANDSHAKE: fixture.kind,
+              T3_PRIME_MOCK_REQUEST_LOG_PATH: fixture.requestLogPath,
             },
-            { approvalExtensionBaseDir: path.join(dir, "t3-home") },
           );
 
-          const invocations = (yield* fs.readFileString(requestLogPath))
+          expect(snapshot.status).toBe("ready");
+          expect(snapshot.models.length).toBeGreaterThan(0);
+          expect(snapshot.supportedRuntimeModes).toEqual(["full-access", "approval-required"]);
+          expect(snapshot.showInteractionModeToggle).toBe(false);
+
+          const invocations = (yield* fs.readFileString(fixture.requestLogPath))
             .trim()
             .split("\n")
             .map(
               (line) => JSON.parse(line) as { args: Array<string>; command: { type?: unknown } },
             );
-          const listArgs = invocations.find(
-            (entry) => entry.command.type === "get_available_models",
+          const handshakeArgs = invocations.find(
+            (entry) => entry.command.type === "get_commands",
           )?.args;
-          expect(listArgs).toBeDefined();
-          expect(listArgs).toContain("--no-extensions");
-          const extensionPaths = (listArgs ?? []).flatMap((arg, index, args) =>
-            arg === "--extension" && args[index + 1] ? [args[index + 1]!] : [],
+          const config = yield* ServerConfig;
+          const extensionPath = path.resolve(
+            config.baseDir,
+            "prime-agent",
+            "artifacts",
+            "approval-v1",
+            "t3-approval-v1.ts",
           );
-          expect(extensionPaths).toContain(xaiExtension);
-          expect(extensionPaths.some((value) => value.endsWith("t3-openrouter-catalog.ts"))).toBe(
-            true,
-          );
-
-          return result;
+          expect(handshakeArgs).toEqual([
+            "--mode",
+            "rpc",
+            "--no-session",
+            "--no-tools",
+            "--no-extensions",
+            "--extension",
+            extensionPath,
+            "--t3-approval-mode=approval-required",
+          ]);
         }),
-      );
-
-      expect(snapshot.status).toBe("ready");
-      expect(snapshot.models.length).toBeGreaterThan(0);
-    }),
-  );
-
-  it.effect("does not fall back to a hardcoded model list when listing fails", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-models-fail-" });
-          const binaryPath = path.join(dir, "prime-agent");
-          yield* fs.writeFileString(
-            binaryPath,
-            [
-              "#!/bin/sh",
-              'if [ "$1" = "--version" ]; then printf "0.0.9\\n"; exit 0; fi',
-              "exit 1",
-              "",
-            ].join("\n"),
-          );
-          yield* fs.chmod(binaryPath, 0o755);
-
-          return yield* checkPrimeProviderStatus(
-            decodePrimeSettings({ enabled: true, binaryPath }),
-            PATH_TRAP_ENV,
-          );
-        }),
-      );
-
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.version).toBe("0.0.9");
-      expect(snapshot.status).toBe("warning");
-      expect(snapshot.models).toEqual([]);
-      expect(snapshot.message).toContain("could not list models");
-    }),
-  );
-
-  it.effect("reports an installed CLI as unhealthy when --version exits non-zero", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-prime-version-fail-" });
-          const binaryPath = path.join(dir, "prime-agent");
-          yield* fs.writeFileString(
-            binaryPath,
-            ["#!/bin/sh", 'printf "broken prime install\\n" >&2', "exit 2", ""].join("\n"),
-          );
-          yield* fs.chmod(binaryPath, 0o755);
-
-          return yield* checkPrimeProviderStatus(
-            decodePrimeSettings({ enabled: true, binaryPath }),
-            PATH_TRAP_ENV,
-          );
-        }),
-      );
-
-      expect(snapshot.enabled).toBe(true);
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.message).toBe("Prime Agent is installed but failed to run.");
-      expect(snapshot.message).not.toContain("broken prime install");
-    }),
-  );
-
-  it.effect("advertises approval-required only after the exact extension handshake", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const fixture = yield* makeApprovalHandshakeFixture("valid");
-        const snapshot = yield* checkPrimeProviderStatus(
-          decodePrimeSettings({ enabled: true, binaryPath: fixture.binaryPath }),
-          {
-            ...PATH_TRAP_ENV,
-            T3_PRIME_MOCK_APPROVAL_HANDSHAKE: fixture.kind,
-            T3_PRIME_MOCK_REQUEST_LOG_PATH: fixture.requestLogPath,
-          },
-          { approvalExtensionBaseDir: fixture.approvalExtensionBaseDir },
-        );
-
-        expect(snapshot.status).toBe("ready");
-        expect(snapshot.models.length).toBeGreaterThan(0);
-        expect(snapshot.supportedRuntimeModes).toEqual(["full-access", "approval-required"]);
-        expect(snapshot.showInteractionModeToggle).toBe(false);
-
-        const invocations = (yield* fs.readFileString(fixture.requestLogPath))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line) as { args: Array<string>; command: { type?: unknown } });
-        const handshakeArgs = invocations.find(
-          (entry) => entry.command.type === "get_commands",
-        )?.args;
-        const extensionPath = path.resolve(
-          fixture.approvalExtensionBaseDir,
-          "prime-agent",
-          "extensions",
-          "t3-approval-v1.ts",
-        );
-        expect(handshakeArgs).toEqual([
-          "--mode",
-          "rpc",
-          "--no-session",
-          "--no-tools",
-          "--no-extensions",
-          "--extension",
-          extensionPath,
-          "--t3-approval-mode=approval-required",
-        ]);
-      }),
-    ),
-  );
-
-  for (const kind of ["missing", "malformed", "wrong-path", "wrong-source"] as const) {
-    it.effect(
-      `keeps model health usable and advertises full-access only for ${kind} handshake`,
-      () =>
-        Effect.scoped(
-          Effect.gen(function* () {
-            const fixture = yield* makeApprovalHandshakeFixture(kind);
-            const snapshot = yield* checkPrimeProviderStatus(
-              decodePrimeSettings({ enabled: true, binaryPath: fixture.binaryPath }),
-              {
-                ...PATH_TRAP_ENV,
-                T3_PRIME_MOCK_APPROVAL_HANDSHAKE: fixture.kind,
-                T3_PRIME_MOCK_REQUEST_LOG_PATH: fixture.requestLogPath,
-              },
-              { approvalExtensionBaseDir: fixture.approvalExtensionBaseDir },
-            );
-
-            expect(snapshot.status).toBe("ready");
-            expect(snapshot.auth.status).toBe("authenticated");
-            expect(snapshot.models.length).toBeGreaterThan(0);
-            expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
-            expect(snapshot.showInteractionModeToggle).toBe(false);
-          }),
-        ),
+      ),
     );
-  }
-});
+
+    for (const kind of ["missing", "malformed", "wrong-path", "wrong-source"] as const) {
+      it.effect(
+        `keeps model health usable and advertises full-access only for ${kind} handshake`,
+        () =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const fixture = yield* makeApprovalHandshakeFixture(kind);
+              const snapshot = yield* checkPrimeStatus(
+                decodePrimeSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+                {
+                  ...PATH_TRAP_ENV,
+                  T3_PRIME_MOCK_APPROVAL_HANDSHAKE: fixture.kind,
+                  T3_PRIME_MOCK_REQUEST_LOG_PATH: fixture.requestLogPath,
+                },
+              );
+
+              expect(snapshot.status).toBe("ready");
+              expect(snapshot.auth.status).toBe("authenticated");
+              expect(snapshot.models.length).toBeGreaterThan(0);
+              expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
+              expect(snapshot.showInteractionModeToggle).toBe(false);
+            }),
+          ),
+      );
+    }
+  },
+);
