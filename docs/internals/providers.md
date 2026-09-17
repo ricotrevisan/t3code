@@ -17,13 +17,12 @@ orchestration layer does not know which one is behind a thread.
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
 
-[`FirstPartyProviderAdapters.ts`][first-party] registers the compiled Prime driver as
-`prime-rpc@1.0.0`. [`ProviderAdapterManifestCatalog.ts`][manifest-catalog] also publishes the compiled
-DeepSeek Harness package described below. Both use the same pinned package identity and negotiated
-capability fields as external packages. Prime is a server-private transition bridge: it remains
-compiled into this build and can still use private Effect services, managed snapshots, filesystem
-behavior, and text generation. It is not an independently installable
-`@t3tools/provider-adapter` package.
+[`FirstPartyProviderAdapters.ts`][first-party] registers the compiled workspace packages for Prime
+(`prime-rpc@1.0.0`) and DeepSeek Harness. Both run through `makeExternalProviderDriver`, with the
+same package identity, host negotiation, output decoding, defect isolation, and crash handling as
+trusted-local packages. Prime's implementation lives in [`@t3tools/provider-adapter-prime`][prime]
+and depends only on the public adapter SDK plus shared contracts and helpers; it no longer uses a
+private compiled driver bridge or server Effect services.
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
@@ -44,7 +43,7 @@ Two registries separate configuration from live processes:
 [`ProviderService`][service] sits on top. It combines the adapter registry with the provider session
 directory to route session and turn operations for a thread, so callers name a thread, not an agent.
 
-Built-in drivers and first-party adapter bridges are compiled into the server. Trusted local
+Built-in drivers and first-party adapter packages are compiled into the server. Trusted local
 adapters can instead be registered in
 `<T3 state dir>/provider-adapters.json` and loaded at server startup. This file is deliberately
 separate from `ServerSettings.providerInstances`:
@@ -103,11 +102,19 @@ reason and requested package identity.
 
 External code is full-trust and executes only in the server process. It translates its native harness
 protocol into canonical sessions, commands, and runtime events. It does not receive internal
-`ProviderDriver` services. Packages that need a subprocess must use the V1 host process supervisor,
-which owns process spawning, bounded stdio, termination, and scope finalizers. Every spawned process
-declares whether it is a probe or session-owned; multiplexed processes can attach more sessions.
-Unexpected exits of session-owned processes become canonical `runtime.error` events, so the host
-clears the affected running turn even when package code does not observe `exitCode`. The host also
+`ProviderDriver` services. Host protocol V1 supplies the process supervisor, which owns spawning,
+bounded stdio, termination, and scope finalizers. Host protocol V2 adds narrow host-owned workspace
+resolution, package/session storage, contained artifact materialization, resume-file validation, and
+attachment reads. [`ExternalProviderAdapterHost.ts`][external-host] implements those resources
+without exposing `ServerConfig`, filesystem services, paths, or arbitrary Effect Context to packages.
+The server negotiates the highest supported host version in the manifest range and still gives an
+exact V1 shape to older packages.
+
+Every spawned process declares whether it is a probe or session-owned; multiplexed processes can
+attach more sessions. Unexpected exits of session-owned processes become canonical `runtime.error`
+events, so the host clears the affected running turn even when package code does not observe
+`exitCode`. An adapter that already translates its native shutdown into canonical terminal events can
+detach that session from generic crash projection to avoid duplicate terminal sources. The host also
 stamps package, provider, and instance identity onto package output, rejects negotiated capabilities
 absent from the package manifest, and exposes the negotiated set as
 `ServerProvider.adapterCapabilities`.
@@ -214,24 +221,24 @@ updates are ignored. The structured-input mapping handles select, confirm, input
 it does not provide a general extension UI. Pi is still a reference fixture, not a shipped provider
 installation flow.
 
-Prime is no longer in `BUILT_IN_DRIVERS`. The server-private first-party bridge registers its
-compiled driver as `prime-rpc@1.0.0`, reserves `primeAgent` against trusted-local replacement, and
-pins legacy or explicitly unpinned Prime instance configs during hydration. An explicit stale package
-reference is never rewritten; normal registry matching leaves that instance visible but unavailable.
-The bridge stamps the package identity on the live instance, adapter, snapshots, and sessions, and
-adds the declarative config schema plus negotiated capabilities to snapshots. Negotiated features
-must be a subset of the manifest declaration.
+Prime is no longer in `BUILT_IN_DRIVERS` and has no server-private `PrimeDriver`. The compiled
+`@t3tools/provider-adapter-prime` workspace package registers as `prime-rpc@1.0.0` through the same
+external driver bridge as ACP packages. The server reserves its `primeAgent` driver and exact package
+identity against trusted-local replacement, and pins legacy or explicitly unpinned Prime instance
+configs during hydration. An explicit stale package reference is never rewritten; normal registry
+matching leaves that instance visible but unavailable.
 
-Prime's RPC sessions and model/approval probes acquire processes through the same host-owned
-supervisor used by external packages. `PrimeRpcClient` receives the supervised process and owns only
-JSONL framing, request correlation, event fanout, and Prime error translation. The adapter preserves
-Prime-specific turn and session cleanup while the host owns bounded stdin, spawn resolution, exit
-detection, termination, and scope finalizers.
+Prime requires Host V2. Its RPC sessions and version/model/approval probes use host-supervised
+processes. Session directories, extension artifacts, resume containment, workspace resolution, and
+attachment bytes come from the host resource broker. The package owns JSONL framing, request
+correlation, Prime protocol translation, canonical terminal events, and package snapshots. The
+external bridge validates and stamps sessions, snapshots, events, package identity, config schema,
+and negotiated capabilities before they enter core systems.
 
-This registration is transitional and compiled/private. Prime's filesystem resources, native resume
-validation, managed snapshots, and text-generation policy remain host-side concerns; V1 does not
-expose the server's Effect services to packages. The bridge must not be described as an independently
-installable Prime package before that separation exists.
+The workspace SDK and Prime package are still private source packages linked into this build; they are
+not yet published or independently packable artifacts. That distribution constraint is separate from
+the runtime deletion test: Prime itself now crosses `ProviderAdapterPackageV1.create` and the public
+Host V2 boundary, with no Prime-specific driver registration or private server service access.
 
 ## How provider work is requested
 
@@ -276,8 +283,9 @@ when a request opens (approval) or user input is requested, via
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
-[prime]: ../../apps/server/src/provider/Drivers/PrimeDriver.ts
+[prime]: ../../packages/provider-adapter-prime/src/index.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
+[external-host]: ../../apps/server/src/provider/ExternalProviderAdapterHost.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts
 [registry]: ../../apps/server/src/provider/Services/ProviderAdapterRegistry.ts
 [service]: ../../apps/server/src/provider/Layers/ProviderService.ts

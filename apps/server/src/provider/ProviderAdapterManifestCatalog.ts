@@ -12,10 +12,10 @@ import {
   ProviderAdapterManifestV1,
   type ProviderAdapterManifestV1 as ProviderAdapterManifest,
 } from "@t3tools/contracts";
+import { PRIME_PROVIDER_ADAPTER_MANIFEST } from "@t3tools/provider-adapter-prime";
 import * as Schema from "effect/Schema";
 
 import { DEEPSEEK_HARNESS_ADAPTER_MANIFEST } from "./DeepSeekHarnessAdapter.ts";
-import { PRIME_PROVIDER_ADAPTER_MANIFEST } from "./FirstPartyProviderAdapters.ts";
 
 const decodeManifest = Schema.decodeUnknownSync(ProviderAdapterManifestV1);
 const decodeManifestCatalog = Schema.decodeUnknownSync(ProviderAdapterManifestCatalog);

@@ -1,198 +1,122 @@
 /**
- * Server-private bridge for compiled first-party provider adapters.
+ * Compiled provider adapter package registrations shipped by this server.
  *
- * These registrations use the same versioned identity and negotiated
- * capability model as trusted-local packages, while retaining access to
- * private server services that are not part of the public V1 package host.
- * They are transitional compiled registrations, not installable packages.
+ * These packages use the public adapter host, just like trusted-local
+ * packages, but are linked into the server build and reserve their package
+ * and driver identities.
  *
  * @module provider/FirstPartyProviderAdapters
  */
+import { DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL } from "@t3tools/contracts";
 import {
-  ProviderAdapterPackageId,
-  ProviderAdapterPackageVersion,
-  ProviderDriverKind,
-  type ProviderAdapterManifestV1,
-  type ProviderAdapterPackageReference,
-  type ProviderAdapterProtocolCapabilitiesV1,
-  type ProviderSession,
-  type ServerProvider,
-} from "@t3tools/contracts";
+  PRIME_PROVIDER_ADAPTER_DEFAULT_CONFIG,
+  PRIME_PROVIDER_ADAPTER_MANIFEST,
+  PRIME_PROVIDER_ADAPTER_PACKAGE,
+  PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
+} from "@t3tools/provider-adapter-prime";
+import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import {
   DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG,
   DEEPSEEK_HARNESS_ADAPTER_PACKAGE,
 } from "./DeepSeekHarnessAdapter.ts";
-import { PrimeDriver, type PrimeDriverEnv } from "./Drivers/PrimeDriver.ts";
-import { ProviderDriverError } from "./Errors.ts";
 import {
   makeExternalProviderDriver,
   type ExternalProviderDriverEnv,
 } from "./ExternalProviderDriver.ts";
-import { PRIME_ADAPTER_PROTOCOL_CAPABILITIES } from "./Layers/PrimeAdapter.ts";
-import type { AnyProviderDriver, ProviderDriver, ProviderInstance } from "./ProviderDriver.ts";
+import type { AnyProviderDriver, ProviderInstance } from "./ProviderDriver.ts";
 
-const PRIME_DRIVER_KIND = ProviderDriverKind.make("primeAgent");
+export { PRIME_PROVIDER_ADAPTER_MANIFEST, PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE };
 
-export const PRIME_PROVIDER_ADAPTER_MANIFEST: ProviderAdapterManifestV1 = {
-  protocolVersion: 1,
-  id: ProviderAdapterPackageId.make("prime-rpc"),
-  version: ProviderAdapterPackageVersion.make("1.0.0"),
-  driver: PRIME_DRIVER_KIND,
-  displayName: "Prime Agent",
-  hostProtocol: { minimum: 1, maximum: 1 },
-  transport: {
-    kind: "supervised-stdio",
-    protocol: "jsonl-rpc",
-    sessionConcurrency: "one-per-process",
-  },
-  capabilities: [...PRIME_ADAPTER_PROTOCOL_CAPABILITIES.features],
-  configSchema: {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      binaryPath: {
-        type: "string",
-        default: "prime-agent",
-        description: "Path to the Prime Agent binary used by this instance.",
-      },
-      launchArgs: {
-        type: "string",
-        default: "",
-        description: "Additional CLI arguments passed on session start.",
-      },
-    },
-  },
-};
+export type FirstPartyProviderAdaptersEnv =
+  | ExternalProviderDriverEnv
+  | BackgroundPolicy.BackgroundPolicy
+  | ServerSettingsService;
 
-export const PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE: ProviderAdapterPackageReference = {
-  id: PRIME_PROVIDER_ADAPTER_MANIFEST.id,
-  version: PRIME_PROVIDER_ADAPTER_MANIFEST.version,
-  protocolVersion: PRIME_PROVIDER_ADAPTER_MANIFEST.protocolVersion,
-};
+const startDemandAwareSnapshotRefresh = Effect.fn("startDemandAwareSnapshotRefresh")(function* (
+  instance: ProviderInstance,
+) {
+  const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
+  const serverSettings = yield* ServerSettingsService;
+  const intervalChanges = yield* Queue.sliding<void>(1);
+  const settingsChanges = yield* serverSettings.subscribeChanges;
 
-const capabilityMismatch = (
-  manifest: ProviderAdapterManifestV1,
-  capabilities: ProviderAdapterProtocolCapabilitiesV1 | undefined,
-): string | undefined => {
-  if (capabilities === undefined) {
-    return "Adapter did not negotiate versioned protocol capabilities.";
-  }
-  if (capabilities.protocolVersion !== manifest.protocolVersion) {
-    return `Adapter negotiated protocol ${capabilities.protocolVersion}, but package '${manifest.id}@${manifest.version}' uses protocol ${manifest.protocolVersion}.`;
-  }
-  const declared = new Set(manifest.capabilities);
-  const undeclared = capabilities.features.filter((feature) => !declared.has(feature));
-  return undeclared.length === 0
-    ? undefined
-    : `Adapter negotiated undeclared capabilities: ${undeclared.join(", ")}.`;
-};
+  yield* settingsChanges.pipe(
+    Stream.map((settings) =>
+      Duration.toMillis(
+        resolveServerBackgroundActivitySettings(settings).providerHealthRefreshInterval,
+      ),
+    ),
+    Stream.changes,
+    Stream.runForEach(() => Queue.offer(intervalChanges, undefined).pipe(Effect.asVoid)),
+    Effect.forkScoped,
+  );
 
-const withSessionIdentity = (
-  session: ProviderSession,
-  instance: Pick<ProviderInstance, "instanceId" | "driverKind">,
-  adapterPackage: ProviderAdapterPackageReference,
-): ProviderSession => ({
-  ...session,
-  provider: instance.driverKind,
-  providerInstanceId: instance.instanceId,
-  adapterPackage,
+  const getRefreshInterval = serverSettings.getSettings.pipe(
+    Effect.map(
+      (settings) => resolveServerBackgroundActivitySettings(settings).providerHealthRefreshInterval,
+    ),
+    Effect.orElseSucceed(() => DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL),
+  );
+  const hasDemand = Effect.all([
+    backgroundPolicy.shouldRunScopeWork({ type: "provider-status" }),
+    backgroundPolicy.shouldRunScopeWork({
+      type: "provider-status",
+      instanceId: instance.instanceId,
+    }),
+  ]).pipe(Effect.map(([genericDemand, instanceDemand]) => genericDemand || instanceDemand));
+
+  yield* Effect.forever(
+    getRefreshInterval.pipe(
+      Effect.flatMap((refreshInterval) =>
+        Effect.raceFirst(
+          Effect.sleep(
+            Duration.toMillis(Duration.fromInputUnsafe(refreshInterval)) <= 0
+              ? "60 seconds"
+              : refreshInterval,
+          ).pipe(Effect.as(true)),
+          Queue.take(intervalChanges).pipe(Effect.as(false)),
+        ).pipe(
+          Effect.flatMap((elapsed) =>
+            elapsed && Duration.toMillis(Duration.fromInputUnsafe(refreshInterval)) > 0
+              ? hasDemand.pipe(
+                  Effect.flatMap((shouldRefresh) =>
+                    shouldRefresh ? instance.snapshot.refresh.pipe(Effect.asVoid) : Effect.void,
+                  ),
+                )
+              : Effect.void,
+          ),
+        ),
+      ),
+      Effect.ignoreCause({ log: true }),
+    ),
+  ).pipe(Effect.forkScoped);
 });
 
-/**
- * Attach package semantics to an existing compiled driver without exposing
- * its private Effect services through the public adapter SDK.
- */
-export const makeFirstPartyProviderAdapterDriver = <Config, R>(input: {
-  readonly manifest: ProviderAdapterManifestV1;
-  readonly driver: ProviderDriver<Config, R>;
-}): ProviderDriver<Config, R> => {
-  const { driver, manifest } = input;
-  const adapterPackage: ProviderAdapterPackageReference = {
-    id: manifest.id,
-    version: manifest.version,
-    protocolVersion: manifest.protocolVersion,
-  };
+const withDemandAwareSnapshotRefresh = (
+  driver: AnyProviderDriver<ExternalProviderDriverEnv>,
+): AnyProviderDriver<FirstPartyProviderAdaptersEnv> => ({
+  ...driver,
+  create: (input) =>
+    driver.create(input).pipe(Effect.tap((instance) => startDemandAwareSnapshotRefresh(instance))),
+});
 
-  return {
-    ...driver,
-    adapterPackage,
-    create: (createInput) =>
-      driver.create(createInput).pipe(
-        Effect.flatMap((instance) => {
-          if (
-            manifest.driver !== driver.driverKind ||
-            instance.driverKind !== driver.driverKind ||
-            instance.adapter.provider !== driver.driverKind
-          ) {
-            return Effect.fail(
-              new ProviderDriverError({
-                driver: driver.driverKind,
-                instanceId: createInput.instanceId,
-                detail: `First-party adapter package '${manifest.id}@${manifest.version}' does not match driver '${driver.driverKind}'.`,
-              }),
-            );
-          }
-          const capabilities = instance.adapter.capabilities.protocol;
-          const mismatch = capabilityMismatch(manifest, capabilities);
-          if (mismatch !== undefined) {
-            return Effect.fail(
-              new ProviderDriverError({
-                driver: driver.driverKind,
-                instanceId: createInput.instanceId,
-                detail: mismatch,
-              }),
-            );
-          }
-
-          const stampSession = (session: ProviderSession) =>
-            withSessionIdentity(session, instance, adapterPackage);
-          const stampSnapshot = (snapshot: ServerProvider): ServerProvider => ({
-            ...snapshot,
-            instanceId: instance.instanceId,
-            driver: instance.driverKind,
-            adapterPackage,
-            adapterConfigSchema: manifest.configSchema,
-            adapterCapabilities: capabilities,
-          });
-
-          return Effect.succeed({
-            ...instance,
-            adapterPackage,
-            adapter: {
-              ...instance.adapter,
-              adapterPackage,
-              startSession: (sessionInput) =>
-                instance.adapter.startSession(sessionInput).pipe(Effect.map(stampSession)),
-              listSessions: () =>
-                instance.adapter
-                  .listSessions()
-                  .pipe(Effect.map((sessions) => sessions.map(stampSession))),
-            },
-            snapshot: {
-              ...instance.snapshot,
-              getSnapshot: instance.snapshot.getSnapshot.pipe(Effect.map(stampSnapshot)),
-              refresh: instance.snapshot.refresh.pipe(Effect.map(stampSnapshot)),
-              streamChanges: instance.snapshot.streamChanges.pipe(Stream.map(stampSnapshot)),
-            },
-          } satisfies ProviderInstance);
-        }),
-      ),
-  };
-};
-
-export type FirstPartyProviderAdaptersEnv = PrimeDriverEnv | ExternalProviderDriverEnv;
-
-/** Compiled, server-private package registrations shipped by this build. */
+/** Compiled package registrations shipped by this build. */
 export const FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS: ReadonlyArray<
   AnyProviderDriver<FirstPartyProviderAdaptersEnv>
 > = [
-  makeFirstPartyProviderAdapterDriver({
-    manifest: PRIME_PROVIDER_ADAPTER_MANIFEST,
-    driver: PrimeDriver,
-  }),
+  withDemandAwareSnapshotRefresh(
+    makeExternalProviderDriver(
+      PRIME_PROVIDER_ADAPTER_PACKAGE,
+      PRIME_PROVIDER_ADAPTER_DEFAULT_CONFIG,
+    ),
+  ),
   makeExternalProviderDriver(
     DEEPSEEK_HARNESS_ADAPTER_PACKAGE,
     DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG,

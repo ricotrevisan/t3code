@@ -17,7 +17,7 @@ import * as Stream from "effect/Stream";
 import { describe, expect } from "vite-plus/test";
 
 import { makeExternalProviderProcessSupervisor } from "../ExternalProviderProcessSupervisor.ts";
-import { makePrimeRpcClient, PrimeRpcError } from "./PrimeRpcClient.ts";
+import { makePrimeRpcClient, PrimeRpcError } from "@t3tools/provider-adapter-prime";
 
 const mockAgentPath = NodePath.join(
   NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),

@@ -1,15 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
-  ProviderDriverKind,
-  ProviderInstanceId,
-  ThreadId,
-  type ProviderAdapterProtocolCapabilitiesV1,
-  type ProviderSession,
-  type ServerProvider,
-} from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
+  PRIME_PROVIDER_ADAPTER_DEFAULT_CONFIG,
+  PRIME_PROVIDER_ADAPTER_PACKAGE,
+  PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE as PACKAGE_PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
+  PrimeProviderAdapterConfig,
+} from "@t3tools/provider-adapter-prime";
 import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
 
 import {
   DEEPSEEK_HARNESS_ADAPTER_DEFAULT_CONFIG,
@@ -19,93 +15,13 @@ import {
   DEEPSEEK_HARNESS_DRIVER_KIND,
   DeepSeekHarnessAdapterConfig,
 } from "./DeepSeekHarnessAdapter.ts";
-import type { ProviderDriver, ProviderInstance } from "./ProviderDriver.ts";
 import {
   FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
-  makeFirstPartyProviderAdapterDriver,
   PRIME_PROVIDER_ADAPTER_MANIFEST,
   PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
 } from "./FirstPartyProviderAdapters.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
 
-const DRIVER_KIND = ProviderDriverKind.make("primeAgent");
-const INSTANCE_ID = ProviderInstanceId.make("prime_test");
-const THREAD_ID = ThreadId.make("00000000-0000-4000-8000-000000000001");
-const NOW = "2026-09-16T00:00:00.000Z";
 const decodeDeepSeekHarnessAdapterConfig = Schema.decodeUnknownSync(DeepSeekHarnessAdapterConfig);
-
-const makeCompiledDriver = (
-  capabilities: ProviderAdapterProtocolCapabilitiesV1,
-): ProviderDriver<Record<string, never>> => ({
-  driverKind: DRIVER_KIND,
-  metadata: { displayName: "Prime Agent", supportsMultipleInstances: true },
-  configSchema: Schema.Struct({}),
-  defaultConfig: () => ({}),
-  create: ({ instanceId, displayName, accentColor, enabled }) => {
-    const session: ProviderSession = {
-      provider: DRIVER_KIND,
-      status: "ready",
-      runtimeMode: "full-access",
-      threadId: THREAD_ID,
-      createdAt: NOW,
-      updatedAt: NOW,
-    };
-    const baseSnapshot: ServerProvider = {
-      instanceId,
-      driver: DRIVER_KIND,
-      displayName,
-      accentColor,
-      enabled,
-      installed: true,
-      version: "1.0.0",
-      status: "ready",
-      auth: { status: "authenticated" },
-      checkedAt: NOW,
-      models: [],
-      slashCommands: [],
-      skills: [],
-    };
-    const adapter = {
-      provider: DRIVER_KIND,
-      capabilities: { sessionModelSwitch: "in-session", protocol: capabilities },
-      startSession: () => Effect.succeed(session),
-      listSessions: () => Effect.succeed([session]),
-      streamEvents: Stream.empty,
-    } as unknown as ProviderInstance["adapter"];
-
-    return Effect.succeed({
-      instanceId,
-      driverKind: DRIVER_KIND,
-      continuationIdentity: {
-        driverKind: DRIVER_KIND,
-        continuationKey: `${DRIVER_KIND}:instance:${instanceId}`,
-      },
-      displayName,
-      accentColor,
-      enabled,
-      adapter,
-      snapshot: {
-        maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-          provider: DRIVER_KIND,
-          packageName: null,
-        }),
-        getSnapshot: Effect.succeed(baseSnapshot),
-        refresh: Effect.succeed(baseSnapshot),
-        streamChanges: Stream.make(baseSnapshot),
-      },
-      textGeneration: {} as ProviderInstance["textGeneration"],
-    } satisfies ProviderInstance);
-  },
-});
-
-const createInput = {
-  instanceId: INSTANCE_ID,
-  displayName: "Prime Test",
-  accentColor: "#123456",
-  environment: [],
-  enabled: true,
-  config: {},
-} as const;
 
 describe("DeepSeek Harness first-party ACP package", () => {
   it("declares the DeepSeek Harness identity, transport, and exact capability ceiling", () => {
@@ -187,8 +103,20 @@ describe("DeepSeek Harness first-party ACP package", () => {
   });
 });
 
-describe("first-party provider adapter bridge", () => {
-  it("declares the exact negotiated Prime capability ceiling", () => {
+describe("Prime first-party provider adapter package", () => {
+  it("re-exports the package identity and exact capability ceiling", () => {
+    expect(PRIME_PROVIDER_ADAPTER_MANIFEST).toBe(PRIME_PROVIDER_ADAPTER_PACKAGE.manifest);
+    expect(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE).toBe(
+      PACKAGE_PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE,
+    );
+    expect(PRIME_PROVIDER_ADAPTER_MANIFEST).toMatchObject({
+      protocolVersion: 1,
+      id: "prime-rpc",
+      version: "1.0.0",
+      driver: "primeAgent",
+      displayName: "Prime Agent",
+      hostProtocol: { minimum: 2, maximum: 2 },
+    });
     expect(PRIME_PROVIDER_ADAPTER_MANIFEST.capabilities).toEqual([
       "session.resume",
       "turn.steer",
@@ -206,65 +134,16 @@ describe("first-party provider adapter bridge", () => {
     ]);
   });
 
-  it("keeps instance enablement out of the Prime adapter config manifest", () => {
-    expect(PRIME_PROVIDER_ADAPTER_MANIFEST.configSchema.properties).not.toHaveProperty("enabled");
-    expect(PRIME_PROVIDER_ADAPTER_MANIFEST.configSchema.properties).toMatchObject({
-      binaryPath: { default: "prime-agent" },
-      launchArgs: { default: "" },
-    });
-  });
-
-  it.effect("stamps the Prime package identity, config schema, and negotiated capabilities", () =>
-    Effect.gen(function* () {
-      const driver = makeFirstPartyProviderAdapterDriver({
-        manifest: PRIME_PROVIDER_ADAPTER_MANIFEST,
-        driver: makeCompiledDriver({
-          protocolVersion: 1,
-          features: ["session.resume", "turn.interrupt"],
-        }),
-      });
-      const instance = yield* driver.create(createInput);
-
-      expect(driver.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
-      expect(instance.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
-      expect(instance.adapter.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
-
-      const snapshot = yield* instance.snapshot.getSnapshot;
-      expect(snapshot.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
-      expect(snapshot.adapterConfigSchema).toEqual(PRIME_PROVIDER_ADAPTER_MANIFEST.configSchema);
-      expect(snapshot.adapterCapabilities).toEqual({
-        protocolVersion: 1,
-        features: ["session.resume", "turn.interrupt"],
-      });
-
-      const started = yield* instance.adapter.startSession({
-        threadId: THREAD_ID,
-        providerInstanceId: INSTANCE_ID,
-        runtimeMode: "full-access",
-      });
-      expect(started.providerInstanceId).toBe(INSTANCE_ID);
-      expect(started.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
-
-      const listed = yield* instance.adapter.listSessions();
-      expect(listed[0]?.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
-    }).pipe(Effect.scoped),
-  );
-
-  it.effect("rejects negotiated capabilities absent from the first-party manifest", () => {
-    const driver = makeFirstPartyProviderAdapterDriver({
-      manifest: PRIME_PROVIDER_ADAPTER_MANIFEST,
-      driver: makeCompiledDriver({ protocolVersion: 1, features: ["feedback.upload"] }),
-    });
-
-    return driver.create(createInput).pipe(
-      Effect.flip,
-      Effect.tap((error) =>
-        Effect.sync(() => {
-          expect(error.detail).toContain("undeclared capabilities");
-          expect(error.detail).toContain("feedback.upload");
-        }),
-      ),
-      Effect.scoped,
+  it("registers Prime through the external driver with the package config", () => {
+    const driver = FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS.find(
+      (candidate) => candidate.driverKind === PRIME_PROVIDER_ADAPTER_MANIFEST.driver,
     );
+
+    expect(FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS).toHaveLength(2);
+    expect(driver).toBeDefined();
+    expect(driver?.adapterPackage).toEqual(PRIME_PROVIDER_ADAPTER_PACKAGE_REFERENCE);
+    expect(driver?.configSchema).toBe(PrimeProviderAdapterConfig);
+    expect(driver?.defaultConfig()).toEqual(PRIME_PROVIDER_ADAPTER_DEFAULT_CONFIG);
+    expect(PRIME_PROVIDER_ADAPTER_MANIFEST.configSchema.properties).not.toHaveProperty("enabled");
   });
 });
