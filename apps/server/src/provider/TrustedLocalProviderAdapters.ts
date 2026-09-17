@@ -44,6 +44,7 @@ const TrustedProviderAdapterRegistryFileV1 = Schema.Struct({
 
 const ExternalProviderAdapterPackageV1Schema = Schema.Struct({
   manifest: ProviderAdapterManifestV1,
+  storageKey: Schema.optional(Schema.String),
   configSchema: Schema.Unknown,
   defaultConfig: Schema.Unknown,
   create: Schema.Unknown,

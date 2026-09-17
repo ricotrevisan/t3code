@@ -1,5 +1,8 @@
 import * as NodeCrypto from "node:crypto";
 import {
+  T3_PROVIDER_ADAPTER_SUPPORTED_HOST_PROTOCOL_VERSIONS,
+  type ProviderAdapterHost,
+  type ProviderAdapterHostV1,
   type ProviderAdapterInstanceV1,
   type ProviderAdapterPackageV1,
 } from "@t3tools/provider-adapter";
@@ -19,12 +22,15 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
+import { ServerConfig } from "../config.ts";
 import { ProviderAdapterRequestError, ProviderDriverError } from "./Errors.ts";
-import { makeExternalProviderProcessSupervisor } from "./ExternalProviderProcessSupervisor.ts";
+import { makeExternalProviderAdapterHostV2 } from "./ExternalProviderAdapterHost.ts";
 import {
   defaultProviderContinuationIdentity,
   type AnyProviderDriver,
@@ -34,10 +40,14 @@ import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
 import { buildUnavailableProviderSnapshot } from "./unavailableProviderSnapshot.ts";
 
-export type ExternalProviderDriverEnv = ChildProcessSpawner.ChildProcessSpawner;
+export type ExternalProviderDriverEnv =
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+  | Path.Path
+  | ServerConfig;
 
-const packageReference = (
-  adapterPackage: ProviderAdapterPackageV1<unknown>,
+const packageReference = <Config, Host extends ProviderAdapterHost>(
+  adapterPackage: ProviderAdapterPackageV1<Config, Host>,
 ): ProviderAdapterPackageReference => ({
   id: adapterPackage.manifest.id,
   version: adapterPackage.manifest.version,
@@ -120,9 +130,9 @@ const ProviderAdapterThreadSnapshot = Schema.Struct({
 });
 const decodeThreadSnapshot = Schema.decodeUnknownEffect(ProviderAdapterThreadSnapshot);
 
-const decodeAdapterInstance = (
+const decodeAdapterInstance = <Config, Host extends ProviderAdapterHost>(
   value: unknown,
-  adapterPackage: ProviderAdapterPackageV1<unknown>,
+  adapterPackage: ProviderAdapterPackageV1<Config, Host>,
   instanceId: ProviderInstance["instanceId"],
 ): Effect.Effect<
   {
@@ -176,12 +186,32 @@ const decodeAdapterInstance = (
   });
 };
 
-export const makeExternalProviderDriver = <Config>(
-  adapterPackage: ProviderAdapterPackageV1<Config>,
+type SupportedHostProtocolVersion =
+  (typeof T3_PROVIDER_ADAPTER_SUPPORTED_HOST_PROTOCOL_VERSIONS)[number];
+
+const negotiateHostProtocolVersion = (
+  minimum: number,
+  maximum: number,
+): SupportedHostProtocolVersion | undefined => {
+  let negotiated: SupportedHostProtocolVersion | undefined;
+  for (const version of T3_PROVIDER_ADAPTER_SUPPORTED_HOST_PROTOCOL_VERSIONS) {
+    if (
+      version >= minimum &&
+      version <= maximum &&
+      (negotiated === undefined || version > negotiated)
+    ) {
+      negotiated = version;
+    }
+  }
+  return negotiated;
+};
+
+export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterHost>(
+  adapterPackage: ProviderAdapterPackageV1<Config, Host>,
   defaultConfig: Config,
 ): AnyProviderDriver<ExternalProviderDriverEnv> => {
   const provider = adapterPackage.manifest.driver;
-  const adapterPackageRef = packageReference(adapterPackage as ProviderAdapterPackageV1<unknown>);
+  const adapterPackageRef = packageReference(adapterPackage);
 
   return {
     driverKind: provider,
@@ -194,7 +224,51 @@ export const makeExternalProviderDriver = <Config>(
     defaultConfig: () => defaultConfig,
     create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
       Effect.gen(function* () {
-        const processSupervisor = yield* makeExternalProviderProcessSupervisor();
+        const negotiatedProtocolVersion = negotiateHostProtocolVersion(
+          adapterPackage.manifest.hostProtocol.minimum,
+          adapterPackage.manifest.hostProtocol.maximum,
+        );
+        if (negotiatedProtocolVersion === undefined) {
+          return yield* new ProviderDriverError({
+            driver: provider,
+            instanceId,
+            detail: `Adapter does not support a host protocol available in this server.`,
+          });
+        }
+
+        const currentHost = yield* makeExternalProviderAdapterHostV2({
+          packageId: adapterPackage.manifest.id,
+          instanceId,
+          storageKey: adapterPackage.storageKey,
+        }).pipe(
+          Effect.mapError(
+            (error) =>
+              new ProviderDriverError({
+                driver: provider,
+                instanceId,
+                detail: error.message,
+                cause: error,
+              }),
+          ),
+          Effect.catchDefect((defect) =>
+            Effect.fail(
+              new ProviderDriverError({
+                driver: provider,
+                instanceId,
+                detail: `Adapter host creation defected: ${String(defect)}`,
+                cause: defect,
+              }),
+            ),
+          ),
+        );
+        const negotiatedHost: ProviderAdapterHost =
+          negotiatedProtocolVersion === 1
+            ? ({
+                protocolVersion: 1,
+                processes: currentHost.host.processes,
+              } satisfies ProviderAdapterHostV1)
+            : currentHost.host;
+
         const created = yield* Effect.suspend(() =>
           adapterPackage.create(
             {
@@ -205,7 +279,9 @@ export const makeExternalProviderDriver = <Config>(
               enabled,
               config,
             },
-            { protocolVersion: 1, processes: processSupervisor.processes },
+            // The package author ties its concrete Host type to this runtime manifest.
+            // TypeScript cannot express that relationship across the manifest boundary.
+            negotiatedHost as Host,
           ),
         ).pipe(
           Effect.mapError(
@@ -230,7 +306,7 @@ export const makeExternalProviderDriver = <Config>(
         );
         const { instance: external, capabilities } = yield* decodeAdapterInstance(
           created,
-          adapterPackage as ProviderAdapterPackageV1<unknown>,
+          adapterPackage,
           instanceId,
         );
 
@@ -380,7 +456,7 @@ export const makeExternalProviderDriver = <Config>(
                 recoverStream<ProviderRuntimeEvent>("event stream", cause),
               ),
             ),
-            processSupervisor.unexpectedExits.pipe(
+            currentHost.unexpectedExits.pipe(
               Stream.mapEffect((exit) =>
                 DateTime.now.pipe(
                   Effect.map(

@@ -20,6 +20,11 @@ export {
 } from "./providerAdapterIdentity.ts";
 
 export const T3_PROVIDER_ADAPTER_PROTOCOL_VERSION = 1 as const;
+export const T3_PROVIDER_ADAPTER_HOST_PROTOCOL_VERSION = 2 as const;
+export const T3_PROVIDER_ADAPTER_SUPPORTED_HOST_PROTOCOL_VERSIONS = [
+  1,
+  T3_PROVIDER_ADAPTER_HOST_PROTOCOL_VERSION,
+] as const;
 
 export const ProviderAdapterCapability = Schema.Literals([
   "session.resume",
@@ -97,8 +102,17 @@ export type ProviderAdapterManifestCatalog = typeof ProviderAdapterManifestCatal
 
 export const isProviderAdapterManifestCompatible = (
   manifest: ProviderAdapterManifestV1,
-  hostProtocolVersion = T3_PROVIDER_ADAPTER_PROTOCOL_VERSION,
-): boolean =>
-  manifest.hostProtocol.minimum <= manifest.hostProtocol.maximum &&
-  manifest.hostProtocol.minimum <= hostProtocolVersion &&
-  manifest.hostProtocol.maximum >= hostProtocolVersion;
+  supportedHostProtocolVersions:
+    | number
+    | ReadonlyArray<number> = T3_PROVIDER_ADAPTER_SUPPORTED_HOST_PROTOCOL_VERSIONS,
+): boolean => {
+  if (manifest.hostProtocol.minimum > manifest.hostProtocol.maximum) return false;
+
+  const versions = Array.isArray(supportedHostProtocolVersions)
+    ? supportedHostProtocolVersions
+    : [supportedHostProtocolVersions];
+  return versions.some(
+    (version) =>
+      manifest.hostProtocol.minimum <= version && manifest.hostProtocol.maximum >= version,
+  );
+};

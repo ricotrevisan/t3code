@@ -6,7 +6,9 @@ import {
   ProviderAdapterManifestCatalog,
   ProviderAdapterManifestV1,
   ProviderAdapterProtocolCapabilitiesV1,
+  T3_PROVIDER_ADAPTER_HOST_PROTOCOL_VERSION,
   T3_PROVIDER_ADAPTER_PROTOCOL_VERSION,
+  T3_PROVIDER_ADAPTER_SUPPORTED_HOST_PROTOCOL_VERSIONS,
 } from "./providerAdapter.ts";
 
 const decodeManifest = Schema.decodeUnknownSync(ProviderAdapterManifestV1);
@@ -62,9 +64,28 @@ describe("ProviderAdapterManifestV1", () => {
     ).toThrow();
   });
 
-  it("rejects packages whose host protocol range excludes this host", () => {
-    const decoded = decodeManifest(manifest({ hostProtocol: { minimum: 2, maximum: 3 } }));
-    expect(isProviderAdapterManifestCompatible(decoded)).toBe(false);
+  it("supports both legacy and current host protocol versions", () => {
+    expect(T3_PROVIDER_ADAPTER_HOST_PROTOCOL_VERSION).toBe(2);
+    expect(T3_PROVIDER_ADAPTER_SUPPORTED_HOST_PROTOCOL_VERSIONS).toEqual([1, 2]);
+
+    const legacy = decodeManifest(manifest({ hostProtocol: { minimum: 1, maximum: 1 } }));
+    const current = decodeManifest(manifest({ hostProtocol: { minimum: 2, maximum: 2 } }));
+    expect(isProviderAdapterManifestCompatible(legacy)).toBe(true);
+    expect(isProviderAdapterManifestCompatible(current)).toBe(true);
+  });
+
+  it("accepts an explicit host version or supported-version list", () => {
+    const legacy = decodeManifest(manifest({ hostProtocol: { minimum: 1, maximum: 1 } }));
+    expect(isProviderAdapterManifestCompatible(legacy, 1)).toBe(true);
+    expect(isProviderAdapterManifestCompatible(legacy, 2)).toBe(false);
+    expect(isProviderAdapterManifestCompatible(legacy, [2, 1])).toBe(true);
+  });
+
+  it("rejects invalid or non-overlapping host protocol ranges", () => {
+    const future = decodeManifest(manifest({ hostProtocol: { minimum: 3, maximum: 4 } }));
+    const inverted = decodeManifest(manifest({ hostProtocol: { minimum: 2, maximum: 1 } }));
+    expect(isProviderAdapterManifestCompatible(future)).toBe(false);
+    expect(isProviderAdapterManifestCompatible(inverted)).toBe(false);
   });
 
   it("represents Pi RPC constraints without a Pi-specific core field", () => {

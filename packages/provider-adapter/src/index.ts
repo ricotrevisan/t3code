@@ -7,6 +7,7 @@
  */
 import type {
   ApprovalRequestId,
+  ChatAttachment,
   ProviderAdapterManifestV1,
   ProviderAdapterProtocolCapabilitiesV1,
   ProviderApprovalDecision,
@@ -23,6 +24,7 @@ import type {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import { T3_PROVIDER_ADAPTER_HOST_PROTOCOL_VERSION } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -33,7 +35,9 @@ export {
   ProviderAdapterPackageId,
   ProviderAdapterPackageVersion,
   ProviderAdapterProtocolCapabilitiesV1,
+  T3_PROVIDER_ADAPTER_HOST_PROTOCOL_VERSION,
   T3_PROVIDER_ADAPTER_PROTOCOL_VERSION,
+  T3_PROVIDER_ADAPTER_SUPPORTED_HOST_PROTOCOL_VERSIONS,
 } from "@t3tools/contracts";
 
 export class ProviderAdapterV1Error extends Schema.TaggedErrorClass<ProviderAdapterV1Error>()(
@@ -59,6 +63,29 @@ export class ProviderAdapterHostProcessError extends Schema.TaggedErrorClass<Pro
 ) {
   override get message(): string {
     return `Host-supervised adapter process failed in ${this.operation}: ${this.detail}`;
+  }
+}
+
+export const ProviderAdapterHostResourceOperation = Schema.Literals([
+  "workspaces.resolveCwd",
+  "storage.configure",
+  "storage.prepareSession",
+  "storage.validateSessionFile",
+  "storage.materializeArtifact",
+  "attachments.read",
+]);
+export type ProviderAdapterHostResourceOperation = typeof ProviderAdapterHostResourceOperation.Type;
+
+export class ProviderAdapterHostResourceError extends Schema.TaggedErrorClass<ProviderAdapterHostResourceError>()(
+  "ProviderAdapterHostResourceError",
+  {
+    operation: ProviderAdapterHostResourceOperation,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Host adapter resource failed in ${this.operation}: ${this.detail}`;
   }
 }
 
@@ -99,6 +126,62 @@ export interface ProviderAdapterHostV1 {
   readonly protocolVersion: 1;
   readonly processes: ProviderAdapterProcessSupervisorV1;
 }
+
+export interface ProviderAdapterSessionStorageV2 {
+  readonly sessionDirectory: string;
+  readonly sharedDirectory: string;
+}
+
+export interface ProviderAdapterValidateSessionFileInputV2 {
+  readonly threadId: ThreadId;
+  readonly path: string;
+  readonly mustExist: boolean;
+}
+
+export interface ProviderAdapterMaterializeArtifactInputV2 {
+  readonly key: string;
+  readonly fileName: string;
+  readonly content: string | Uint8Array;
+}
+
+export interface ProviderAdapterAttachmentReadResultV2 {
+  readonly bytes: Uint8Array;
+  readonly path: string;
+}
+
+export interface ProviderAdapterWorkspacesV2 {
+  readonly resolveCwd: (
+    requested?: string,
+  ) => Effect.Effect<string, ProviderAdapterHostResourceError>;
+}
+
+export interface ProviderAdapterStorageV2 {
+  readonly prepareSession: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProviderAdapterSessionStorageV2, ProviderAdapterHostResourceError>;
+  readonly validateSessionFile: (
+    input: ProviderAdapterValidateSessionFileInputV2,
+  ) => Effect.Effect<string, ProviderAdapterHostResourceError>;
+  readonly materializeArtifact: (
+    input: ProviderAdapterMaterializeArtifactInputV2,
+  ) => Effect.Effect<string, ProviderAdapterHostResourceError>;
+}
+
+export interface ProviderAdapterAttachmentsV2 {
+  readonly read: (
+    attachment: ChatAttachment,
+  ) => Effect.Effect<ProviderAdapterAttachmentReadResultV2, ProviderAdapterHostResourceError>;
+}
+
+export interface ProviderAdapterHostV2 {
+  readonly protocolVersion: typeof T3_PROVIDER_ADAPTER_HOST_PROTOCOL_VERSION;
+  readonly processes: ProviderAdapterProcessSupervisorV1;
+  readonly workspaces: ProviderAdapterWorkspacesV2;
+  readonly storage: ProviderAdapterStorageV2;
+  readonly attachments: ProviderAdapterAttachmentsV2;
+}
+
+export type ProviderAdapterHost = ProviderAdapterHostV1 | ProviderAdapterHostV2;
 
 export interface ProviderAdapterThreadTurnSnapshotV1 {
   readonly id: TurnId;
@@ -173,17 +256,25 @@ export interface ProviderAdapterCreateInputV1<Config> {
   readonly config: Config;
 }
 
-export interface ProviderAdapterPackageV1<Config = unknown> {
+export interface ProviderAdapterPackageV1<
+  Config = unknown,
+  Host extends ProviderAdapterHost = ProviderAdapterHostV1,
+> {
   readonly manifest: ProviderAdapterManifestV1;
+  /** Optional server-only storage key. This is not exposed through the client manifest. */
+  readonly storageKey?: string | undefined;
   readonly configSchema: Schema.Codec<Config, unknown>;
   readonly defaultConfig: () => Config;
   readonly create: (
     input: ProviderAdapterCreateInputV1<Config>,
-    host: ProviderAdapterHostV1,
+    host: Host,
   ) => Effect.Effect<ProviderAdapterInstanceV1, ProviderAdapterV1Error, Scope.Scope>;
 }
 
-/** Identity helper that preserves the package's concrete config type. */
-export const defineProviderAdapterV1 = <Config>(
-  adapterPackage: ProviderAdapterPackageV1<Config>,
-): ProviderAdapterPackageV1<Config> => adapterPackage;
+/** Identity helper that preserves the package's concrete config and required host type. */
+export const defineProviderAdapterV1 = <
+  Config,
+  Host extends ProviderAdapterHost = ProviderAdapterHostV1,
+>(
+  adapterPackage: ProviderAdapterPackageV1<Config, Host>,
+): ProviderAdapterPackageV1<Config, Host> => adapterPackage;

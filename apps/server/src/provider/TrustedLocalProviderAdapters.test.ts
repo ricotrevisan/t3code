@@ -12,11 +12,19 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { defineProviderAdapterV1, type ProviderAdapterPackageV1 } from "@t3tools/provider-adapter";
+import {
+  defineProviderAdapterV1,
+  type ProviderAdapterHost,
+  type ProviderAdapterHostV1,
+  type ProviderAdapterHostV2,
+  type ProviderAdapterPackageV1,
+} from "@t3tools/provider-adapter";
 
+import { ServerConfig } from "../config.ts";
 import { makeProviderInstanceRegistry } from "./Layers/ProviderInstanceRegistryLive.ts";
 import {
   type ExternalProviderAdapterPackageV1,
@@ -48,18 +56,20 @@ const manifest = (overrides: Record<string, unknown> = {}) =>
     ...overrides,
   });
 
-const makeEchoPackage = (
+const makeEchoPackage = <Host extends ProviderAdapterHost = ProviderAdapterHostV1>(
   negotiatedFeatures: ProviderAdapterManifestV1["capabilities"] = [
     "turn.interrupt",
     "stream.reasoning",
   ],
   manifestOverrides: Record<string, unknown> = {},
-): ProviderAdapterPackageV1<Record<string, never>> =>
-  defineProviderAdapterV1({
+  inspectHost?: ((host: Host) => void) | undefined,
+): ProviderAdapterPackageV1<Record<string, never>, Host> =>
+  defineProviderAdapterV1<Record<string, never>, Host>({
     manifest: manifest(manifestOverrides),
     configSchema: Schema.Struct({}),
     defaultConfig: () => ({}),
-    create: ({ instanceId, displayName, enabled }) => {
+    create: ({ instanceId, displayName, enabled }, host) => {
+      inspectHost?.(host);
       const snapshot = decodeServerProvider({
         instanceId,
         driver: ECHO_DRIVER,
@@ -149,7 +159,9 @@ const registryConfig: ProviderInstanceConfigMap = {
   },
 };
 
-const testLayer = NodeServices.layer;
+const testLayer = ServerConfig.layerTest(process.cwd(), {
+  prefix: "trusted-local-provider-adapters-test-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("trusted local provider adapter packages", () => {
   it.effect("loads a registered package and materializes its provider instance", () =>
@@ -221,6 +233,69 @@ describe("trusted local provider adapter packages", () => {
       ) {
         assert.equal(failedTurn.failure.method, "sendTurn");
       }
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("negotiates the highest supported host protocol and preserves the V1 shape", () =>
+    Effect.gen(function* () {
+      const v1Hosts: Array<ProviderAdapterHostV1> = [];
+      const registryPath = yield* writeRegistry([registration]);
+      const v1Package = makeEchoPackage(undefined, {}, (host) => v1Hosts.push(host));
+      const loadedV1 = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+        loadModule: async () => ({ default: v1Package }),
+      });
+      yield* makeProviderInstanceRegistry({
+        drivers: loadedV1.drivers,
+        configMap: registryConfig,
+      });
+
+      assert.lengthOf(v1Hosts, 1);
+      assert.equal(v1Hosts[0]?.protocolVersion, 1);
+      assert.deepStrictEqual(Object.keys(v1Hosts[0] ?? {}).sort(), [
+        "processes",
+        "protocolVersion",
+      ]);
+
+      const v2Hosts: Array<ProviderAdapterHostV2> = [];
+      const v2Package: ProviderAdapterPackageV1<Record<string, never>, ProviderAdapterHostV2> = {
+        ...makeEchoPackage<ProviderAdapterHostV2>(
+          undefined,
+          { hostProtocol: { minimum: 1, maximum: 2 } },
+          (host) => v2Hosts.push(host),
+        ),
+        storageKey: "echo-v2-storage",
+      };
+      const loadedV2 = yield* loadTrustedProviderAdapterPackages({
+        registryPath,
+        reservedDriverKinds: new Set(),
+        loadModule: async () => ({ default: v2Package }),
+      });
+      yield* makeProviderInstanceRegistry({
+        drivers: loadedV2.drivers,
+        configMap: registryConfig,
+      });
+
+      const v2Host = v2Hosts[0];
+      assert.isDefined(v2Host);
+      assert.equal(v2Host.protocolVersion, 2);
+      assert.deepStrictEqual(Object.keys(v2Host).sort(), [
+        "attachments",
+        "processes",
+        "protocolVersion",
+        "storage",
+        "workspaces",
+      ]);
+      assert.equal(yield* v2Host.workspaces.resolveCwd(), process.cwd());
+      const sessionStorage = yield* v2Host.storage.prepareSession(ThreadId.make("host-v2-thread"));
+      assert.include(sessionStorage.sharedDirectory, "echo-v2-storage");
+      assert.include(sessionStorage.sessionDirectory, "host-v2-thread");
+      assert.isTrue(
+        yield* FileSystem.FileSystem.pipe(
+          Effect.flatMap((fs) => fs.exists(sessionStorage.sessionDirectory)),
+        ),
+      );
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
@@ -408,7 +483,7 @@ describe("trusted local provider adapter packages", () => {
         reservedDriverKinds: new Set(),
         loadModule: async () => ({
           default: makeEchoPackage(["turn.interrupt", "stream.reasoning"], {
-            hostProtocol: { minimum: 2, maximum: 2 },
+            hostProtocol: { minimum: 3, maximum: 3 },
           }),
         }),
       });

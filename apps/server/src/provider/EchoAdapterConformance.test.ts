@@ -17,9 +17,11 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import { ServerConfig } from "../config.ts";
 import { makeProviderInstanceRegistry } from "./Layers/ProviderInstanceRegistryLive.ts";
 import { loadTrustedProviderAdapterPackages } from "./TrustedLocalProviderAdapters.ts";
 
@@ -79,6 +81,10 @@ const makeEchoInstance = () =>
     assert.isDefined(instance);
     return instance;
   });
+
+const testLayer = ServerConfig.layerTest(process.cwd(), {
+  prefix: "echo-adapter-conformance-test-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("echo adapter conformance", () => {
   it.live("drives a harness subprocess through the V1 seam", () =>
@@ -169,7 +175,7 @@ describe("echo adapter conformance", () => {
         features: ["turn.interrupt"],
       });
       assert.deepStrictEqual(snapshot.adapterPackage, ECHO_PACKAGE);
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
   it.live("stops the harness gracefully without a crash event", () =>
@@ -199,6 +205,6 @@ describe("echo adapter conformance", () => {
       if (events[1]?.type === "session.exited") {
         assert.equal(events[1].payload.exitKind, "graceful");
       }
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 });
