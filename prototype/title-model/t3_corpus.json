@@ -1,0 +1,128 @@
+[
+ {
+  "id": "54c6b71b-62a2-4b02-8b38-9f6ca4e09c82",
+  "provider": "grok",
+  "title": "I work deploying a bunch of OpenClaw agents. OpenClaw has become bloa...",
+  "branch": null,
+  "first_user": "I work deploying a bunch of OpenClaw agents. OpenClaw has become bloated. I\u2019m debating building my own harness based on Elixir\u2019s primitives. The core should be a lean harness like Pi (but written in Elixir) Be extensible with plugins, skills, subagents, etc. It should communicate through Slack and be accessible via the TUI, too. It should not be a personal agent, it should focus on working with a team of people. Let\u2019s do some wayfinder to find the minimum viable product we can ship to test this out."
+ },
+ {
+  "id": "7545d37c-6684-4f0f-ae48-ff391a0c4ec4",
+  "provider": "codex",
+  "title": "Check Main Branch Progress",
+  "branch": "main",
+  "first_user": "Can you check the status of the main branch? I think we got halfway through a ticket and iddn't finish it."
+ },
+ {
+  "id": "307f6287-8d56-44d1-8084-23a6c97a7bbc",
+  "provider": "grok",
+  "title": "Add Pre-SSE Authorization Boundary",
+  "branch": null,
+  "first_user": "\u2502 Implement \u25c9 #28: add a pre-SSE authorization boundary for page events and streams. It is the next child of epic #24 after #25\u2013#27. Design a page-local callback that can return a normal 401/403 before Dstar.SSE.start/1. Do not start #29 or #32 unless this lands. Follow AGENTS.md docs/changelog/test rules. Branch off current main (ab94ab2)."
+ },
+ {
+  "id": "336f9ec5-4f4e-4bad-8bda-9cd8f045e2ad",
+  "provider": "grok",
+  "title": "Find Workable Tickets",
+  "branch": null,
+  "first_user": "Implement Bootstrap Phoenix/Ash/Dstar and the principal acceptance seam"
+ },
+ {
+  "id": "710b929b-a8ea-4edf-9780-56d94e851019",
+  "provider": "grok",
+  "title": "Find T3Code PrimeAgent Fork",
+  "branch": null,
+  "first_user": "Investigate the different forks/PRs for T3Code that use the Pi Coding harness . Then search for one that uses PrimeAgent."
+ },
+ {
+  "id": "5f2e6690-db5e-42e1-b441-38017b3b9cac",
+  "provider": "grok",
+  "title": "Implement S1 Frontend Exporter",
+  "branch": null,
+  "first_user": "/implement Implement the S1 frontend exporter for BubbleEx. S1 is the first native slice from #27 \u2014 not a ticket. Build only that slice, against the locked planning map #22. ## Source of truth (fetch each issue + resolution comment) - #22 map \u2014 destination, notes, out of scope - #25 \u2014 normalized frontend model - #26 \u2014 bindings, findings, coverage - #27 \u2014 S1 kinds/variants and the matrix (S2/D/P stay placeholders) - #28 \u2014 static Flexbox/Grid rules (row/column gap, fill-width, non-stretch Row, sidecar sizes, no layout JS) - #29 \u2014 public API, package tree, errors, naming, Mix task (Q1\u2013Q14 resolution) - #30 \u2014 fidelity gates (frozen case `bpmkbvvo` only) Do not reopen those decisions. Do not implement #32, #33, #34, or #21. ## Build Public API from #29: - `BubbleEx.Frontend.normalize/2` - `BubbleEx.Frontend.export/3` - `BubbleEx.Frontend.export_payload/3` - `BubbleEx.export_frontend/3` - `mix bubble.export_frontend` S1 lowering only: Page, Group (Fixed / Align to Parent / Row / Column), plain Text (`normal`/`h1`\u2013`h4`), public Image (Stretch/Rescale/Zoom/Adjust-height), decorative Shape, label-only Button, text-only resolved Link, Text/Email/Password Input. Everything else is a dimension-preserving placeholder + finding/binding. Reusable definitions: write fragments and expand instances (#29); do not treat reusable HTML as a new S1 kind. Follow existing BubbleEx contracts: `{:ok, _} | {:error, %BubbleEx.Error{}}`, keyword opts, `CONTEXT.md` vocabulary. `BubbleEx.AppTree` is a diffe"
+ },
+ {
+  "id": "4c6b8ec9-e8c6-4ecc-8c6f-6c3027392e18",
+  "provider": "grok",
+  "title": "Project Status and Next Ticket",
+  "branch": "main",
+  "first_user": "Where do we stand on this project? What's the next ticket we could pick up?"
+ },
+ {
+  "id": "847c640c-7527-40a9-9eda-e5115146d8f5",
+  "provider": "grok",
+  "title": "Project Status and Open Issues",
+  "branch": "main",
+  "first_user": "Where do we stand on this project? Are there open issues we can tackle?"
+ },
+ {
+  "id": "bd88c535-cb20-41f8-ba02-d18ac445afd8",
+  "provider": "grok",
+  "title": "Close Remaining Release Gaps",
+  "branch": "main",
+  "first_user": "You recently reviewed the codebase and said this. I want to move forward with this project. Where do we stand, what's the next thing we need to do?"
+ },
+ {
+  "id": "5bc2c3d4-0e9c-4ba3-8cb6-19259b840c48",
+  "provider": "grok",
+  "title": "Implement DEF-1916",
+  "branch": null,
+  "first_user": "You patched everything? Does that mean that each person got an updated invite?"
+ },
+ {
+  "id": "18115093-2db2-452b-9332-fbd2844d3b36",
+  "provider": "grok",
+  "title": "Validate dstar GitHub Updates",
+  "branch": null,
+  "first_user": "The dstar package has a couple of updates but only on GitHub. Can you check if it compiles and the site runs properly?"
+ },
+ {
+  "id": "3b3a454d-cc35-44d7-8c66-e5211b56a577",
+  "provider": "codex",
+  "title": "Find Available Work Tickets",
+  "branch": null,
+  "first_user": "What tickets are there that we could pick up?"
+ },
+ {
+  "id": "ae2d7eaa-3870-443f-ab61-90187b0f5ad6",
+  "provider": "grok",
+  "title": "Issue #30: Implementation or Design Review",
+  "branch": "main",
+  "first_user": "let's pick up #30. Is it an implementation or grilling or ...?"
+ },
+ {
+  "id": "fea19172-b654-4bfb-8d4e-60ae9a5101ef",
+  "provider": "grok",
+  "title": "Fix Duplicate Defacto Calendar Links",
+  "branch": "main",
+  "first_user": "look at this meeting invite -- because of a connect / disconnect of the Google Calendar with Defacto, it has duplicate links to Defacto. Dive in, figure it out what's causing it, then create a ticket we can work on."
+ },
+ {
+  "id": "06cbcb5b-3292-4ed2-93f5-9f8f590c4e88",
+  "provider": "grok",
+  "title": "Last Ticket Worked On",
+  "branch": "main",
+  "first_user": "Are both closed? What's the next ticket we can pick up?"
+ },
+ {
+  "id": "7dcc17bf-1cb2-45ac-8e8a-ce6c37ec3ffc",
+  "provider": "grok",
+  "title": "Find Other Pickable Tickets",
+  "branch": "main",
+  "first_user": "Your colleague is working on ticket 29. What other tickets are there that you could pick up ?"
+ },
+ {
+  "id": "25d7cb98-7f6e-40b1-9dd9-b26fa060d505",
+  "provider": "grok",
+  "title": "Implement Ticket 29",
+  "branch": "main",
+  "first_user": "Before we start, shall we create tickets for these ideas? Authenticated/private-app export beyond public assets \u2022 Plugin/framework adapters \u2022 Advanced native kinds outside the S1 slice"
+ },
+ {
+  "id": "c91a2bdd-d78d-422d-a0e1-0011feae8a34",
+  "provider": "grok",
+  "title": "Check Matt Pocock Skills",
+  "branch": "main",
+  "first_user": "Do you have Matt Pocock's skills installed?"
+ }
+]
