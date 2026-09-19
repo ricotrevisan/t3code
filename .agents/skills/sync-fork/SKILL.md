@@ -1,6 +1,6 @@
 ---
 name: sync-fork
-description: Sync this fork's main with pingdotgg/t3code:main, rebuild iOS and macOS clients on office, and deploy the fork servers across the park. Use when the user asks to sync the fork, run the nightly, pull upstream, rebase onto pingdotgg, refresh builds, or roll out the fork.
+description: Sync this fork's main with pingdotgg/t3code:main and rebuild iOS and macOS clients, entirely on office (Mac mini). Use when the user asks to sync the fork, run the nightly, pull upstream, rebase onto pingdotgg, or refresh the iOS/macOS builds.
 ---
 
 # Sync fork
@@ -103,29 +103,12 @@ bash "$SCRIPTS/office-macos.sh"
 
 The script builds the arm64 DMG from the same clean, pushed revision already prepared and tested in the office sync worktree. It serves the release directory through Tailscale on port 8443 and prints `sha=`, `dmg=`, `url=`. The download URL is stable per app version: `https://office.tailedc0c1.ts.net:8443/<dmg name>`. It replaces only its own port-8443 serve; other Tailscale serves on office stay untouched.
 
-## 9. Deploy the fork servers across the park
+## 9. Report
 
-Rico has standing authorization for the complete fork rollout. The phrase **“sync the fork”** means rebase, test, push, rebuild every affected client, deploy every fork server, and verify all artifacts and runtimes. Do not stop after GitHub or builds, and do not ask for another deployment confirmation.
+Fork `main` SHA, upstream base, dropped commits with their replacements (if any), test result, EAS build URL, DMG URL. State explicitly that sync/build does not update the live server.
 
-The current fork-server fleet is:
+## Live deployment: separate authorization and orchestration
 
-- `office`: launchd `com.rico.t3code-prime-rpc`, home `~/.t3code`, Tailscale-bound port `8789`.
-- `openclaw`: systemd user unit `t3code-prime-rpc.service`, home `~/.t3code-prime-rpc`, loopback port `8789`, published through existing Tailscale Serve routes.
+Deploy LIVE only as a separately authorized task, orchestrated outside the T3 process being replaced (another session/host may drive office over SSH). All release preparation, Git changes, tests, builds, and deployment execution still happen on office. Discover the actual launchd job, pinned release, environment identity, data home, and the existing deployment runbook/command; do not infer a deploy command from these build helpers.
 
-Never replace or restart `openclaw`'s stock `t3code.service` on port `3773`; it is a separate installation. Before each cutover, discover and verify the live unit, executable, home, listener, and source identity rather than trusting this inventory blindly.
-
-Build the server and web source artifacts from the tested sync worktree on `office`. Target-native dependency installation or native-module compilation may run on the target host when cross-compilation is unsafe; it must use the exact pushed SHA and immutable release directory.
-
-For each server:
-
-1. Capture the old PID, executable/release, service configuration, listener, and HTTP health.
-2. Make a consistent SQLite backup and copy the active service configuration.
-3. Stage an immutable release keyed by the pushed SHA. Keep the previous release untouched.
-4. Verify the staged bundle includes every generated chunk and the web client, and prove required native dependencies load on the target OS.
-5. Switch only the named fork service. Never kill by pattern or run a second process against the live home.
-6. Verify a new PID executing the staged SHA, service stability across the restart window, HTTP 200 locally and through Tailscale, database quick-check, clean boot logs, and an authenticated project/thread read when available.
-7. If any gate fails, restore the prior service configuration/release and repeat the same health checks before continuing.
-
-## 10. Report
-
-Fork `main` SHA, upstream base, dropped commits with their replacements, focused tests, EAS build URL/status, DMG URL, and one verified release/PID/health result per fork server. A sync is incomplete until every applicable build and fleet deployment is either verified or explicitly reported as rolled back/blocked with evidence.
+Before cutover, secure a consistent live-data backup and copies of the active service configuration and release identity on office. Stage and verify a new release separately from the running release and source checkout. Retain the previous release and an explicit rollback procedure, including data/migration compatibility; if a safe rollback is not established, stop before cutover. After the authorized start, verify the exact launchd job/PID and release, HTTP health and environment identity, logs, and an authenticated project/thread read. On failure use the agreed rollback and repeat those checks; never report deployment success from a build result alone.
