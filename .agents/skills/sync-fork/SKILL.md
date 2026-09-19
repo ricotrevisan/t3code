@@ -5,7 +5,7 @@ description: Sync this fork's main with pingdotgg/t3code:main, rebuild iOS and m
 
 # Sync fork
 
-Fork `main` stays a rebase of `pingdotgg/t3code:main`. `pingdotgg` is fetch-only; every push goes to `origin`. Never push to or open PRs against `pingdotgg`.
+Fork `main` stays a rebase of `pingdotgg/t3code:main`: upstream commits are its ancestors and the fork's own commits sit linearly above them. Never merge upstream into fork `main`; a merge also puts upstream in the history but is not a rebase, and it hides fork commits inside a merge. `pingdotgg` is fetch-only; every push goes to `origin`. Never push to or open PRs against `pingdotgg`.
 
 Run every change, Git operation, test, dependency install, Expo authentication, iOS submission, and macOS build on **office (Mac mini)**, which has Xcode and the required macOS/iOS tooling even though mobile uses Expo. Check `uname -s` and `hostname -s`; they must print `Darwin` and `office`. Orchestration may run elsewhere via `ssh office`; execution and artifacts stay on office. The helper scripts reject other hosts.
 
@@ -26,7 +26,7 @@ export PATH="/opt/homebrew/bin:$WT/node_modules/.bin:$PATH"
 bash "$SCRIPTS/check-upstream.sh"
 ```
 
-Exit 0: fork `main` already contains upstream. Report the fork and upstream SHAs and stop, unless retrying a skipped build. A build retry uses the already-synced revision directly. Exit 10: new upstream commits were printed; continue.
+Exit 0: fork `main` is a rebase of upstream. Report the fork and upstream SHAs and stop, unless retrying a skipped build. A build retry uses the already-synced revision directly. Exit 10: new upstream commits were printed; continue. Exit 20: fork `main` contains upstream but carries merge commits; the next sync rebases them away, so report the divergence and continue.
 
 ## 2. Prepare the sync worktree
 
@@ -47,7 +47,14 @@ git -C "$WT" rebase pingdotgg/main
 
 Resolve conflicts keeping upstream intent and re-applying the fork feature on top. When a fork commit fixed a bug upstream has now fixed, verify the upstream diff actually covers the fork fix (read the diff, not the commit message), then drop the commit with `git rebase --skip` and note the upstream commit that replaced it.
 
-Completion: the rebase exits 0 and `git -C "$WT" status --porcelain` is empty. Otherwise preserve the in-progress state and report the conflict; resume after resolving it. Aborting or skipping unresolved work requires explicit user approval after a backup. Never force a broken rebase through.
+Verify the rebase shape before continuing, because a rebase that silently replayed upstream commits, or a merge left in place, both still exit 0:
+
+```
+git -C "$WT" merge-base --is-ancestor pingdotgg/main HEAD
+test -z "$(git -C "$WT" rev-list --merges pingdotgg/main..HEAD)"
+```
+
+Completion: the rebase exits 0, `git -C "$WT" status --porcelain` is empty, upstream is an ancestor, and no merge commits sit above it. Otherwise preserve the in-progress state and report the conflict; resume after resolving it. Aborting or skipping unresolved work requires explicit user approval after a backup. Never force a broken rebase through.
 
 ## 4. Prove
 
