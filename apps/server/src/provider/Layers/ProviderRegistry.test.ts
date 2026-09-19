@@ -1109,6 +1109,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   Effect.succeed(id === instance.instanceId ? instance : undefined),
                 listInstances: Effect.succeed([instance]),
                 listUnavailable: Effect.succeed([]),
+                listAdapterManifests: Effect.succeed([]),
                 streamChanges: Stream.empty,
                 subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
               },
@@ -1476,6 +1477,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 Effect.succeed(instanceId === codexInstanceId ? instance : undefined),
               listInstances: Effect.succeed([instance]),
               listUnavailable: Effect.succeed([]),
+              listAdapterManifests: Effect.succeed([]),
               streamChanges: Stream.empty,
               subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
             },
@@ -1595,6 +1597,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 ),
               listInstances: Ref.get(instancesRef),
               listUnavailable: Effect.succeed([]),
+              listAdapterManifests: Effect.succeed([]),
               streamChanges: Stream.fromPubSub(registryChanges),
               subscribeChanges: PubSub.subscribe(registryChanges),
             },
@@ -1791,6 +1794,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 Effect.succeed(instances.find((instance) => instance.instanceId === instanceId)),
               listInstances: Effect.succeed(instances),
               listUnavailable: Effect.succeed([]),
+              listAdapterManifests: Effect.succeed([]),
               streamChanges: Stream.empty,
               subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
             },
@@ -1915,6 +1919,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 Effect.succeed(instanceId === cursorInstanceId ? instance : undefined),
               listInstances: Effect.succeed([instance]),
               listUnavailable: Effect.succeed([]),
+              listAdapterManifests: Effect.succeed([]),
               streamChanges: Stream.empty,
               subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
                 PubSub.subscribe(pubsub),
@@ -2043,6 +2048,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   Effect.succeed(instanceId === openCodeInstanceId ? instance : undefined),
                 listInstances: Effect.succeed([instance]),
                 listUnavailable: Effect.succeed([]),
+                listAdapterManifests: Effect.succeed([]),
                 streamChanges: Stream.empty,
                 subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
                   PubSub.subscribe(pubsub),
@@ -2146,6 +2152,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 Effect.succeed(instanceId === codexInstanceId ? instance : undefined),
               listInstances: Effect.succeed([instance]),
               listUnavailable: Effect.succeed([]),
+              listAdapterManifests: Effect.succeed([]),
               streamChanges: Stream.empty,
               subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
                 PubSub.subscribe(pubsub),
@@ -2264,6 +2271,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 return yield* Ref.get(instancesRef);
               }),
               listUnavailable: Effect.succeed([]),
+              listAdapterManifests: Effect.succeed([]),
               streamChanges: Stream.fromPubSub(changes),
               subscribeChanges: PubSub.subscribe(changes),
             },

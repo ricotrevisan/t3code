@@ -8,12 +8,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   ApprovalRequestId,
-  PrimeSettings,
+  ProviderAdapterPackageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
+import { makePrimeAdapter } from "@t3tools/provider-adapter-prime";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -26,9 +27,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { ServerConfig } from "../../config.ts";
-import { makePrimeAdapter } from "./PrimeAdapter.ts";
-
-const decodePrimeSettings = Schema.decodeSync(PrimeSettings);
+import { makeExternalProviderAdapterHostV2 } from "../ExternalProviderAdapterHost.ts";
 const decodeRequestLog = Schema.decodeUnknownSync(
   Schema.fromJsonString(
     Schema.Struct({
@@ -74,16 +73,33 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(mockAgentPath)} "$@"
 
 const makeTestAdapter = (
   binaryPath: string,
-  options?: Parameters<typeof makePrimeAdapter>[1] & { readonly launchArgs?: string },
+  options?: {
+    readonly environment?: Readonly<Record<string, string | undefined>>;
+    readonly instanceId?: ProviderInstanceId;
+    readonly launchArgs?: string;
+  },
 ) =>
-  makePrimeAdapter(
-    decodePrimeSettings({
-      enabled: true,
+  Effect.gen(function* () {
+    const instanceId = options?.instanceId ?? ProviderInstanceId.make("primeAgent");
+    const config = {
       binaryPath,
-      ...(options?.launchArgs !== undefined ? { launchArgs: options.launchArgs } : {}),
-    }),
-    options,
-  );
+      launchArgs: options?.launchArgs ?? "",
+    };
+    const createInput = {
+      instanceId,
+      displayName: undefined,
+      accentColor: undefined,
+      environment: options?.environment ?? {},
+      enabled: true,
+      config,
+    };
+    const host = yield* makeExternalProviderAdapterHostV2({
+      packageId: ProviderAdapterPackageId.make("prime-rpc"),
+      instanceId,
+      storageKey: "prime-agent",
+    });
+    return yield* makePrimeAdapter(config, createInput, host.host);
+  });
 
 function waitForFileContent(
   filePath: string,
@@ -747,7 +763,7 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
                 runtimeMode: "approval-required",
               })
               .pipe(Effect.flip);
-            assert.equal(error._tag, "ProviderAdapterValidationError");
+            assert.equal(error._tag, "ProviderAdapterV1Error");
             assert.include(error.message, "override the T3 approval extension");
           }),
         { discard: true },
@@ -767,7 +783,7 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
                 runtimeMode,
               })
               .pipe(Effect.flip);
-            assert.equal(error._tag, "ProviderAdapterValidationError");
+            assert.equal(error._tag, "ProviderAdapterV1Error");
             assert.include(error.message, `does not support runtime mode '${runtimeMode}'`);
           }),
         { discard: true },
@@ -801,7 +817,7 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
               })
               .pipe(Effect.flip);
 
-            assert.equal(error._tag, "ProviderAdapterRequestError");
+            assert.equal(error._tag, "ProviderAdapterV1Error");
             assert.include(error.message, "approval extension handshake");
             assert.isFalse(yield* adapter.hasSession(threadId));
           }),
@@ -813,6 +829,8 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
   it.effect("starts a thread, streams one turn, and persists a resume cursor", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const canonicalBaseDir = yield* fileSystem.realPath(config.baseDir);
       const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
       const adapter = yield* makeTestAdapter(binaryPath, {
         instanceId: ProviderInstanceId.make("primeAgent"),
@@ -842,12 +860,29 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       });
 
       assert.equal(session.provider, "primeAgent");
-      assert.equal(adapter.capabilities.sessionModelSwitch, "in-session");
+      assert.deepStrictEqual(adapter.capabilities, {
+        protocolVersion: 1,
+        features: [
+          "session.resume",
+          "turn.steer",
+          "turn.interrupt",
+          "input.attachments",
+          "request.approval",
+          "request.structured-input",
+          "model.discovery",
+          "model.switch",
+          "reasoning.selection",
+          "stream.reasoning",
+          "stream.tool-lifecycle",
+          "stream.usage",
+          "stream.subagents",
+        ],
+      });
       assert.deepStrictEqual(session.resumeCursor, {
         schemaVersion: 1,
         sessionId: "prime-mock-session",
         sessionFile: NodePath.join(
-          config.baseDir,
+          canonicalBaseDir,
           "prime-agent",
           "sessions",
           String(threadId),
@@ -1358,7 +1393,7 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
 
       assert.equal(started._tag, "Failure");
       if (started._tag === "Failure") {
-        assert.include(started.failure.message, "missing");
+        assert.include(started.failure.message, "does not exist");
       }
     }),
   );

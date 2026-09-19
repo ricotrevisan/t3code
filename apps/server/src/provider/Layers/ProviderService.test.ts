@@ -22,6 +22,8 @@ import {
   OrchestrationThreadShell,
   ProjectId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  ProviderAdapterPackageId,
+  ProviderAdapterPackageVersion,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
@@ -1649,6 +1651,252 @@ routing.layer("ProviderServiceLive routing", (it) => {
       routing.claude.sendTurn.mockClear();
       routing.claude.stopSession.mockClear();
     }),
+  );
+
+  it.effect("persists the host-stamped external adapter package identity with a session", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const adapterPackage = {
+          id: ProviderAdapterPackageId.make("echo-adapter"),
+          version: ProviderAdapterPackageVersion.make("1.2.3"),
+          protocolVersion: 1,
+        };
+        Object.assign(routing.codex.adapter, { adapterPackage });
+        return adapterPackage;
+      }),
+      (adapterPackage) =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+          const threadId = asThreadId("external-adapter-thread");
+          routing.codex.startSession.mockImplementationOnce((input) =>
+            Effect.succeed({
+              provider: CODEX_DRIVER,
+              providerInstanceId: codexInstanceId,
+              adapterPackage: {
+                id: ProviderAdapterPackageId.make("untrusted-adapter"),
+                version: ProviderAdapterPackageVersion.make("9.9.9"),
+                protocolVersion: 9,
+              },
+              status: "ready",
+              runtimeMode: input.runtimeMode,
+              threadId,
+              createdAt: "2026-09-14T00:00:00.000Z",
+              updatedAt: "2026-09-14T00:00:00.000Z",
+            }),
+          );
+
+          const session = yield* provider.startSession(threadId, {
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            runtimeMode: "full-access",
+          });
+          assert.deepStrictEqual(session.adapterPackage, adapterPackage);
+
+          const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+          assert.deepStrictEqual(binding.adapterPackage, adapterPackage);
+          assert.equal(binding.adapterKey, "package:echo-adapter@1.2.3:protocol:1");
+          const runtime = Option.getOrThrow(yield* repository.getByThreadId({ threadId }));
+          assert.deepStrictEqual(runtime.adapterPackage, adapterPackage);
+          assert.equal(runtime.adapterKey, "package:echo-adapter@1.2.3:protocol:1");
+        }),
+      () =>
+        Effect.sync(() => {
+          delete (routing.codex.adapter as { adapterPackage?: unknown }).adapterPackage;
+        }),
+    ),
+  );
+
+  it.effect("refuses to resume a session pinned to a different adapter package", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        Object.assign(routing.codex.adapter, {
+          adapterPackage: {
+            id: ProviderAdapterPackageId.make("echo-adapter"),
+            version: ProviderAdapterPackageVersion.make("2.0.0"),
+            protocolVersion: 1,
+          },
+        });
+      }),
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = asThreadId("external-adapter-old-version");
+          yield* directory.upsert({
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            adapterKey: "package:echo-adapter@1.2.3:protocol:1",
+            adapterPackage: {
+              id: ProviderAdapterPackageId.make("echo-adapter"),
+              version: ProviderAdapterPackageVersion.make("1.2.3"),
+              protocolVersion: 1,
+            },
+            runtimeMode: "full-access",
+            status: "running",
+            resumeCursor: { sessionId: "old-adapter-session" },
+          });
+
+          const result = yield* provider
+            .sendTurn({ threadId, input: "resume", attachments: [] })
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "does not match the loaded adapter");
+          }
+        }),
+      () =>
+        Effect.sync(() => {
+          delete (routing.codex.adapter as { adapterPackage?: unknown }).adapterPackage;
+        }),
+    ),
+  );
+
+  it.effect("refuses normal startup when persisted package identity is stale", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        Object.assign(routing.codex.adapter, {
+          adapterPackage: {
+            id: ProviderAdapterPackageId.make("echo-adapter"),
+            version: ProviderAdapterPackageVersion.make("2.0.0"),
+            protocolVersion: 1,
+          },
+        });
+      }),
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = asThreadId("external-adapter-stale-start");
+          yield* directory.upsert({
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            adapterKey: "package:echo-adapter@1.2.3:protocol:1",
+            adapterPackage: {
+              id: ProviderAdapterPackageId.make("echo-adapter"),
+              version: ProviderAdapterPackageVersion.make("1.2.3"),
+              protocolVersion: 1,
+            },
+            runtimeMode: "full-access",
+            status: "stopped",
+            resumeCursor: { sessionId: "old-adapter-session" },
+          });
+
+          const startsBefore = routing.codex.startSession.mock.calls.length;
+          const result = yield* provider
+            .startSession(threadId, {
+              provider: CODEX_DRIVER,
+              providerInstanceId: codexInstanceId,
+              threadId,
+              runtimeMode: "full-access",
+            })
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "does not match the loaded adapter");
+          }
+          assert.equal(routing.codex.startSession.mock.calls.length, startsBefore);
+        }),
+      () =>
+        Effect.sync(() => {
+          delete (routing.codex.adapter as { adapterPackage?: unknown }).adapterPackage;
+          routing.codex.startSession.mockClear();
+        }),
+    ),
+  );
+
+  it.effect("refuses active-session routing when persisted package identity is stale", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        Object.assign(routing.codex.adapter, {
+          adapterPackage: {
+            id: ProviderAdapterPackageId.make("echo-adapter"),
+            version: ProviderAdapterPackageVersion.make("1.2.3"),
+            protocolVersion: 1,
+          },
+        });
+      }),
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService.ProviderService;
+          const threadId = asThreadId("external-adapter-stale-active");
+          yield* provider.startSession(threadId, {
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            runtimeMode: "full-access",
+          });
+          Object.assign(routing.codex.adapter, {
+            adapterPackage: {
+              id: ProviderAdapterPackageId.make("echo-adapter"),
+              version: ProviderAdapterPackageVersion.make("2.0.0"),
+              protocolVersion: 1,
+            },
+          });
+
+          const result = yield* provider
+            .sendTurn({ threadId, input: "must not route", attachments: [] })
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.include(result.failure.message, "does not match the loaded adapter");
+          }
+          assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
+        }),
+      () =>
+        Effect.gen(function* () {
+          delete (routing.codex.adapter as { adapterPackage?: unknown }).adapterPackage;
+          yield* routing.codex.stopAll();
+          routing.codex.startSession.mockClear();
+          routing.codex.sendTurn.mockClear();
+          routing.codex.stopAll.mockClear();
+        }),
+    ),
+  );
+
+  it.effect("resumes legacy provider-keyed bindings under a replacement package", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        Object.assign(routing.codex.adapter, {
+          adapterPackage: {
+            id: ProviderAdapterPackageId.make("codex-rpc"),
+            version: ProviderAdapterPackageVersion.make("1.0.0"),
+            protocolVersion: 1,
+          },
+        });
+      }),
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = asThreadId("legacy-binding-thread");
+          yield* directory.upsert({
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            // Pre-seam binding: keyed by provider kind, no package identity.
+            adapterKey: "codex",
+            runtimeMode: "full-access",
+            status: "running",
+            resumeCursor: { sessionId: "legacy-session" },
+          });
+
+          yield* provider.sendTurn({ threadId, input: "resume legacy", attachments: [] });
+          assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+
+          yield* provider.stopSession({ threadId });
+        }),
+      () =>
+        Effect.sync(() => {
+          delete (routing.codex.adapter as { adapterPackage?: unknown }).adapterPackage;
+          routing.codex.sendTurn.mockClear();
+          routing.codex.stopSession.mockClear();
+        }),
+    ),
   );
 
   it.effect("routes provider operations and rollback conversation", () =>

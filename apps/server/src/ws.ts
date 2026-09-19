@@ -1833,6 +1833,7 @@ const makeWsRpcLayer = (
             keybindings: keybindingsConfig.keybindings,
             issues: keybindingsConfig.issues,
             providers,
+            providerAdapterManifests: yield* providerInstances.listAdapterManifests,
             availableEditors,
             // Same discovery-with-timeout treatment as editors: a slow probe
             // must not stall server.getConfig, so it degrades to no targets.

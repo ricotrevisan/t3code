@@ -39,6 +39,7 @@ export interface ServerDerivedPaths {
   /** Palettes this machine publishes for clients to follow, one file per theme. */
   readonly environmentThemesDir: string;
   readonly providerStatusCacheDir: string;
+  readonly providerAdapterRegistryPath: string;
   readonly worktreesDir: string;
   readonly attachmentsDir: string;
   /** Screenshots the agent asks the collaborative browser to keep for the user. */
@@ -150,6 +151,7 @@ export const deriveServerPaths = Effect.fn(function* (
     settingsPath: join(stateDir, "settings.json"),
     environmentThemesDir: join(stateDir, "themes"),
     providerStatusCacheDir,
+    providerAdapterRegistryPath: join(stateDir, "provider-adapters.json"),
     worktreesDir: join(baseDir, "worktrees"),
     attachmentsDir,
     browserArtifactsDir: join(stateDir, "browser-artifacts"),

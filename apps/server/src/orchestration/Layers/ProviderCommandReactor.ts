@@ -655,6 +655,11 @@ const make = Effect.gen(function* () {
           status: "starting",
           providerName: activeSession?.provider ?? preferredProvider,
           providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
+          ...(activeSession?.adapterPackage !== undefined
+            ? { adapterPackage: activeSession.adapterPackage }
+            : thread.session?.adapterPackage !== undefined
+              ? { adapterPackage: thread.session.adapterPackage }
+              : {}),
           runtimeMode: desiredRuntimeMode,
           activeTurnId: null,
           lastError: null,
@@ -747,6 +752,9 @@ const make = Effect.gen(function* () {
                 : mapProviderSessionStatusToOrchestrationStatus(session.status),
             providerName: session.provider,
             providerInstanceId: session.providerInstanceId,
+            ...(session.adapterPackage !== undefined
+              ? { adapterPackage: session.adapterPackage }
+              : {}),
             runtimeMode: desiredRuntimeMode,
             // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,
@@ -1751,6 +1759,9 @@ const make = Effect.gen(function* () {
               providerName: thread.session?.providerName ?? null,
               ...(thread.session?.providerInstanceId !== undefined
                 ? { providerInstanceId: thread.session.providerInstanceId }
+                : {}),
+              ...(thread.session?.adapterPackage !== undefined
+                ? { adapterPackage: thread.session.adapterPackage }
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
               activeTurnId: null,

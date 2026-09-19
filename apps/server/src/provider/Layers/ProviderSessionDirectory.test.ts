@@ -5,6 +5,8 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  ProviderAdapterPackageId,
+  ProviderAdapterPackageVersion,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -94,6 +96,78 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
 
       const threadIds = yield* directory.listThreadIds();
       expect(threadIds).toEqual(expect.arrayContaining([initialThreadId, nextThreadId]));
+    }),
+  );
+
+  it.effect(
+    "round-trips structured adapter package identity and preserves it on later updates",
+    () =>
+      Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory;
+        const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+        const threadId = ThreadId.make("thread-package-identity");
+        const adapterPackage = {
+          id: ProviderAdapterPackageId.make("echo-adapter"),
+          version: ProviderAdapterPackageVersion.make("1.2.3"),
+          protocolVersion: 1,
+        };
+
+        yield* directory.upsert({
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex-external"),
+          threadId,
+          adapterKey: "package:echo-adapter@1.2.3:protocol:1",
+          adapterPackage,
+          status: "running",
+        });
+        yield* directory.upsert({
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex-external"),
+          threadId,
+          status: "stopped",
+        });
+
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.deepStrictEqual(binding.adapterPackage, adapterPackage);
+        assert.equal(binding.adapterKey, "package:echo-adapter@1.2.3:protocol:1");
+        const runtime = Option.getOrThrow(yield* runtimeRepository.getByThreadId({ threadId }));
+        assert.deepStrictEqual(runtime.adapterPackage, adapterPackage);
+        assert.equal(runtime.adapterKey, "package:echo-adapter@1.2.3:protocol:1");
+      }),
+  );
+
+  it.effect("rejects a partially persisted adapter package identity", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = ThreadId.make("thread-partial-package-identity");
+      yield* sql`
+        INSERT INTO provider_session_runtime (
+          thread_id,
+          provider_name,
+          provider_instance_id,
+          adapter_key,
+          adapter_package_id,
+          runtime_mode,
+          status,
+          last_seen_at
+        ) VALUES (
+          ${threadId},
+          'codex',
+          'codex-external',
+          'package:echo-adapter@1.2.3:protocol:1',
+          'echo-adapter',
+          'full-access',
+          'running',
+          '2026-01-01T00:00:00.000Z'
+        )
+      `;
+
+      const result = yield* runtimeRepository.getByThreadId({ threadId }).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "PersistenceDecodeError");
+      }
     }),
   );
 
@@ -306,6 +380,7 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
         providerName: "codex",
         providerInstanceId: null,
         adapterKey: "codex",
+        adapterPackage: null,
         runtimeMode: "full-access",
         status: "running",
         lastSeenAt: "2026-04-14T12:05:00.000Z",
@@ -322,6 +397,7 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
         providerName: "claudeAgent",
         providerInstanceId: null,
         adapterKey: "claudeAgent",
+        adapterPackage: null,
         runtimeMode: "approval-required",
         status: "starting",
         lastSeenAt: "2026-04-14T12:00:00.000Z",
@@ -385,6 +461,7 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
           providerName: "claudeAgent",
           providerInstanceId: null,
           adapterKey: "claudeAgent",
+          adapterPackage: null,
           runtimeMode: "full-access",
           status: "running",
           lastSeenAt: "2026-01-01T00:00:00.000Z",
