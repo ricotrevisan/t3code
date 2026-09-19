@@ -9,6 +9,8 @@
  */
 import type {
   ApprovalRequestId,
+  ProviderAdapterProtocolCapabilitiesV1,
+  ProviderAdapterPackageReference,
   ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderUserInputAnswers,
@@ -52,6 +54,12 @@ export interface ProviderAdapterCapabilities {
   readonly promptlessTurnContinuation?: boolean;
   /** False when native conversation history cannot be rewound. */
   readonly supportsConversationRollback?: boolean;
+  /**
+   * Versioned capabilities negotiated for this configured instance.
+   * Optional while built-in adapters migrate; external V1 packages must
+   * provide it and may only enable features declared by their manifest.
+   */
+  readonly protocol?: ProviderAdapterProtocolCapabilitiesV1;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -69,6 +77,11 @@ export interface ProviderAdapterShape<TError> {
    * Provider kind implemented by this adapter.
    */
   readonly provider: ProviderDriverKind;
+  /**
+   * Exact versioned package identity. Present for trusted-local packages and
+   * compiled first-party package bridges; absent for unversioned built-ins.
+   */
+  readonly adapterPackage?: ProviderAdapterPackageReference | undefined;
   readonly capabilities: ProviderAdapterCapabilities;
 
   /**

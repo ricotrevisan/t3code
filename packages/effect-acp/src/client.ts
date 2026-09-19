@@ -23,6 +23,28 @@ import {
 import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 
 export interface AcpClientOptions {
+  /**
+   * Retains every decoded notification in `raw.notifications`.
+   *
+   * Raw capture is disabled by default because typed notification handlers already receive the
+   * same payloads. Enabling it uses an unbounded queue so callers must continuously consume the
+   * stream for the lifetime of the client.
+   */
+  readonly captureRawNotifications?: boolean;
+  /**
+   * Installs the initial `session/update` handler before the transport starts reading. Use this when
+   * the peer can emit notifications as soon as the client is created.
+   */
+  readonly onSessionUpdate?: (
+    notification: AcpSchema.SessionNotification,
+  ) => Effect.Effect<void, AcpError.AcpError>;
+  /**
+   * Installs the initial `session/elicitation/complete` handler before the transport starts reading.
+   * Use this when the peer can emit notifications as soon as the client is created.
+   */
+  readonly onElicitationComplete?: (
+    notification: AcpSchema.ElicitationCompleteNotification,
+  ) => Effect.Effect<void, AcpError.AcpError>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (event: AcpProtocol.AcpProtocolLogEvent) => Effect.Effect<void, never>;
@@ -39,6 +61,10 @@ export interface AcpClientOptions {
 }
 
 type AcpClientRaw = {
+  /**
+   * Raw notifications captured when `captureRawNotifications` is enabled. Otherwise this stream
+   * is empty. Prefer typed handlers unless the complete decoded notification envelope is needed.
+   */
   readonly notifications: Stream.Stream<AcpProtocol.AcpIncomingNotification>;
   readonly request: (method: string, payload: unknown) => Effect.Effect<unknown, AcpError.AcpError>;
   readonly notify: (method: string, payload: unknown) => Effect.Effect<void, AcpError.AcpError>;
@@ -223,7 +249,9 @@ export class AcpClient extends Context.Service<
       ) => Effect.Effect<AcpSchema.ReleaseTerminalResponse | void, AcpError.AcpError>,
     ) => Effect.Effect<void>;
     /**
-     * Registers a handler for `session/update`.
+     * Registers a handler for future `session/update` notifications.
+     * Register handlers before calling `agent.initialize`; notifications are not buffered while no
+     * handler is registered.
      * @see https://agentclientprotocol.com/protocol/schema#session/update
      */
     readonly handleSessionUpdate: (
@@ -232,7 +260,9 @@ export class AcpClient extends Context.Service<
       ) => Effect.Effect<void, AcpError.AcpError>,
     ) => Effect.Effect<void>;
     /**
-     * Registers a handler for `session/elicitation/complete`.
+     * Registers a handler for future `session/elicitation/complete` notifications.
+     * Register handlers before calling `agent.initialize`; notifications are not buffered while no
+     * handler is registered.
      * @see https://agentclientprotocol.com/protocol/schema#session/elicitation/complete
      */
     readonly handleElicitationComplete: (
@@ -306,13 +336,14 @@ interface AcpCoreRequestHandlers {
 }
 
 interface AcpNotificationHandlers {
-  readonly sessionUpdate: BufferedNotificationHandler<AcpSchema.SessionNotification>;
-  readonly elicitationComplete: BufferedNotificationHandler<AcpSchema.ElicitationCompleteNotification>;
-}
-
-interface BufferedNotificationHandler<A> {
-  readonly handlers: Array<(notification: A) => Effect.Effect<void, AcpError.AcpError>>;
-  readonly pending: Array<A>;
+  readonly sessionUpdate: Array<
+    (notification: AcpSchema.SessionNotification) => Effect.Effect<void, AcpError.AcpError>
+  >;
+  readonly elicitationComplete: Array<
+    (
+      notification: AcpSchema.ElicitationCompleteNotification,
+    ) => Effect.Effect<void, AcpError.AcpError>
+  >;
 }
 
 export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
@@ -322,8 +353,8 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
 ): Effect.fn.Return<AcpClient["Service"], never, Scope.Scope> {
   const coreHandlers: AcpCoreRequestHandlers = {};
   const notificationHandlers: AcpNotificationHandlers = {
-    sessionUpdate: { handlers: [], pending: [] },
-    elicitationComplete: { handlers: [], pending: [] },
+    sessionUpdate: options.onSessionUpdate ? [options.onSessionUpdate] : [],
+    elicitationComplete: options.onElicitationComplete ? [options.onElicitationComplete] : [],
   };
   const extRequestHandlers = new Map<
     string,
@@ -341,49 +372,24 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
     | undefined;
 
   const runNotificationHandlers = <A>(
-    registration: BufferedNotificationHandler<A>,
+    handlers: ReadonlyArray<(notification: A) => Effect.Effect<void, AcpError.AcpError>>,
     notification: A,
   ) =>
     Effect.forEach(
-      registration.handlers,
+      handlers,
       (handler) => handler(notification).pipe(Effect.catch(() => Effect.void)),
       { discard: true },
     );
 
-  const flushBufferedNotifications = <A>(registration: BufferedNotificationHandler<A>) =>
-    Effect.suspend(() => {
-      if (registration.handlers.length === 0 || registration.pending.length === 0) {
-        return Effect.void;
-      }
-      const pending = registration.pending.splice(0, registration.pending.length);
-      return Effect.forEach(
-        pending,
-        (notification) => runNotificationHandlers(registration, notification),
-        {
-          discard: true,
-        },
-      );
-    });
-
   const dispatchNotification = (notification: AcpProtocol.AcpIncomingNotification) => {
     switch (notification._tag) {
-      case "SessionUpdate": {
-        if (notificationHandlers.sessionUpdate.handlers.length === 0) {
-          notificationHandlers.sessionUpdate.pending.push(notification.params);
-          return Effect.void;
-        }
+      case "SessionUpdate":
         return runNotificationHandlers(notificationHandlers.sessionUpdate, notification.params);
-      }
-      case "ElicitationComplete": {
-        if (notificationHandlers.elicitationComplete.handlers.length === 0) {
-          notificationHandlers.elicitationComplete.pending.push(notification.params);
-          return Effect.void;
-        }
+      case "ElicitationComplete":
         return runNotificationHandlers(
           notificationHandlers.elicitationComplete,
           notification.params,
         );
-      }
       case "ExtNotification": {
         const handler = extNotificationHandlers.get(notification.method);
         if (handler) {
@@ -410,6 +416,7 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
     stdio: stdio,
     ...(terminationError ? { terminationError } : {}),
     serverRequestMethods: new Set(AcpRpcs.ClientRpcs.requests.keys()),
+    captureRawNotifications: options.captureRawNotifications ?? true,
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
@@ -550,14 +557,12 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
         return Effect.void;
       }),
     handleSessionUpdate: (handler) =>
-      Effect.suspend(() => {
-        notificationHandlers.sessionUpdate.handlers.push(handler);
-        return flushBufferedNotifications(notificationHandlers.sessionUpdate);
+      Effect.sync(() => {
+        notificationHandlers.sessionUpdate.push(handler);
       }),
     handleElicitationComplete: (handler) =>
-      Effect.suspend(() => {
-        notificationHandlers.elicitationComplete.handlers.push(handler);
-        return flushBufferedNotifications(notificationHandlers.elicitationComplete);
+      Effect.sync(() => {
+        notificationHandlers.elicitationComplete.push(handler);
       }),
     handleUnknownExtRequest: (handler) =>
       Effect.suspend(() => {

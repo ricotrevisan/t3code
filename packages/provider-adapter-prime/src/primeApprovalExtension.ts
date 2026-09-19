@@ -1,6 +1,5 @@
+import type { ProviderAdapterHostV2 } from "@t3tools/provider-adapter";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 export const PRIME_APPROVAL_EXTENSION_PROTOCOL_VERSION = 1 as const;
@@ -92,15 +91,11 @@ export default function t3ApprovalExtension(pi: ExtensionAPI) {
 `;
 
 export const preparePrimeApprovalExtension = Effect.fn("preparePrimeApprovalExtension")(function* (
-  baseDir: string,
+  storage: ProviderAdapterHostV2["storage"],
 ) {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const extensionDirectory = path.resolve(baseDir, "prime-agent", "extensions");
-  const extensionPath = path.join(extensionDirectory, PRIME_APPROVAL_EXTENSION_FILE_NAME);
-
-  yield* fileSystem.makeDirectory(extensionDirectory, { recursive: true });
-  yield* fileSystem.writeFileString(extensionPath, PRIME_APPROVAL_EXTENSION_SOURCE);
-
-  return extensionPath;
+  return yield* storage.materializeArtifact({
+    key: "approval-v1",
+    fileName: PRIME_APPROVAL_EXTENSION_FILE_NAME,
+    content: PRIME_APPROVAL_EXTENSION_SOURCE,
+  });
 });
