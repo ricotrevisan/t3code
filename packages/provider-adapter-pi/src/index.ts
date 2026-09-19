@@ -94,4 +94,8 @@ export const PI_PROVIDER_ADAPTER_PACKAGE: ProviderAdapterPackageV1<
     }),
 });
 
-export { makePiAdapter, PI_PROVIDER_ADAPTER_CAPABILITIES } from "./PiAdapter.ts";
+export {
+  makePiAdapter,
+  mapPiModelIdentity,
+  PI_PROVIDER_ADAPTER_CAPABILITIES,
+} from "./PiAdapter.ts";
