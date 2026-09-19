@@ -1,5 +1,6 @@
 import {
   type AgentSessionImportSource,
+  type OrchestrationSession,
   ChatAttachment,
   ComposerContextId,
   CheckpointRef,
@@ -783,6 +784,73 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.equal(changedContext.value.session?.providerInstanceId, "claude-secondary");
         assert.equal(changedContext.value.session?.lastError, "Starting another session");
       }
+    }),
+  );
+
+  it.effect("reads runtime context with packaged, legacy, and absent sessions", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-runtime-context");
+      const projectId = asProjectId("project-runtime-context");
+      const updatedAt = "2026-09-05T00:00:00.000Z";
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES (${projectId}, 'Runtime context', '/runtime-context', '[]', ${updatedAt}, ${updatedAt})`;
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
+        VALUES (${threadId}, ${projectId}, 'Runtime thread', 'invalid-json', 'full-access', 'default', ${updatedAt}, ${updatedAt})`;
+
+      const expectedContext = {
+        id: threadId,
+        projectId,
+        title: "Runtime thread",
+        titleState: null,
+      };
+      assert.deepEqual(
+        yield* query.getThreadRuntimeContext(threadId),
+        Option.some({ ...expectedContext, session: null }),
+      );
+
+      yield* sql`INSERT INTO projection_thread_sessions
+        (thread_id, status, provider_name, provider_instance_id, adapter_package_id,
+         adapter_package_version, adapter_package_protocol_version, runtime_mode,
+         active_turn_id, last_error, updated_at)
+        VALUES (${threadId}, 'running', 'prime-rpc', 'prime-secondary', 'prime-rpc',
+          '1.2.3', 1, 'approval-required', 'turn-runtime-context', NULL, ${updatedAt})`;
+      const expectedSession = {
+        threadId,
+        status: "running",
+        providerName: "prime-rpc",
+        providerInstanceId: ProviderInstanceId.make("prime-secondary"),
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-runtime-context"),
+        lastError: null,
+        updatedAt,
+      } satisfies OrchestrationSession;
+      assert.deepEqual(
+        yield* query.getThreadRuntimeContext(threadId),
+        Option.some({
+          ...expectedContext,
+          session: {
+            ...expectedSession,
+            adapterPackage: {
+              id: ProviderAdapterPackageId.make("prime-rpc"),
+              version: ProviderAdapterPackageVersion.make("1.2.3"),
+              protocolVersion: 1,
+            },
+          },
+        }),
+      );
+
+      yield* sql`UPDATE projection_thread_sessions
+        SET adapter_package_id = NULL, adapter_package_version = NULL,
+            adapter_package_protocol_version = NULL
+        WHERE thread_id = ${threadId}`;
+      assert.deepEqual(
+        yield* query.getThreadRuntimeContext(threadId),
+        Option.some({ ...expectedContext, session: expectedSession }),
+      );
     }),
   );
 
