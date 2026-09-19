@@ -35,6 +35,11 @@ export const ModelListRow = memo(function ModelListRow(props: {
   showProvider: boolean;
   preferShortName?: boolean;
   useTriggerLabel?: boolean;
+  /**
+   * Slug tail to show after the name when another visible row would otherwise
+   * render identically. Set by the picker, which knows the whole list.
+   */
+  disambiguator?: string | null;
   showNewBadge?: boolean;
   unavailable?: boolean;
   jumpLabel?: string | null;
@@ -70,6 +75,11 @@ export const ModelListRow = memo(function ModelListRow(props: {
                   props.preferShortName ? { preferShortName: true } : undefined,
                 )}
           </div>
+          {props.disambiguator ? (
+            <span className="min-w-0 truncate text-[10px] font-normal leading-snug text-muted-foreground/70">
+              {props.disambiguator}
+            </span>
+          ) : null}
           {props.showNewBadge ? (
             <span
               className="shrink-0 rounded border border-update/35 bg-update/15 px-0.5 py-px text-[10px] font-bold uppercase leading-none tracking-wide text-update-foreground"

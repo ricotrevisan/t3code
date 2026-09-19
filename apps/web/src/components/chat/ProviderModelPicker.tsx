@@ -188,9 +188,21 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const allModelNames = selectedEntries
     ? selectedEntries.map((selection) => selection.label).join(", ") || "Choose models"
     : undefined;
+  /**
+   * Upstream provider or account behind the selected model, e.g. Pi's
+   * `openai-codex-3`. Pi and Prime serve one model name from several routes,
+   * so the name alone does not say which one this thread runs on. Skipped when
+   * a caller overrides the label or several models are selected.
+   */
+  const triggerRoute =
+    props.triggerLabel === undefined && selectedEntries === undefined
+      ? selectedModel?.subProvider
+      : undefined;
+  const triggerRouteSuffix = triggerRoute ? ` · ${triggerRoute}` : "";
+  const triggerTooltipBase = props.triggerLabel ?? allModelNames ?? triggerLabel;
   const triggerTooltipContent = shortcutLabel
-    ? `${props.triggerLabel ?? allModelNames ?? triggerLabel} · ${shortcutLabel}`
-    : (props.triggerLabel ?? allModelNames ?? triggerLabel);
+    ? `${triggerTooltipBase}${triggerRouteSuffix} · ${shortcutLabel}`
+    : `${triggerTooltipBase}${triggerRouteSuffix}`;
 
   return (
     <Popover
@@ -268,7 +280,16 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                 />
               }
             >
-              {props.triggerLabel ?? multipleLabel ?? triggerTitle}
+              {props.triggerLabel ?? multipleLabel ?? (
+                <>
+                  {triggerTitle}
+                  {triggerRoute ? (
+                    <span className="ml-1 font-normal text-[10px] text-muted-foreground/70">
+                      {triggerRoute}
+                    </span>
+                  ) : null}
+                </>
+              )}
             </TooltipTrigger>
             <TooltipPopup side="top">{triggerTooltipContent}</TooltipPopup>
           </Tooltip>
