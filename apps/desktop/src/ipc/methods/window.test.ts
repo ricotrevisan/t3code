@@ -22,6 +22,7 @@ vi.mock("electron", () => ({
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as ElectronDialog from "../../electron/ElectronDialog.ts";
+import * as ElectronShell from "../../electron/ElectronShell.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
 import type { DesktopSettings } from "../../settings/DesktopAppSettings.ts";
@@ -294,5 +295,5 @@ it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
       assert.include(editors, "cursor");
       assert.include(editors, "vscode");
       assert.notInclude(editors, "webstorm");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(ElectronShell.layer, NodeServices.layer))),
 );

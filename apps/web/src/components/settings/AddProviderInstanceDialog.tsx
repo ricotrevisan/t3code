@@ -430,7 +430,7 @@ export function AddProviderInstanceDialog({
             <span className="text-xs font-medium text-foreground">Accent color</span>
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <ProviderAccentColorPicker
-                displayName={label || driverOption.label}
+                displayName={label || selectedLabel}
                 value={accentColor || undefined}
                 onCommit={setAccentColor}
                 layout="inline"

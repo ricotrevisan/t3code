@@ -262,7 +262,9 @@ export class AcpClient extends Context.Service<
       ) => Effect.Effect<void, AcpError.AcpError>,
     ) => Effect.Effect<void>;
     /**
-     * Registers a handler for `session/elicitation/complete` and `elicitation/complete`.
+     * Registers a handler for future `session/elicitation/complete` notifications.
+     * Register handlers before calling `agent.initialize`; notifications are not buffered while no
+     * handler is registered.
      * @see https://agentclientprotocol.com/protocol/schema#session/elicitation/complete
      */
     readonly handleElicitationComplete: (
@@ -336,13 +338,14 @@ interface AcpCoreRequestHandlers {
 }
 
 interface AcpNotificationHandlers {
-  readonly sessionUpdate: BufferedNotificationHandler<AcpSchema.SessionNotification>;
-  readonly elicitationComplete: BufferedNotificationHandler<AcpSchema.ElicitationCompleteNotification>;
-}
-
-interface BufferedNotificationHandler<A> {
-  readonly handlers: Array<(notification: A) => Effect.Effect<void, AcpError.AcpError>>;
-  readonly pending: Array<A>;
+  readonly sessionUpdate: Array<
+    (notification: AcpSchema.SessionNotification) => Effect.Effect<void, AcpError.AcpError>
+  >;
+  readonly elicitationComplete: Array<
+    (
+      notification: AcpSchema.ElicitationCompleteNotification,
+    ) => Effect.Effect<void, AcpError.AcpError>
+  >;
 }
 
 export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
@@ -352,14 +355,8 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
 ): Effect.fn.Return<AcpClient["Service"], never, Scope.Scope> {
   const coreHandlers: AcpCoreRequestHandlers = {};
   const notificationHandlers: AcpNotificationHandlers = {
-    sessionUpdate: {
-      handlers: options.onSessionUpdate ? [options.onSessionUpdate] : [],
-      pending: [],
-    },
-    elicitationComplete: {
-      handlers: options.onElicitationComplete ? [options.onElicitationComplete] : [],
-      pending: [],
-    },
+    sessionUpdate: options.onSessionUpdate ? [options.onSessionUpdate] : [],
+    elicitationComplete: options.onElicitationComplete ? [options.onElicitationComplete] : [],
   };
   const extRequestHandlers = new Map<
     string,
@@ -377,47 +374,24 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
     | undefined;
 
   const runNotificationHandlers = <A>(
-    registration: BufferedNotificationHandler<A>,
+    handlers: ReadonlyArray<(notification: A) => Effect.Effect<void, AcpError.AcpError>>,
     notification: A,
   ) =>
-    Effect.forEach(registration.handlers, (handler) => handler(notification).pipe(Effect.ignore), {
-      discard: true,
-    });
-
-  const flushBufferedNotifications = <A>(registration: BufferedNotificationHandler<A>) =>
-    Effect.suspend(() => {
-      if (registration.handlers.length === 0 || registration.pending.length === 0) {
-        return Effect.void;
-      }
-      const pending = registration.pending.splice(0, registration.pending.length);
-      return Effect.forEach(
-        pending,
-        (notification) => runNotificationHandlers(registration, notification),
-        {
-          discard: true,
-        },
-      );
-    });
+    Effect.forEach(
+      handlers,
+      (handler) => handler(notification).pipe(Effect.catch(() => Effect.void)),
+      { discard: true },
+    );
 
   const dispatchNotification = (notification: AcpProtocol.AcpIncomingNotification) => {
     switch (notification._tag) {
-      case "SessionUpdate": {
-        if (notificationHandlers.sessionUpdate.handlers.length === 0) {
-          notificationHandlers.sessionUpdate.pending.push(notification.params);
-          return Effect.void;
-        }
+      case "SessionUpdate":
         return runNotificationHandlers(notificationHandlers.sessionUpdate, notification.params);
-      }
-      case "ElicitationComplete": {
-        if (notificationHandlers.elicitationComplete.handlers.length === 0) {
-          notificationHandlers.elicitationComplete.pending.push(notification.params);
-          return Effect.void;
-        }
+      case "ElicitationComplete":
         return runNotificationHandlers(
           notificationHandlers.elicitationComplete,
           notification.params,
         );
-      }
       case "ExtNotification": {
         const handler = extNotificationHandlers.get(notification.method);
         if (handler) {
@@ -601,14 +575,12 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
         return Effect.void;
       }),
     handleSessionUpdate: (handler) =>
-      Effect.suspend(() => {
-        notificationHandlers.sessionUpdate.handlers.push(handler);
-        return flushBufferedNotifications(notificationHandlers.sessionUpdate);
+      Effect.sync(() => {
+        notificationHandlers.sessionUpdate.push(handler);
       }),
     handleElicitationComplete: (handler) =>
-      Effect.suspend(() => {
-        notificationHandlers.elicitationComplete.handlers.push(handler);
-        return flushBufferedNotifications(notificationHandlers.elicitationComplete);
+      Effect.sync(() => {
+        notificationHandlers.elicitationComplete.push(handler);
       }),
     handleUnknownExtRequest: (handler) =>
       Effect.suspend(() => {
