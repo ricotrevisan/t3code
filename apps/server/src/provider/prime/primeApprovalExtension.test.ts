@@ -6,6 +6,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import { describe, expect } from "vite-plus/test";
 
 import {
@@ -14,10 +15,30 @@ import {
   PRIME_APPROVAL_EXTENSION_COMMAND_DESCRIPTION,
   PRIME_APPROVAL_EXTENSION_COMMAND_NAME,
   PRIME_APPROVAL_EXTENSION_PROTOCOL_VERSION,
-} from "./primeApprovalExtension.ts";
+  PRIME_PROVIDER_ADAPTER_PACKAGE,
+} from "@t3tools/provider-adapter-prime";
+import { ProviderInstanceId } from "@t3tools/contracts";
+
+import { ServerConfig } from "../../config.ts";
+import { makeExternalProviderAdapterHostV2 } from "../ExternalProviderAdapterHost.ts";
+
+const primeExtensionTestLayer = ServerConfig.layerTest(process.cwd(), {
+  prefix: "t3code-prime-approval-extension-test-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
 
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.provide(NodeServices.layer));
+  effect.pipe(Effect.provide(primeExtensionTestLayer));
+
+const makeApprovalExtensionFixture = Effect.fn("makeApprovalExtensionFixture")(function* () {
+  const instanceId = ProviderInstanceId.make("primeAgent");
+  const broker = yield* makeExternalProviderAdapterHostV2({
+    packageId: PRIME_PROVIDER_ADAPTER_PACKAGE.manifest.id,
+    instanceId,
+    storageKey: PRIME_PROVIDER_ADAPTER_PACKAGE.storageKey,
+  });
+  const extensionPath = yield* preparePrimeApprovalExtension(broker.host.storage);
+  return { extensionPath, storage: broker.host.storage };
+});
 
 type ToolCallHandler = (
   event: { readonly toolName: string; readonly input: Record<string, unknown> },
@@ -99,17 +120,20 @@ describe("primeApprovalExtension", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-approval-extension-",
-          });
-
-          const firstPath = yield* preparePrimeApprovalExtension(baseDir);
+          const config = yield* ServerConfig;
+          const { extensionPath: firstPath, storage } = yield* makeApprovalExtensionFixture();
           const firstSource = yield* fileSystem.readFileString(firstPath);
-          const secondPath = yield* preparePrimeApprovalExtension(baseDir);
+          const secondPath = yield* preparePrimeApprovalExtension(storage);
           const secondSource = yield* fileSystem.readFileString(secondPath);
 
           expect(firstPath).toBe(
-            NodePath.join(baseDir, "prime-agent", "extensions", "t3-approval-v1.ts"),
+            NodePath.join(
+              config.baseDir,
+              "prime-agent",
+              "artifacts",
+              "approval-v1",
+              "t3-approval-v1.ts",
+            ),
           );
           expect(NodePath.isAbsolute(firstPath)).toBe(true);
           expect(secondPath).toBe(firstPath);
@@ -129,10 +153,7 @@ describe("primeApprovalExtension", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-approval-extension-protocol-",
-          });
-          const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
+          const { extensionPath } = yield* makeApprovalExtensionFixture();
           const source = yield* fileSystem.readFileString(extensionPath);
           const harness = yield* loadExtensionHarness(extensionPath, "approval-required");
 
@@ -158,11 +179,7 @@ describe("primeApprovalExtension", () => {
     provide(
       Effect.scoped(
         Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-approval-extension-late-flag-",
-          });
-          const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
+          const { extensionPath } = yield* makeApprovalExtensionFixture();
           const harness = yield* loadExtensionHarness(extensionPath, "deny");
           let confirmations = 0;
 
@@ -193,11 +210,7 @@ describe("primeApprovalExtension", () => {
     provide(
       Effect.scoped(
         Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-approval-extension-full-access-",
-          });
-          const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
+          const { extensionPath } = yield* makeApprovalExtensionFixture();
           const harness = yield* loadExtensionHarness(extensionPath, "full-access");
           let confirmations = 0;
           const context = {
@@ -230,11 +243,7 @@ describe("primeApprovalExtension", () => {
     provide(
       Effect.scoped(
         Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-approval-extension-invalid-mode-",
-          });
-          const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
+          const { extensionPath } = yield* makeApprovalExtensionFixture();
 
           for (const mode of [undefined, "deny", "unexpected"] as const) {
             const harness = yield* loadExtensionHarness(extensionPath, mode);
@@ -268,11 +277,7 @@ describe("primeApprovalExtension", () => {
     provide(
       Effect.scoped(
         Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-approval-extension-no-ui-",
-          });
-          const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
+          const { extensionPath } = yield* makeApprovalExtensionFixture();
           const harness = yield* loadExtensionHarness(extensionPath, "approval-required");
 
           const result = yield* Effect.promise(() =>
@@ -294,11 +299,7 @@ describe("primeApprovalExtension", () => {
     provide(
       Effect.scoped(
         Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-approval-extension-confirm-",
-          });
-          const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
+          const { extensionPath } = yield* makeApprovalExtensionFixture();
           const harness = yield* loadExtensionHarness(extensionPath, "approval-required");
           const abortController = new AbortController();
           const calls: Array<{

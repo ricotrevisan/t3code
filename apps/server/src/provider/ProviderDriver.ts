@@ -23,6 +23,7 @@
  */
 import type {
   ProviderConsumeResetCreditOutcome,
+  ProviderAdapterPackageReference,
   ProviderDriverKind,
   ProviderInstanceEnvironment,
   ProviderInstanceId,
@@ -67,6 +68,7 @@ export interface ProviderDriverMetadata {
 export interface ProviderInstance {
   readonly instanceId: ProviderInstanceId;
   readonly driverKind: ProviderDriverKind;
+  readonly adapterPackage?: ProviderAdapterPackageReference | undefined;
   readonly continuationIdentity: ProviderContinuationIdentity;
   readonly displayName: string | undefined;
   readonly accentColor?: string | undefined;
@@ -135,6 +137,12 @@ export interface ProviderDriverCreateInput<Config> {
  */
 export interface ProviderDriver<Config, R = never> {
   readonly driverKind: ProviderDriverKind;
+  /**
+   * Exact identity for a versioned adapter package. Present for trusted-local
+   * packages and compiled first-party package bridges; absent for unversioned
+   * built-in drivers.
+   */
+  readonly adapterPackage?: ProviderAdapterPackageReference | undefined;
   readonly metadata: ProviderDriverMetadata;
   /**
    * Decoder for the opaque `ProviderInstanceConfig.config` envelope. The

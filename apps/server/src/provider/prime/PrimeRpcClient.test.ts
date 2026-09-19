@@ -1,19 +1,23 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import type { ProviderAdapterProcessV1 } from "@t3tools/provider-adapter";
+import { ProviderAdapterHostProcessError } from "@t3tools/provider-adapter";
 import { it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { describe, expect } from "vite-plus/test";
 
-import { PrimeRpcError, spawnPrimeRpcClient } from "./PrimeRpcClient.ts";
+import { makeExternalProviderProcessSupervisor } from "../ExternalProviderProcessSupervisor.ts";
+import { makePrimeRpcClient, PrimeRpcError } from "@t3tools/provider-adapter-prime";
 
 const mockAgentPath = NodePath.join(
   NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
@@ -22,6 +26,10 @@ const mockAgentPath = NodePath.join(
 
 const LINE_SEPARATOR = "\u2028";
 const isPrimeRpcError = Schema.is(PrimeRpcError);
+const decodeTestCommand = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ id: Schema.String, type: Schema.String })),
+);
+const encodeTestJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -31,8 +39,22 @@ function eventType(value: unknown): string | undefined {
   return isRecord(value) && typeof value.type === "string" ? value.type : undefined;
 }
 
+const spawnSupervisedClient = Effect.fn("spawnSupervisedPrimeRpcTestClient")(function* (input: {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly cwd: string;
+  readonly environment?: NodeJS.ProcessEnv;
+}) {
+  const supervisor = yield* makeExternalProviderProcessSupervisor();
+  const process = yield* supervisor.processes.spawn({
+    ...input,
+    purpose: { kind: "probe" },
+  });
+  return yield* makePrimeRpcClient(process);
+});
+
 const spawnMock = (environment?: NodeJS.ProcessEnv) =>
-  spawnPrimeRpcClient({
+  spawnSupervisedClient({
     command: "node",
     args: [mockAgentPath, "--no-session"],
     cwd: process.cwd(),
@@ -42,8 +64,42 @@ const spawnMock = (environment?: NodeJS.ProcessEnv) =>
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.provide(NodeServices.layer));
 
+const makeFakeProcess = Effect.fn("makeFakePrimeProcess")(function* () {
+  const stdout = yield* Queue.unbounded<Uint8Array>();
+  const stderr = yield* Queue.unbounded<Uint8Array>();
+  const written = yield* Queue.unbounded<Uint8Array>();
+  const exitCode = yield* Deferred.make<number, ProviderAdapterHostProcessError>();
+  const stderrObserved = yield* Queue.unbounded<void>();
+  const closeCount = yield* Ref.make(0);
+  const textEncoder = new TextEncoder();
+
+  const process: ProviderAdapterProcessV1 = {
+    pid: 42,
+    attachSession: () => Effect.void,
+    detachSession: () => Effect.void,
+    expectExit: Effect.void,
+    stdout: Stream.fromQueue(stdout),
+    stderr: Stream.fromQueue(stderr).pipe(
+      Stream.tap(() => Queue.offer(stderrObserved, undefined).pipe(Effect.asVoid)),
+    ),
+    exitCode: Deferred.await(exitCode),
+    write: (chunk) => Queue.offer(written, chunk).pipe(Effect.asVoid),
+    close: Ref.update(closeCount, (count) => count + 1),
+  };
+
+  return {
+    process,
+    takeWrite: Queue.take(written),
+    emitStdout: (text: string) => Queue.offer(stdout, textEncoder.encode(text)).pipe(Effect.asVoid),
+    emitStderr: (text: string) => Queue.offer(stderr, textEncoder.encode(text)).pipe(Effect.asVoid),
+    stderrObserved: Queue.take(stderrObserved),
+    exit: (code: number) => Deferred.succeed(exitCode, code),
+    closeCount: Ref.get(closeCount),
+  };
+});
+
 const spawnWireCapture = () =>
-  spawnPrimeRpcClient({
+  spawnSupervisedClient({
     command: "node",
     args: [
       "--input-type=commonjs",
@@ -65,6 +121,109 @@ process.stdin.on("data", (chunk) => {
   });
 
 describe("PrimeRpcClient", () => {
+  it.effect("runs JSONL framing and ordered replay over an injected host process", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeProcess();
+      const client = yield* makePrimeRpcClient(fake.process);
+      const requestFiber = yield* client
+        .request({ type: "prompt", message: "from host" })
+        .pipe(Effect.forkChild);
+
+      const record = new TextDecoder().decode(yield* fake.takeWrite);
+      expect(record.endsWith("\n")).toBe(true);
+      const command = decodeTestCommand(record);
+      expect(command.type).toBe("prompt");
+
+      yield* fake.emitStdout(
+        `${encodeTestJson({ type: "first" })}\n${encodeTestJson({ type: "second" })}\n${encodeTestJson(
+          {
+            id: command.id,
+            type: "response",
+            command: "prompt",
+            success: true,
+          },
+        )}\n`,
+      );
+
+      const response = yield* Fiber.join(requestFiber);
+      expect(response.id).toBe(command.id);
+      const replayed = yield* client.events.pipe(Stream.take(2), Stream.runCollect);
+      expect(Array.from(replayed).map(eventType)).toEqual(["first", "second"]);
+    }),
+  );
+
+  it.effect("fails a pending injected-process request with the stderr tail on exit", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeProcess();
+      const client = yield* makePrimeRpcClient(fake.process);
+      const resultFiber = yield* client
+        .request({ type: "prompt", message: "pending" }, { timeoutMs: null })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* fake.takeWrite;
+      yield* fake.emitStderr("prime host failed");
+      yield* fake.stderrObserved;
+      // Pulling the next chunk proves the preceding chunk reached the client's sink.
+      yield* fake.emitStderr("");
+      yield* fake.stderrObserved;
+      yield* fake.exit(17);
+
+      const result = yield* Fiber.join(resultFiber);
+      expect(result._tag).toBe("Failure");
+      if (result._tag !== "Failure") {
+        return;
+      }
+      expect(isPrimeRpcError(result.failure)).toBe(true);
+      if (isPrimeRpcError(result.failure)) {
+        expect(result.failure.operation).toBe("process");
+        expect(result.failure.detail).toContain("Process exited with code 17.");
+        expect(result.failure.detail).toContain("prime host failed");
+      }
+    }),
+  );
+
+  it.effect("delegates close to the injected host process once, including finalization", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeProcess();
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const client = yield* makePrimeRpcClient(fake.process);
+          yield* client.close;
+          yield* client.close;
+        }),
+      );
+
+      expect(yield* fake.closeCount).toBe(1);
+    }),
+  );
+
+  it.effect("maps an injected host write failure to the RPC operation", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeProcess();
+      const client = yield* makePrimeRpcClient({
+        ...fake.process,
+        write: () =>
+          Effect.fail(
+            new ProviderAdapterHostProcessError({
+              operation: "stdin",
+              detail: "host rejected the write",
+            }),
+          ),
+      });
+
+      const result = yield* client
+        .request({ type: "prompt", message: "write failure" })
+        .pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      if (result._tag !== "Failure") {
+        return;
+      }
+      expect(isPrimeRpcError(result.failure)).toBe(true);
+      if (isPrimeRpcError(result.failure)) {
+        expect(result.failure.operation).toBe("prompt");
+        expect(result.failure.detail).toBe("Failed to write command.");
+      }
+    }),
+  );
   it.live("sends an extension UI response verbatim without waiting for a response", () =>
     provide(
       Effect.gen(function* () {
@@ -244,28 +403,6 @@ describe("PrimeRpcClient", () => {
     ),
   );
 
-  it.live("fails when the RPC subprocess cannot be spawned", () =>
-    provide(
-      Effect.gen(function* () {
-        const result = yield* spawnPrimeRpcClient({
-          command: NodePath.join(NodeOS.tmpdir(), "t3-prime-rpc-missing-binary"),
-          args: [],
-          cwd: process.cwd(),
-        }).pipe(Effect.result);
-
-        expect(result._tag).toBe("Failure");
-        if (result._tag !== "Failure") {
-          return;
-        }
-        const error = result.failure;
-        expect(isPrimeRpcError(error)).toBe(true);
-        if (isPrimeRpcError(error)) {
-          expect(error.operation).toBe("spawn");
-        }
-      }),
-    ),
-  );
-
   it.live("closes stdin and waits for the mock process to exit", () =>
     provide(
       Effect.gen(function* () {
@@ -295,10 +432,7 @@ describe("PrimeRpcClient", () => {
     provide(
       Effect.gen(function* () {
         const blocked = yield* spawnMock();
-        yield* blocked.request(
-          { type: "prompt", message: "hold split unicode" },
-          { timeoutMs: 1_000 },
-        );
+        yield* blocked.request({ type: "prompt", message: "hold split unicode" });
 
         const active = yield* spawnMock();
         const delta = yield* Deferred.make<string>();
@@ -315,10 +449,7 @@ describe("PrimeRpcClient", () => {
           Effect.forkChild,
         );
 
-        yield* active.request(
-          { type: "prompt", message: "emit line separator" },
-          { timeoutMs: 1_000 },
-        );
+        yield* active.request({ type: "prompt", message: "emit line separator" });
         expect(yield* Deferred.await(delta)).toBe(`hello${LINE_SEPARATOR}world`);
       }),
     ),

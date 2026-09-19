@@ -1,4 +1,5 @@
 import { Image } from "expo-image";
+import { IconCpu } from "@tabler/icons-react-native";
 import { Path, Svg } from "react-native-svg";
 import { View } from "react-native";
 import { providerInstanceInitials } from "@t3tools/client-runtime/state/provider-instance-display";
@@ -89,7 +90,7 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
-  // codex (and unknown drivers)
+  if (props.provider === "codex") {
   return (
     <Svg width={size} height={size} viewBox="100 100 411 411" fill="none">
       <Path
@@ -100,6 +101,9 @@ export function ProviderIcon(props: ProviderIconProps) {
       />
     </Svg>
   );
+  }
+
+  return <IconCpu color={mono} size={size} strokeWidth={1.75} />;
 }
 
 /**

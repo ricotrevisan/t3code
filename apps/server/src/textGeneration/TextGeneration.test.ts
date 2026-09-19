@@ -53,6 +53,7 @@ const makeStubRegistry = (
     getInstance: (id) => Effect.succeed(byId.get(id)),
     listInstances: Effect.succeed(instances),
     listUnavailable: Effect.succeed([]),
+    listAdapterManifests: Effect.succeed([]),
     streamChanges: Stream.empty,
     // Tests never drive changes through this stub; acquire a throwaway
     // subscription on an unused PubSub so the shape is satisfied.

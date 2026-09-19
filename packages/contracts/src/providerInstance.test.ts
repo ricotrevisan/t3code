@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+import { ProviderAdapterPackageId, ProviderAdapterPackageVersion } from "./providerAdapter.ts";
 import {
   ProviderDriverKind,
   ProviderInstanceConfig,
@@ -92,6 +93,22 @@ describe("ProviderInstanceConfig", () => {
     expect(decoded.displayName).toBeUndefined();
     expect(decoded.enabled).toBeUndefined();
     expect(decoded.config).toBeUndefined();
+  });
+
+  it("preserves an explicit external adapter package reference", () => {
+    const decoded = decodeProviderInstanceConfig({
+      driver: "piRpc",
+      adapterPackage: {
+        id: "pi-rpc",
+        version: "1.2.3",
+        protocolVersion: 1,
+      },
+    });
+    expect(decoded.adapterPackage).toEqual({
+      id: ProviderAdapterPackageId.make("pi-rpc"),
+      version: ProviderAdapterPackageVersion.make("1.2.3"),
+      protocolVersion: 1,
+    });
   });
 
   it("preserves driver-opaque config payloads verbatim", () => {

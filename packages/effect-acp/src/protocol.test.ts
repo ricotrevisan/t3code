@@ -170,6 +170,44 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
+  it.effect("can dispatch typed notifications without retaining a raw copy", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const handled = yield* Deferred.make<AcpProtocol.AcpIncomingNotification>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        serverRequestMethods: new Set(),
+        captureRawNotifications: false,
+        onNotification: (notification) =>
+          Deferred.succeed(handled, notification).pipe(Effect.asVoid),
+      });
+
+      yield* Queue.offer(
+        input,
+        yield* encodeJsonl(SessionUpdateNotification, {
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "session-1",
+            update: {
+              sessionUpdate: "plan",
+              entries: [
+                {
+                  content: "Inspect repository",
+                  priority: "high",
+                  status: "in_progress",
+                },
+              ],
+            },
+          },
+        }),
+      );
+
+      assert.equal((yield* Deferred.await(handled))._tag, "SessionUpdate");
+      assert.equal((yield* Stream.runCollect(transport.incoming)).length, 0);
+    }),
+  );
+
   it.effect("keeps invalid core notification values only in the schema cause", () =>
     Effect.gen(function* () {
       const secret = "acp-core-notification-secret-sentinel";

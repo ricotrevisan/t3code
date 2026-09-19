@@ -131,11 +131,11 @@ import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
+import * as ProviderInstanceRegistry from "./provider/Services/ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { ProviderAuthService } from "./provider/Services/ProviderAuthService.ts";
-import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
 import {
   AntigravityInstallation,
   AntigravityInstallationError,
@@ -144,6 +144,7 @@ import { CodexInstallation } from "./provider/CodexInstallation.ts";
 import type { ProviderInstance } from "./provider/ProviderDriver.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import { ProviderAdapterRequestError } from "./provider/Errors.ts";
+import { PRIME_PROVIDER_ADAPTER_MANIFEST } from "./provider/FirstPartyProviderAdapters.ts";
 import {
   makeManualOnlyProviderMaintenanceCapabilities,
   ProviderVersionCache,
@@ -523,12 +524,14 @@ const buildAppUnderTest = (options?: {
   layers?: {
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
     environmentTheme?: Partial<EnvironmentTheme.EnvironmentThemeService["Service"]>;
+    providerInstanceRegistry?: Partial<
+      ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
+    >;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
     modelManifest?: Partial<ModelManifest.ModelManifest["Service"]>;
     usageLimitSources?: Partial<UsageLimitSources.UsageLimitSources["Service"]>;
     providerService?: Partial<ProviderService.ProviderService["Service"]>;
     providerAuth?: Partial<ProviderAuthService["Service"]>;
-    providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
     antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
     codexInstallation?: Partial<CodexInstallation["Service"]>;
     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
@@ -825,9 +828,15 @@ const buildAppUnderTest = (options?: {
           Layer.mock(ProviderAuthService)({
             ...options?.layers?.providerAuth,
           }),
-          Layer.mock(ProviderInstanceRegistry)({
-            getInstance: () => Effect.undefined,
+          Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+            getInstance: () => Effect.succeed(undefined),
             listInstances: Effect.succeed([]),
+            listUnavailable: Effect.succeed([]),
+            listAdapterManifests: Effect.succeed([]),
+            streamChanges: Stream.empty,
+            subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+              PubSub.subscribe(pubsub),
+            ),
             ...options?.layers?.providerInstanceRegistry,
           }),
           Layer.mock(CodexInstallation)({
@@ -5310,7 +5319,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("accepts websocket rpc handshake with a bootstrapped browser session cookie", () =>
     Effect.gen(function* () {
-      yield* buildAppUnderTest();
+      yield* buildAppUnderTest({
+        layers: {
+          providerInstanceRegistry: {
+            listAdapterManifests: Effect.succeed([PRIME_PROVIDER_ADAPTER_MANIFEST]),
+          },
+        },
+      });
 
       const { response: bootstrapResponse, cookie } = yield* bootstrapBrowserSession();
 
@@ -5327,6 +5342,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
       assert.equal(response.auth.policy, "desktop-managed-local");
+      assert.deepEqual(
+        response.providerAdapterManifests?.map(({ id, version }) => `${id}@${version}`),
+        ["prime-rpc@1.0.0"],
+      );
+      assert.equal(
+        response.providerAdapterManifests?.every((manifest) => !("modulePath" in manifest)),
+        true,
+      );
       assert.equal(response.shellResumeCompletionMarker, true);
       assert.isUndefined(response.shellRevealInFileManager);
       assert.isUndefined(response.shellRevealInFileManagerKind);
@@ -6744,6 +6767,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             }),
             streamChanges: Stream.succeed(changeEvent),
           },
+          providerInstanceRegistry: {
+            listAdapterManifests: Effect.succeed([PRIME_PROVIDER_ADAPTER_MANIFEST]),
+          },
           providerRegistry: {
             getProviders: Effect.succeed(providers),
           },
@@ -6765,6 +6791,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(first.config.issues, []);
         assert.deepEqual(first.config.providers, providers);
         assert.equal(path.basename(first.config.observability.logsDirectoryPath), "logs");
+        assert.deepEqual(
+          first.config.providerAdapterManifests?.map(({ id, version }) => `${id}@${version}`),
+          ["prime-rpc@1.0.0"],
+        );
+        assert.equal(
+          first.config.providerAdapterManifests?.every((manifest) => !("modulePath" in manifest)),
+          true,
+        );
+        assert.equal(first.config.observability.logsDirectoryPath.endsWith("/logs"), true);
         assert.equal(first.config.observability.localTracingEnabled, true);
         assert.equal(first.config.observability.otlpTracesUrl, "http://localhost:4318/v1/traces");
         assert.equal(first.config.observability.otlpTracesEnabled, true);

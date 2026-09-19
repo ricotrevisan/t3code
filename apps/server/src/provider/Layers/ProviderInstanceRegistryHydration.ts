@@ -13,7 +13,8 @@
  *      yet to an explicit `providerInstances` entry.
  *
  * This module bridges (2) into (1) and wires the resulting map into a
- * mutable registry. For every built-in driver whose id is not already
+ * mutable registry. For every shipped built-in or first-party driver whose
+ * id is not already
  * present in `providerInstances` (keyed on
  * `defaultInstanceIdForDriver(driverKind)` — literally the driver kind as a
  * routing slug), we synthesize an envelope from the legacy field. The
@@ -23,7 +24,10 @@
  * Explicit `providerInstances` entries always win — users can already
  * override the legacy `providers.<kind>` blob by authoring a
  * `providerInstances.codex` entry with a matching driver, and we don't
- * want the synthesized envelope to silently stomp their config.
+ * want the synthesized envelope to silently stomp their config. The only
+ * normalization is pinning an unpinned compiled first-party entry to the
+ * package identity shipped by this build. Explicit package references,
+ * including stale ones, are preserved so the registry can fail closed.
  *
  * Hot-reload
  * ----------
@@ -51,18 +55,38 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
+import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
+import {
+  FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
+  type FirstPartyProviderAdaptersEnv,
+} from "../FirstPartyProviderAdapters.ts";
+import {
+  FIRST_PARTY_PROVIDER_ADAPTER_MANIFESTS,
+  makeProviderAdapterManifestCatalog,
+} from "../ProviderAdapterManifestCatalog.ts";
+import { loadTrustedProviderAdapterPackages } from "../TrustedLocalProviderAdapters.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistryLive.ts";
+
+const SHIPPED_PROVIDER_DRIVERS = [
+  ...BUILT_IN_DRIVERS,
+  ...FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS,
+] as const;
+
+const firstPartyPackageByDriver = new Map(
+  FIRST_PARTY_PROVIDER_ADAPTER_DRIVERS.map((driver) => [driver.driverKind, driver.adapterPackage]),
+);
 
 /**
  * Synthesize a `ProviderInstanceConfigMap` from a `ServerSettings` snapshot.
  *
  * Strategy:
- *   1. Copy all explicit `settings.providerInstances` entries verbatim.
- *   2. For each built-in driver whose `defaultInstanceIdForDriver(id)` key
+ *   1. Copy explicit entries, pinning only unpinned compiled first-party
+ *      adapters to the identity shipped by this build.
+ *   2. For each shipped driver whose `defaultInstanceIdForDriver(id)` key
  *      is *not* already in the explicit map, synthesize an entry from the
  *      matching legacy `settings.providers.<kind>` blob.
  *
@@ -73,9 +97,16 @@ import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistry
 export const deriveProviderInstanceConfigMap = (
   settings: ServerSettings,
 ): ProviderInstanceConfigMap => {
-  const merged: Record<string, ProviderInstanceConfig> = { ...settings.providerInstances };
+  const merged: Record<string, ProviderInstanceConfig> = {};
+  for (const [instanceId, entry] of Object.entries(settings.providerInstances)) {
+    const firstPartyPackage = firstPartyPackageByDriver.get(entry.driver);
+    merged[instanceId] =
+      entry.adapterPackage === undefined && firstPartyPackage !== undefined
+        ? { ...entry, adapterPackage: firstPartyPackage }
+        : entry;
+  }
 
-  for (const driver of BUILT_IN_DRIVERS) {
+  for (const driver of SHIPPED_PROVIDER_DRIVERS) {
     const instanceId = defaultInstanceIdForDriver(driver.driverKind);
     if (instanceId in merged) {
       // Explicit `providerInstances` entry for this slot — user-authored
@@ -83,11 +114,11 @@ export const deriveProviderInstanceConfigMap = (
       continue;
     }
 
-    // Only built-in drivers have a legacy mirror; the registry's
+    // Only shipped drivers currently have a legacy mirror; the registry's
     // `providers` struct is keyed on the same literal slug as
     // `driverKind`. Access is dynamic (the driver kind is a branded string),
     // but it's constrained to `keyof settings.providers` by the union of
-    // built-in driver kinds.
+    // shipped driver kinds.
     const legacyKey = driver.driverKind as keyof ServerSettings["providers"];
     const legacyConfig = settings.providers[legacyKey];
     if (legacyConfig === undefined) {
@@ -96,6 +127,7 @@ export const deriveProviderInstanceConfigMap = (
 
     merged[instanceId] = {
       driver: driver.driverKind,
+      ...(driver.adapterPackage === undefined ? {} : { adapterPackage: driver.adapterPackage }),
       config: legacyConfig,
     };
   }
@@ -153,10 +185,30 @@ const SettingsWatcherLive = Layer.effectDiscard(
 export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
   ProviderInstanceRegistry,
   never,
-  BuiltInDriversEnv | ServerSettingsService
+  BuiltInDriversEnv | FirstPartyProviderAdaptersEnv | ServerSettingsService
 > = Layer.unwrap(
   Effect.gen(function* () {
     const serverSettings = yield* ServerSettingsService;
+    const serverConfig = yield* ServerConfig;
+    const external = yield* loadTrustedProviderAdapterPackages({
+      registryPath: serverConfig.providerAdapterRegistryPath,
+      reservedDriverKinds: new Set(SHIPPED_PROVIDER_DRIVERS.map((driver) => driver.driverKind)),
+      reservedPackageReferences: FIRST_PARTY_PROVIDER_ADAPTER_MANIFESTS.map(
+        ({ id, version, protocolVersion }) => ({ id, version, protocolVersion }),
+      ),
+    });
+    yield* Effect.forEach(
+      external.diagnostics,
+      (diagnostic) =>
+        Effect.logWarning("provider.adapter.package.skipped", {
+          code: diagnostic.code,
+          detail: diagnostic.detail,
+          packageId: diagnostic.registration?.id,
+          packageVersion: diagnostic.registration?.version,
+          driver: diagnostic.registration?.driver,
+        }),
+      { discard: true },
+    );
     const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => undefined),
     );
@@ -166,10 +218,16 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
         : deriveProviderInstanceConfigMap(initialSettings);
 
     const mutableLayer = ProviderInstanceRegistryMutableLayer({
-      drivers: BUILT_IN_DRIVERS,
+      drivers: [...SHIPPED_PROVIDER_DRIVERS, ...external.drivers],
+      adapterManifests: makeProviderAdapterManifestCatalog(external.manifests),
+      unavailableDriverReasons: external.unavailableDriverReasons,
       configMap: initialConfigMap,
     });
 
     return SettingsWatcherLive.pipe(Layer.provideMerge(mutableLayer));
   }),
-) as Layer.Layer<ProviderInstanceRegistry, never, BuiltInDriversEnv | ServerSettingsService>;
+) as Layer.Layer<
+  ProviderInstanceRegistry,
+  never,
+  BuiltInDriversEnv | FirstPartyProviderAdaptersEnv | ServerSettingsService
+>;
