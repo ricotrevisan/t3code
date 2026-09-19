@@ -7,7 +7,7 @@ import { runMigrations } from "../Migrations.ts";
 import migrateThreadPullRequests from "./050_ProjectionThreadPullRequests.ts";
 
 for (const source of ["fork48", "fork50", "fork51", "fork52", "upstream"] as const) {
-  it.layer(NodeSqliteClient.layerMemory())(`051 upgrade from ${source}`, (it) => {
+  it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(`051 upgrade from ${source}`, (it) => {
     it.effect("retains existing threads and installs upstream columns and pull request links", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
