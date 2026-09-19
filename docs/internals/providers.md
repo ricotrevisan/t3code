@@ -245,7 +245,7 @@ absent from the package manifest, and exposes the negotiated set as
 `ServerProvider.adapterCapabilities`.
 
 The exact package ID, version, and protocol are also persisted as one optional structured identity on
-provider runtime bindings and projected thread sessions. Migration 42 adds three nullable columns to
+provider runtime bindings and projected thread sessions. Migration 55 adds three nullable columns to
 each table. Readers accept either a complete identity or no identity and reject partial triples. On
 canonical session and runtime-event contracts, an omitted field means legacy/unknown, `null` is an
 authoritative package-less adapter, and an object is the exact package identity. This distinction lets
