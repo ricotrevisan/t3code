@@ -10,6 +10,7 @@ import {
 import {
   defaultInstanceIdForDriver,
   type EnvironmentId,
+  type ProviderAdapterManifestV1,
   PROVIDER_DISPLAY_NAMES,
   ProviderDriverKind,
   type ProviderInstanceConfig,
@@ -86,6 +87,7 @@ import { UsageProviderSettings } from "./UsageProviderSettings";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
+import { resolveAdapterConfigSchema } from "./providerAdapterConfig";
 import {
   backgroundActivityOverrideSettings,
   buildProviderInstanceUpdatePatch,
@@ -128,6 +130,8 @@ function withoutProviderInstanceFavorites(
 ) {
   return favorites.filter((favorite) => favorite.provider !== instanceId);
 }
+
+const EMPTY_ADAPTER_MANIFESTS: ReadonlyArray<ProviderAdapterManifestV1> = [];
 
 const PROVIDER_SETTINGS = DRIVER_OPTIONS.map((definition) => ({
   provider: definition.value,
@@ -542,6 +546,7 @@ function AccessGatedProviderSettings({
     <EnvironmentProviderSettings
       environmentId={environment.environmentId}
       environmentLabel={environment.label}
+      adapterManifests={environment.serverConfig?.providerAdapterManifests ?? []}
       readOnly={access.kind === "read-only"}
       deviceTabs={deviceTabs}
       targetInstanceId={targetInstanceId}
@@ -552,12 +557,14 @@ function AccessGatedProviderSettings({
 export function EnvironmentProviderSettings({
   environmentId,
   environmentLabel,
+  adapterManifests = EMPTY_ADAPTER_MANIFESTS,
   readOnly = false,
   deviceTabs,
   targetInstanceId,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
+  readonly adapterManifests?: ReadonlyArray<ProviderAdapterManifestV1>;
   readonly deviceTabs?: ReactNode;
   readonly targetInstanceId?: ProviderInstanceId | undefined;
   /**
@@ -885,6 +892,14 @@ export function EnvironmentProviderSettings({
     const liveProvider = serverProviders.find(
       (candidate) => candidate.instanceId === row.instanceId,
     );
+    const adapterConfigSchema =
+      row.instance.adapterPackage === undefined
+        ? undefined
+        : resolveAdapterConfigSchema({
+            instance: row.instance,
+            liveProvider,
+            manifests: adapterManifests,
+          });
     const updateCandidate = providerUpdateCandidateByInstanceId.get(row.instanceId);
     const isInstanceUpdateRunning =
       updateCandidate !== undefined &&
@@ -908,6 +923,7 @@ export function EnvironmentProviderSettings({
         instance={row.instance}
         driverOption={driverOption}
         liveProvider={liveProvider}
+        adapterConfigSchema={adapterConfigSchema}
         mode={mode}
         selected={mode === "list" && selectedRow?.instanceId === row.instanceId}
         onSelect={mode === "list" ? () => setSelectedInstanceId(row.instanceId) : undefined}
@@ -1169,6 +1185,7 @@ export function EnvironmentProviderSettings({
           open
           environmentId={environmentId}
           environmentLabel={environmentLabel}
+          adapterManifests={adapterManifests}
           onOpenChange={setIsAddInstanceDialogOpen}
         />
       ) : null}

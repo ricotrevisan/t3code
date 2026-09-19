@@ -52,6 +52,13 @@ export interface AcpPatchedProtocolOptions {
   readonly stdio: AcpStdio;
   readonly terminationError?: Effect.Effect<AcpError.AcpError>;
   readonly serverRequestMethods: ReadonlySet<string>;
+  /**
+   * Retains decoded notifications for `incoming` consumers in a bounded sliding queue, so a caller
+   * that stops draining the raw stream cannot grow memory without limit. It defaults to `true` for
+   * direct low-level protocol users. Disable it when notifications are handled through
+   * `onNotification` and the raw stream is not consumed.
+   */
+  readonly captureRawNotifications?: boolean;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (event: AcpProtocolLogEvent) => Effect.Effect<void, never>;
@@ -104,9 +111,10 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const parser = parserFactory.makeUnsafe();
   const serverQueue = yield* Queue.unbounded<RpcMessage.FromClientEncoded>();
   const clientQueue = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
-  const notificationQueue = yield* Queue.sliding<AcpIncomingNotification>(
-    MAX_BUFFERED_RAW_NOTIFICATIONS,
-  );
+  const notificationQueue =
+    options.captureRawNotifications === false
+      ? undefined
+      : yield* Queue.sliding<AcpIncomingNotification>(MAX_BUFFERED_RAW_NOTIFICATIONS);
   const disconnects = yield* Queue.unbounded<number>();
   const outgoing = yield* Queue.unbounded<string | Uint8Array, Cause.Done<void>>();
   const nextRequestId = yield* Ref.make(1);
@@ -213,7 +221,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     );
 
   const dispatchNotification = (notification: AcpIncomingNotification) =>
-    Queue.offer(notificationQueue, notification).pipe(
+    (notificationQueue ? Queue.offer(notificationQueue, notification) : Effect.void).pipe(
       Effect.andThen(
         options.onNotification
           ? options.onNotification(notification).pipe(Effect.catch(() => Effect.void))
@@ -611,7 +619,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     clientProtocol,
     serverProtocol,
     get incoming() {
-      return Stream.fromQueue(notificationQueue);
+      return notificationQueue ? Stream.fromQueue(notificationQueue) : Stream.empty;
     },
     request: sendRequest,
     notify: sendNotification,

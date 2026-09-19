@@ -4,13 +4,35 @@ import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import { describe, expect } from "vite-plus/test";
 
-import { preparePrimeOpenRouterCatalogExtension } from "./primeOpenRouterCatalogExtension.ts";
+import { ProviderInstanceId } from "@t3tools/contracts";
+import {
+  preparePrimeOpenRouterCatalogExtension,
+  PRIME_PROVIDER_ADAPTER_PACKAGE,
+} from "@t3tools/provider-adapter-prime";
+
+import { ServerConfig } from "../../config.ts";
+import { makeExternalProviderAdapterHostV2 } from "../ExternalProviderAdapterHost.ts";
+
+const primeExtensionTestLayer = ServerConfig.layerTest(process.cwd(), {
+  prefix: "t3code-prime-openrouter-extension-test-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
 
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.provide(NodeServices.layer));
+  effect.pipe(Effect.provide(primeExtensionTestLayer));
+
+const makeOpenRouterExtensionFixture = Effect.fn("makeOpenRouterExtensionFixture")(function* () {
+  const instanceId = ProviderInstanceId.make("primeAgent");
+  const broker = yield* makeExternalProviderAdapterHostV2({
+    packageId: PRIME_PROVIDER_ADAPTER_PACKAGE.manifest.id,
+    instanceId,
+    storageKey: PRIME_PROVIDER_ADAPTER_PACKAGE.storageKey,
+  });
+  const extensionPath = yield* preparePrimeOpenRouterCatalogExtension(broker.host.storage);
+  return { extensionPath, storage: broker.host.storage };
+});
 
 interface ProviderRegistration {
   readonly name: string;
@@ -51,11 +73,7 @@ describe("primeOpenRouterCatalogExtension", () => {
     provide(
       Effect.scoped(
         Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-openrouter-catalog-",
-          });
-          const extensionPath = yield* preparePrimeOpenRouterCatalogExtension(baseDir);
+          const { extensionPath } = yield* makeOpenRouterExtensionFixture();
           const registrations = yield* loadExtension(extensionPath, {
             ok: true,
             json: async () => ({
@@ -156,11 +174,7 @@ describe("primeOpenRouterCatalogExtension", () => {
     provide(
       Effect.scoped(
         Effect.gen(function* () {
-          const fileSystem = yield* FileSystem.FileSystem;
-          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-prime-openrouter-catalog-failure-",
-          });
-          const extensionPath = yield* preparePrimeOpenRouterCatalogExtension(baseDir);
+          const { extensionPath } = yield* makeOpenRouterExtensionFixture();
           const registrations = yield* loadExtension(extensionPath, {
             ok: false,
             json: async () => ({ error: "unavailable" }),

@@ -25,6 +25,28 @@ import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 const decodeElicitationRequest = Schema.decodeUnknownEffect(AcpSchema.ElicitationRequest);
 
 export interface AcpClientOptions {
+  /**
+   * Retains every decoded notification in `raw.notifications`.
+   *
+   * Raw capture is disabled by default because typed notification handlers already receive the
+   * same payloads. Enabling it uses an unbounded queue so callers must continuously consume the
+   * stream for the lifetime of the client.
+   */
+  readonly captureRawNotifications?: boolean;
+  /**
+   * Installs the initial `session/update` handler before the transport starts reading. Use this when
+   * the peer can emit notifications as soon as the client is created.
+   */
+  readonly onSessionUpdate?: (
+    notification: AcpSchema.SessionNotification,
+  ) => Effect.Effect<void, AcpError.AcpError>;
+  /**
+   * Installs the initial `session/elicitation/complete` handler before the transport starts reading.
+   * Use this when the peer can emit notifications as soon as the client is created.
+   */
+  readonly onElicitationComplete?: (
+    notification: AcpSchema.ElicitationCompleteNotification,
+  ) => Effect.Effect<void, AcpError.AcpError>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (event: AcpProtocol.AcpProtocolLogEvent) => Effect.Effect<void, never>;
@@ -41,6 +63,10 @@ export interface AcpClientOptions {
 }
 
 type AcpClientRaw = {
+  /**
+   * Raw notifications captured when `captureRawNotifications` is enabled. Otherwise this stream
+   * is empty. Prefer typed handlers unless the complete decoded notification envelope is needed.
+   */
   readonly notifications: Stream.Stream<AcpProtocol.AcpIncomingNotification>;
   readonly request: (method: string, payload: unknown) => Effect.Effect<unknown, AcpError.AcpError>;
   readonly notify: (method: string, payload: unknown) => Effect.Effect<void, AcpError.AcpError>;
@@ -225,7 +251,9 @@ export class AcpClient extends Context.Service<
       ) => Effect.Effect<AcpSchema.ReleaseTerminalResponse | void, AcpError.AcpError>,
     ) => Effect.Effect<void>;
     /**
-     * Registers a handler for `session/update`.
+     * Registers a handler for future `session/update` notifications.
+     * Register handlers before calling `agent.initialize`; notifications are not buffered while no
+     * handler is registered.
      * @see https://agentclientprotocol.com/protocol/schema#session/update
      */
     readonly handleSessionUpdate: (
@@ -324,8 +352,14 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
 ): Effect.fn.Return<AcpClient["Service"], never, Scope.Scope> {
   const coreHandlers: AcpCoreRequestHandlers = {};
   const notificationHandlers: AcpNotificationHandlers = {
-    sessionUpdate: { handlers: [], pending: [] },
-    elicitationComplete: { handlers: [], pending: [] },
+    sessionUpdate: {
+      handlers: options.onSessionUpdate ? [options.onSessionUpdate] : [],
+      pending: [],
+    },
+    elicitationComplete: {
+      handlers: options.onElicitationComplete ? [options.onElicitationComplete] : [],
+      pending: [],
+    },
   };
   const extRequestHandlers = new Map<
     string,
@@ -412,6 +446,7 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
     stdio: stdio,
     ...(terminationError ? { terminationError } : {}),
     serverRequestMethods: new Set(AcpRpcs.ClientRpcs.requests.keys()),
+    captureRawNotifications: options.captureRawNotifications ?? true,
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
