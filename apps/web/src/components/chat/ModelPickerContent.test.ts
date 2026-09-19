@@ -9,6 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
   adjacentModelPickerProvider,
+  distinguishingModelSlugTail,
   resolveModelPickerSelectedModel,
   shouldIncludeModelPickerOption,
   shouldOfferModelPickerSetup,
@@ -283,5 +284,24 @@ describe("adjacentModelPickerProvider", () => {
         direction: -1,
       }),
     ).toBe(claude.instanceId);
+  });
+});
+
+describe("distinguishingModelSlugTail", () => {
+  it("uses the last slug segment when it is already unique", () => {
+    expect(
+      distinguishingModelSlugTail("openrouter/auto-router", [
+        "openrouter/auto-router",
+        "openrouter/auto-router-v2",
+      ]),
+    ).toBe("auto-router");
+  });
+
+  it("extends leftwards when a sibling shares the last segment", () => {
+    expect(distinguishingModelSlugTail("a/b/model", ["a/b/model", "a/c/model"])).toBe("b/model");
+  });
+
+  it("falls back to the whole slug when a longer sibling ends with it", () => {
+    expect(distinguishingModelSlugTail("b/model", ["b/model", "a/b/model"])).toBe("b/model");
   });
 });
