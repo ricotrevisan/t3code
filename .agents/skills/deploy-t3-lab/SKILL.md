@@ -38,6 +38,8 @@ Build the portable server and web client **on office** from the pushed SHA. Lab'
 node apps/server/scripts/cli.ts build   # bundles the server, then copies apps/web/dist into dist/client
 ```
 
+This is the only build that produces the live client. It applies the development icon overrides; a client left behind by a desktop build carries production branding and hashes differently from the live release.
+
 Then, on lab:
 
 - copy that `apps/server/dist` to `release-<stamp>-<sha>/dist`
@@ -45,7 +47,7 @@ Then, on lab:
 - reuse the live release's `node_modules` with `cp -a` when the change adds no dependencies; otherwise install on lab so native modules match the runtime ABI (`/usr/bin/node`)
 - write `provenance.json` following the live release's shape: `commit`, `previous_release`, `backup`, `web_identical_file_count`, `native_loads`, `runtime`
 
-Done when the staged `dist/bin.mjs` contains a string unique to your change, `dist/client/index.html` exists, and the client file count equals the live release's.
+Done when the staged `dist/bin.mjs` contains a string unique to your change, `dist/client/index.html` exists, the client file count equals the live release's, and `dist/client/favicon.ico` hashes the same as the live release's. The favicon catches a client built with the wrong branding, which a file count alone misses.
 
 ## 3. Gate the native modules
 
