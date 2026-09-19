@@ -26,16 +26,16 @@ import {
 } from "./_internal/shared.ts";
 import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
+const SessionUpdateNotification = jsonRpcNotification(
+  "session/update",
+  AcpSchema.SessionNotification,
+);
 const InitializeRequest = jsonRpcRequest("initialize", AcpSchema.InitializeRequest);
 const InitializeResponse = jsonRpcResponse(AcpSchema.InitializeResponse);
 const ExtRequest = jsonRpcRequest("x/test", Schema.Struct({ hello: Schema.String }));
 const ExtResponse = jsonRpcResponse(Schema.Struct({ ok: Schema.Boolean }));
 const PromptRequest = jsonRpcRequest("session/prompt", AcpSchema.PromptRequest);
 const PromptResponse = jsonRpcResponse(AcpSchema.PromptResponse);
-const SessionUpdateNotification = jsonRpcNotification(
-  "session/update",
-  AcpSchema.SessionNotification,
-);
 const decodePromptRequestLine = Schema.decodeEffect(Schema.fromJsonString(PromptRequest));
 const XAiPromptCompleteNotification = jsonRpcNotification(
   "_x.ai/session/prompt_complete",
@@ -294,7 +294,9 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
       const typedNotifications = yield* Ref.make<Array<unknown>>([]);
       const handle = yield* makeHandle();
       const scope = yield* Scope.make();
-      const acpLayer = AcpClient.layerChildProcess(handle);
+      const acpLayer = AcpClient.layerChildProcess(handle, {
+        captureRawNotifications: true,
+      });
       const context = yield* Layer.buildWithScope(acpLayer, scope);
 
       const ext = yield* Effect.gen(function* () {
@@ -391,6 +393,57 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
     }),
   );
 
+  it.effect("installs initial typed handlers before the transport starts reading", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { stdio, input } = yield* makeInMemoryStdio();
+        const handled = yield* Deferred.make<AcpSchema.SessionNotification>();
+
+        yield* Queue.offer(
+          input,
+          yield* encodeJsonl(SessionUpdateNotification, {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "session-1",
+              update: {
+                sessionUpdate: "plan",
+                entries: [
+                  {
+                    content: "Already waiting",
+                    priority: "high",
+                    status: "in_progress",
+                  },
+                ],
+              },
+            },
+          }),
+        );
+
+        const acp = yield* AcpClient.make(stdio, {
+          captureRawNotifications: false,
+          onSessionUpdate: (notification) =>
+            Deferred.succeed(handled, notification).pipe(Effect.asVoid),
+        });
+
+        assert.deepEqual(yield* Deferred.await(handled), {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "plan",
+            entries: [
+              {
+                content: "Already waiting",
+                priority: "high",
+                status: "in_progress",
+              },
+            ],
+          },
+        });
+        assert.equal((yield* Stream.runCollect(acp.raw.notifications)).length, 0);
+      }),
+    ),
+  );
+
   it.effect(
     "returns structured invalid params without exposing values from typed extension request payloads",
     () =>
@@ -463,7 +516,7 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
       }),
   );
 
-  it.effect("replays buffered notifications to handlers registered after they arrive", () =>
+  it.effect("does not retain notifications that arrive before handlers are registered", () =>
     Effect.gen(function* () {
       const updates = yield* Ref.make<Array<unknown>>([]);
       const elicitationCompletions = yield* Ref.make<Array<unknown>>([]);
@@ -541,8 +594,8 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
           Ref.update(elicitationCompletions, (current) => [...current, notification]),
         );
 
-        assert.equal((yield* Ref.get(updates)).length, 1);
-        assert.equal((yield* Ref.get(elicitationCompletions)).length, 1);
+        assert.equal((yield* Ref.get(updates)).length, 0);
+        assert.equal((yield* Ref.get(elicitationCompletions)).length, 0);
         assert.deepEqual(yield* Ref.get(typedRequests), [{ message: "hello from typed request" }]);
         assert.deepEqual(yield* Ref.get(typedNotifications), [{ count: 2 }]);
       }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));

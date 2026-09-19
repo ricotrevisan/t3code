@@ -1351,6 +1351,47 @@ it.effect("decodes latest turn source proposed plan metadata when present", () =
   }),
 );
 
+it.effect("decodes orchestration session adapter package identity", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationSession({
+      threadId: "thread-package",
+      status: "ready",
+      providerName: "codex",
+      providerInstanceId: "codex-external",
+      adapterPackage: {
+        id: "codex-external",
+        version: "1.2.3",
+        protocolVersion: 1,
+      },
+      runtimeMode: "full-access",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(parsed.adapterPackage, {
+      id: "codex-external",
+      version: "1.2.3",
+      protocolVersion: 1,
+    });
+  }),
+);
+
+it.effect("decodes an authoritative package-less orchestration session", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationSession({
+      threadId: "thread-package-less",
+      status: "ready",
+      providerName: "codex",
+      adapterPackage: null,
+      runtimeMode: "full-access",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.adapterPackage, null);
+  }),
+);
+
 it.effect("decodes orchestration session runtime mode defaults", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeOrchestrationSession({

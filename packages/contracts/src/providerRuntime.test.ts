@@ -69,6 +69,61 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.providerInstanceId).toBe("ollama_local");
   });
 
+  it("decodes structured adapter package identity", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "session.started",
+      eventId: "event-external-session",
+      provider: "codex",
+      providerInstanceId: "codex-external",
+      adapterPackage: {
+        id: "codex-external",
+        version: "1.2.3",
+        protocolVersion: 1,
+      },
+      createdAt: "2026-02-28T00:00:00.000Z",
+      threadId: "thread-1",
+      payload: {},
+    });
+
+    expect(parsed.adapterPackage).toEqual({
+      id: "codex-external",
+      version: "1.2.3",
+      protocolVersion: 1,
+    });
+  });
+
+  it("decodes an authoritative package-less runtime event", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "session.started",
+      eventId: "event-package-less-session",
+      provider: "codex",
+      adapterPackage: null,
+      createdAt: "2026-02-28T00:00:00.000Z",
+      threadId: "thread-1",
+      payload: {},
+    });
+
+    expect(parsed.adapterPackage).toBeNull();
+  });
+
+  it("rejects malformed adapter package identity", () => {
+    expect(() =>
+      decodeRuntimeEvent({
+        type: "session.started",
+        eventId: "event-invalid-external-session",
+        provider: "codex",
+        adapterPackage: {
+          id: "codex external",
+          version: "latest",
+          protocolVersion: 0,
+        },
+        createdAt: "2026-02-28T00:00:00.000Z",
+        threadId: "thread-1",
+        payload: {},
+      }),
+    ).toThrow();
+  });
+
   it("decodes turn.plan.updated for plan rendering", () => {
     const parsed = decodeRuntimeEvent({
       type: "turn.plan.updated",

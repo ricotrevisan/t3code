@@ -281,6 +281,7 @@ export const make = Effect.fn("effect-acp/AcpAgent.make")(function* (
   const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
     stdio,
     serverRequestMethods: new Set(AcpRpcs.AgentRpcs.requests.keys()),
+    captureRawNotifications: false,
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
     ...(options.logger ? { logger: options.logger } : {}),

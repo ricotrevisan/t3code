@@ -1,5 +1,6 @@
 import type {
   AgentSessionImportSource,
+  ProviderAdapterPackageReference,
   ProviderInstanceId,
   ProviderDriverKind,
   ProviderSessionRuntimeStatus,
@@ -25,6 +26,7 @@ export interface ProviderRuntimeBinding {
    */
   readonly providerInstanceId?: ProviderInstanceId;
   readonly adapterKey?: string;
+  readonly adapterPackage?: ProviderAdapterPackageReference | null;
   readonly status?: ProviderSessionRuntimeStatus;
   readonly resumeCursor?: unknown | null;
   readonly runtimePayload?: unknown | null;

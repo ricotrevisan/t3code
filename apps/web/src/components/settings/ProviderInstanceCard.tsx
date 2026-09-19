@@ -9,6 +9,7 @@ import {
   DownloadIcon,
   LockIcon,
   LockOpenIcon,
+  PackageIcon,
   PlusIcon,
   Trash2Icon,
   XIcon,
@@ -19,6 +20,7 @@ import { useEffect, useRef, useState, type ReactElement, type ReactNode } from "
 import {
   isProviderDriverKind,
   resolveProviderInstanceEnabled,
+  type ProviderAdapterConfigSchema,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
   type ProviderInstanceId,
@@ -43,7 +45,8 @@ import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
-import { ProviderSettingsForm } from "./ProviderSettingsForm";
+import { adapterPackageIdentity } from "./providerAdapterConfig";
+import { AdapterConfigForm, ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon, providerInstanceInitials } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
@@ -368,6 +371,7 @@ interface ProviderInstanceCardProps {
   readonly instance: ProviderInstanceConfig;
   readonly driverOption: DriverOption | undefined;
   readonly liveProvider: ServerProvider | undefined;
+  readonly adapterConfigSchema?: ProviderAdapterConfigSchema | undefined;
   readonly mode: "list" | "editor";
   readonly selected?: boolean | undefined;
   readonly onSelect?: (() => void) | undefined;
@@ -425,6 +429,7 @@ export function ProviderInstanceCard({
   instance,
   driverOption,
   liveProvider,
+  adapterConfigSchema,
   mode,
   selected = false,
   onSelect,
@@ -476,7 +481,18 @@ export function ProviderInstanceCard({
   const onRunVersionAction = versionAdvisory?.targetVersion ? onInstallRecommended : onRunUpdate;
   const FallbackIconComponent = driverOption?.icon;
   const displayName =
-    instance.displayName?.trim() || driverOption?.label || String(instance.driver);
+    instance.displayName?.trim() ||
+    driverOption?.label ||
+    liveProvider?.displayName ||
+    String(instance.driver);
+  const isPackageBound = instance.adapterPackage !== undefined;
+  const packageIdentity =
+    instance.adapterPackage === undefined
+      ? undefined
+      : adapterPackageIdentity(instance.adapterPackage);
+  const canEditInstance = isPackageBound
+    ? adapterConfigSchema !== undefined
+    : driverOption !== undefined;
   const accentColor = normalizeProviderAccentColor(instance.accentColor);
   const { copyToClipboard } = useCopyToClipboard<{ providerName: string }>({
     onCopy: ({ providerName }) => {
@@ -579,6 +595,17 @@ export function ProviderInstanceCard({
   ) : FallbackIconComponent ? (
     <span className="inline-flex size-5 shrink-0 items-center justify-center">
       <FallbackIconComponent className="size-4 text-foreground/80" aria-hidden />
+    </span>
+  ) : instance.adapterPackage !== undefined ? (
+    <span className="relative inline-flex size-5 shrink-0 items-center justify-center">
+      <PackageIcon className="size-4 text-foreground/80" aria-hidden />
+      <span
+        className={cn(
+          "pointer-events-none absolute -left-0.5 -top-0.5 size-2 rounded-full ring-2 ring-card",
+          statusStyle.dot,
+        )}
+        aria-hidden
+      />
     </span>
   ) : (
     <span
@@ -859,25 +886,43 @@ export function ProviderInstanceCard({
     </div>
   );
 
-  const runtimeFields = driverOption ? (
-    <ProviderSettingsForm
-      definition={driverOption}
-      value={instance.config}
-      idPrefix={`provider-instance-${instanceId}`}
-      variant="settings"
-      onChange={updateConfig}
-    />
-  ) : (
-    <SettingsRow
-      title="Driver"
-      description={
-        <span>
-          This instance uses <code className="text-foreground">{String(instance.driver)}</code>,
-          which is not available in this build. Its configuration is preserved.
-        </span>
-      }
-    />
-  );
+  const runtimeFields =
+    isPackageBound && adapterConfigSchema !== undefined ? (
+      <AdapterConfigForm
+        key={packageIdentity}
+        schema={adapterConfigSchema}
+        value={instance.config}
+        idPrefix={`provider-instance-${instanceId}-${packageIdentity}`}
+        variant="card"
+        onChange={updateConfig}
+      />
+    ) : driverOption ? (
+      <ProviderSettingsForm
+        definition={driverOption}
+        value={instance.config}
+        idPrefix={`provider-instance-${instanceId}`}
+        variant="settings"
+        onChange={updateConfig}
+      />
+    ) : (
+      <SettingsRow
+        title={isPackageBound ? "Adapter package" : "Driver"}
+        description={
+          isPackageBound ? (
+            <span>
+              This adapter package is not available with the exact saved version and protocol.
+              Configuration values are preserved, but this instance is read-only until the
+              matching package is installed again.
+            </span>
+          ) : (
+            <span>
+              This instance uses <code className="text-foreground">{String(instance.driver)}</code>,
+              which is not available in this build. Its configuration is preserved.
+            </span>
+          )
+        }
+      />
+    );
 
   return (
     <>
@@ -964,7 +1009,7 @@ export function ProviderInstanceCard({
         />
       </SettingsSection>
 
-      {driverOption !== undefined ? (
+      {driverOption !== undefined && canEditInstance ? (
         <SettingsSection
           title="Models"
           inert={readOnly}

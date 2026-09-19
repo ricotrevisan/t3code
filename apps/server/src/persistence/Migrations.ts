@@ -68,6 +68,7 @@ import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
 import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
 import RepairForkProjectionSchema from "./Migrations/053_RepairForkProjectionSchema.ts";
+import Migration0055 from "./Migrations/055_ProviderAdapterPackageSessionIdentity.ts";
 import Migration0056 from "./Migrations/056_PullRequestFilesViewed.ts";
 
 /**
@@ -135,6 +136,7 @@ const migrationEntries = [
   [52, "ProjectionThreadTitleState", Migration0052],
   [53, "PullRequestFilesViewed", Migration0053],
   [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
+  [55, "ProviderAdapterPackageSessionIdentity", Migration0055],
   [56, "PullRequestFilesViewed", Migration0056],
   [57, "ClearAutomaticProjectModelDefaultsForkCompatibility", ClearAutomaticProjectModelDefaults],
   [58, "RepairForkProjectionSchemaForkCompatibility", RepairForkProjectionSchema],
