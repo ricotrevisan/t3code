@@ -657,6 +657,29 @@ function makeConnection(input: {
   };
 }
 
+/**
+ * Map one Pi catalog entry onto the identity T3 shows for a model.
+ *
+ * Pi lists one entry per logged-in account and names the account with a
+ * suffixed provider id (`openai-codex`, `openai-codex-3`, `openrouter`). Two
+ * accounts therefore offer the same model under the same name, so `provider`
+ * is the only field that tells those rows apart. Surface it as `subProvider`,
+ * the same field the Prime, OpenCode, and ACP adapters populate, so the picker
+ * can label the route instead of repeating the instance name.
+ */
+export function mapPiModelIdentity(model: {
+  readonly provider: string;
+  readonly id: string;
+  readonly name?: string | undefined;
+}): { readonly slug: string; readonly name: string; readonly subProvider?: string } {
+  const provider = model.provider.trim();
+  return {
+    slug: `${model.provider}/${model.id}`,
+    name: model.name ?? model.id,
+    ...(provider.length > 0 ? { subProvider: provider } : {}),
+  };
+}
+
 function parseQualifiedModel(
   model: string,
 ): { readonly provider: string; readonly modelId: string } | undefined {
@@ -1017,8 +1040,7 @@ export function makePiAdapter(
                         },
                       ];
                 return {
-                  slug: `${model.provider}/${model.id}`,
-                  name: model.name ?? model.id,
+                  ...mapPiModelIdentity(model),
                   isCustom: false,
                   capabilities: { optionDescriptors },
                 };

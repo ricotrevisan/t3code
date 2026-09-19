@@ -176,4 +176,41 @@ describe("ProviderModelPicker", () => {
     expect(markup).toContain("h-3");
     expect(markup).toContain("text-3xs");
   });
+
+  it("names the upstream route behind an aggregated model", () => {
+    const markup = renderPicker({
+      instanceId: "pi",
+      driver: "piRpc",
+      model: "openai-codex-3/gpt-5.6-sol",
+      options: [
+        {
+          slug: "openai-codex-3/gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          subProvider: "openai-codex-3",
+        },
+      ],
+    });
+
+    expect(markup).toContain("GPT-5.6 Sol");
+    expect(markup).toContain("openai-codex-3");
+  });
+
+  it("leaves a caller-provided aggregate label free of a route", () => {
+    const markup = renderPicker({
+      instanceId: "pi",
+      driver: "piRpc",
+      model: "openai-codex-3/gpt-5.6-sol",
+      options: [
+        {
+          slug: "openai-codex-3/gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          subProvider: "openai-codex-3",
+        },
+      ],
+      triggerLabel: "Mixed values",
+    });
+
+    expect(markup).toContain("Mixed values");
+    expect(markup).not.toContain("openai-codex-3");
+  });
 });

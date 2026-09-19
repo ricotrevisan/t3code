@@ -26,7 +26,7 @@ import {
   ComboboxItem,
   ComboboxListVirtualized,
 } from "../ui/combobox";
-import { ModelEsque } from "./providerIconUtils";
+import { getDisplayModelName, ModelEsque } from "./providerIconUtils";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { primaryServerKeybindingsAtom } from "../../state/server";
 import {
@@ -139,6 +139,25 @@ export function adjacentModelPickerProvider(input: {
         : providers.length - 1
       : (index + input.direction + providers.length) % providers.length
   ]!;
+}
+
+/**
+ * Shortest trailing part of `slug` that no sibling slug shares.
+ *
+ * Provider catalogs do repeat a display name inside one provider: Pi's
+ * OpenRouter catalog ships "Auto Router" twice. A row only shows the model
+ * name and the provider footer, so those rows would render identically.
+ * Colliding rows append this tail to tell them apart.
+ */
+export function distinguishingModelSlugTail(slug: string, siblings: ReadonlyArray<string>): string {
+  const segments = slug.split("/");
+  for (let take = 1; take <= segments.length; take += 1) {
+    const tail = segments.slice(segments.length - take).join("/");
+    if (siblings.every((other) => other === slug || !other.endsWith(`/${tail}`))) {
+      return tail;
+    }
+  }
+  return slug;
 }
 
 const EMPTY_MODEL_JUMP_LABELS = new Map<string, string>();
@@ -566,6 +585,44 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       ...(legacySection.isExpanded ? legacySection.legacyModels : []),
     ];
   }, [filteredModels, legacySection]);
+
+  /**
+   * Rows that would render identically: same title, same provider footer. The
+   * row shows nothing else, so a provider catalog that repeats a display name
+   * would show two rows the user cannot tell apart. Only rows on screen are
+   * considered, so the extra label appears exactly when there is a twin.
+   */
+  const rowDisambiguatorByKey = useMemo(() => {
+    const byLabel = new Map<string, Array<ModelPickerItem>>();
+    for (const model of visibleModels) {
+      const label = [
+        getDisplayModelName(model, isLocked ? undefined : { preferShortName: true }),
+        model.instanceDisplayName,
+        model.subProvider ?? "",
+      ].join("\u0000");
+      const group = byLabel.get(label);
+      if (group) {
+        group.push(model);
+      } else {
+        byLabel.set(label, [model]);
+      }
+    }
+
+    const disambiguators = new Map<string, string>();
+    for (const group of byLabel.values()) {
+      if (group.length < 2) {
+        continue;
+      }
+      const slugs = group.map((model) => model.slug);
+      for (const model of group) {
+        disambiguators.set(
+          modelPickerModelKey(model.instanceId, model.slug),
+          distinguishingModelSlugTail(model.slug, slugs),
+        );
+      }
+    }
+    return disambiguators;
+  }, [visibleModels, isLocked]);
 
   const selectedEntry =
     selectedInstanceId === "favorites" ? undefined : entryByInstanceId.get(selectedInstanceId);
@@ -1001,6 +1058,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                         showProvider
                         preferShortName={!isLocked}
                         useTriggerLabel={false}
+                        disambiguator={rowDisambiguatorByKey.get(modelKey) ?? null}
                         showNewBadge={model.badge === "new"}
                         unavailable={model.isUnavailable === true}
                         jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
