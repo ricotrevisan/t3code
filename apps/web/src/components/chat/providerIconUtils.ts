@@ -3,11 +3,13 @@ import {
   AntigravityIcon,
   ClaudeAI,
   CursorIcon,
+  DeepSeekIcon,
   GrokIcon,
   Icon,
   OpenAI,
   OpenCodeIcon,
   PrimeAgentIcon,
+  PiAgentIcon,
 } from "../Icons";
 
 export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
@@ -18,6 +20,8 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
   [ProviderDriverKind.make("grok")]: GrokIcon,
   [ProviderDriverKind.make("antigravity")]: AntigravityIcon,
   [ProviderDriverKind.make("primeAgent")]: PrimeAgentIcon,
+  [ProviderDriverKind.make("deepseekHarness")]: DeepSeekIcon,
+  [ProviderDriverKind.make("piRpc")]: PiAgentIcon,
 };
 
 export type ModelEsque = {
