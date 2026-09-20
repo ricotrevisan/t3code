@@ -2,6 +2,8 @@
 import * as NodeCrypto from "node:crypto";
 import {
   EventId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   ProviderDriverKind,
   RuntimeItemId,
   RuntimeRequestId,
@@ -25,6 +27,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as Exit from "effect/Exit";
 import * as PubSub from "effect/PubSub";
 import * as Result from "effect/Result";
@@ -37,11 +40,16 @@ import type { PiProviderAdapterConfig } from "./index.ts";
 
 const PROVIDER = ProviderDriverKind.make("piRpc");
 const PROBE_THREAD_ID = ThreadId.make("pi-provider-probe");
+// Pi echoes base64 images in user-message events, not just in command responses.
+const MAX_RPC_LINE_CHARS =
+  2_000_000 +
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS * Math.ceil(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / 3) * 4;
 
 export const PI_PROVIDER_ADAPTER_CAPABILITIES = {
   protocolVersion: 1,
   features: [
     "session.resume",
+    "input.attachments",
     "turn.steer",
     "turn.interrupt",
     "request.structured-input",
@@ -524,9 +532,12 @@ function makeConnection(input: {
           lines.push(buffer.slice(0, index).replace(/\r$/, ""));
           buffer = buffer.slice(index + 1);
         }
-        if (buffer.length > 2_000_000 || lines.some((line) => line.length > 2_000_000)) {
+        if (
+          buffer.length > MAX_RPC_LINE_CHARS ||
+          lines.some((line) => line.length > MAX_RPC_LINE_CHARS)
+        ) {
           yield* child.close.pipe(Effect.ignore);
-          return yield* adapterError("pi-rpc", "Pi RPC output exceeded the 2 MB line limit.");
+          return yield* adapterError("pi-rpc", "Pi RPC output exceeded the line size limit.");
         }
         return lines;
       }),
@@ -1103,17 +1114,29 @@ export function makePiAdapter(
       startSession,
       sendTurn: (turnInput) =>
         Effect.gen(function* () {
-          if ((turnInput.attachments?.length ?? 0) > 0) {
-            return yield* adapterError("sendTurn", "Pi attachment input is not supported.");
+          const attachments = turnInput.attachments ?? [];
+          if (attachments.some((attachment) => attachment.type !== "image")) {
+            return yield* adapterError("sendTurn", "Pi only supports image attachments.");
           }
-          const message = turnInput.input;
-          if (!message?.trim()) {
-            return yield* adapterError("sendTurn", "Pi requires a non-empty text prompt.");
+          const message = turnInput.input ?? "";
+          if (!message.trim() && attachments.length === 0) {
+            return yield* adapterError("sendTurn", "Pi requires text or at least one image.");
           }
           const entry = yield* requireEntry(turnInput.threadId, "sendTurn");
+          const images = yield* Effect.forEach(attachments, (attachment) =>
+            host.attachments.read(attachment).pipe(
+              Effect.map(({ bytes }) => ({
+                type: "image" as const,
+                data: Encoding.encodeBase64(bytes),
+                mimeType: attachment.mimeType,
+              })),
+              Effect.mapError((cause) => adapterError("sendTurn", cause.detail, cause)),
+            ),
+          );
+          const prompt = { message, ...(images.length > 0 ? { images } : {}) };
           const activeTurnId = entry.connection.activeTurnId;
           if (activeTurnId !== undefined) {
-            yield* entry.connection.request({ type: "steer", message });
+            yield* entry.connection.request({ type: "steer", ...prompt });
             return {
               threadId: turnInput.threadId,
               turnId: activeTurnId,
@@ -1123,7 +1146,7 @@ export function makePiAdapter(
           if (turnInput.modelSelection !== undefined) {
             yield* applyModelSelection(entry.connection, turnInput.modelSelection);
           }
-          return yield* runPrompt(entry, { type: "prompt", message });
+          return yield* runPrompt(entry, { type: "prompt", ...prompt });
         }),
       interruptTurn: (threadId) =>
         Effect.gen(function* () {

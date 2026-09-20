@@ -1,9 +1,12 @@
 import * as NodeURL from "node:url";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { PI_PROVIDER_ADAPTER_PACKAGE as pkg } from "@t3tools/provider-adapter-pi";
+import { ServerConfig } from "../../config.ts";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { makeExternalProviderDriver } from "../ExternalProviderDriver.ts";
 import { makeExternalProviderProcessSupervisor } from "../ExternalProviderProcessSupervisor.ts";
 const result = { checks: [], allEvents: [] };
@@ -37,7 +40,7 @@ const program = Effect.gen(function* () {
     "wire prompt ack precedes run events",
     wire[0]?.type === "response" &&
       wire[0]?.command === "prompt" &&
-      wire[1]?.type === "agent_start",
+      wire.findIndex((event) => event.type === "agent_start") > 0,
   );
   yield* raw.close;
   check("fixture exits zero on stdin EOF", (yield* raw.exitCode) === 0);
@@ -199,7 +202,9 @@ const program = Effect.gen(function* () {
     .sendTurn({
       threadId: "pi-ci-thread",
       input: "do not discard this",
-      attachments: [{ kind: "file", path: "/tmp/not-read" }],
+      attachments: [
+        { type: "file", id: "not-read", name: "notes.txt", mimeType: "text/plain", sizeBytes: 1 },
+      ],
     })
     .pipe(Effect.result);
   check("unsupported attachments are rejected", attachmentTurn._tag === "Failure");
@@ -238,6 +243,86 @@ const program = Effect.gen(function* () {
   check(
     "steer stays in one turn",
     steeredTurn.turnId === heldTurn.turnId && steered.at(-1)?.turnId === heldTurn.turnId,
+  );
+  check("image attachments advertised", pkg.manifest.capabilities.includes("input.attachments"));
+  const fileSystem = yield* FileSystem.FileSystem;
+  const config = yield* ServerConfig;
+  const imageData =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMioAAAAASUVORK5CYII=";
+  const bytes = Buffer.from(imageData, "base64");
+  const expectedImages = [
+    { type: "image", data: imageData, mimeType: "image/png" },
+    {
+      type: "image",
+      data: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+      mimeType: "image/gif",
+    },
+  ];
+  const images = expectedImages.map((image, index) => ({
+    type: "image",
+    id: `pi-image-${index}`,
+    name: `image.${image.mimeType.split("/")[1]}`,
+    mimeType: image.mimeType,
+    sizeBytes: Buffer.from(image.data, "base64").length,
+  }));
+  yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+  for (const [index, attachment] of images.entries()) {
+    yield* fileSystem.writeFile(
+      resolveAttachmentPath({ attachmentsDir: config.attachmentsDir, attachment }),
+      Buffer.from(expectedImages[index].data, "base64"),
+    );
+  }
+  const checkImageMessage = (message, expected = expectedImages) =>
+    Effect.gen(function* () {
+      const thread = yield* instance.adapter.readThread("pi-ci-thread");
+      const userMessage = thread.turns
+        .flatMap((turn) => turn.items)
+        .findLast((item) => item.role === "user");
+      check(
+        `image content reaches Pi: ${message || "image-only"}`,
+        JSON.stringify(userMessage?.content) ===
+          JSON.stringify([{ type: "text", text: message }, ...expected]),
+      );
+    });
+  for (const message of ["describe these images", undefined]) {
+    yield* complete(message, { attachments: images });
+    yield* checkImageMessage(message ?? "");
+  }
+  for (const message of ["look at this instead", undefined]) {
+    const started = yield* collectUntil((event) => event.type === "content.delta");
+    const active = yield* send("!hold image steering");
+    yield* drain(started);
+    const completed = yield* collectUntil(terminal);
+    const steered = yield* send(message, { attachments: images });
+    const events = yield* drain(completed);
+    check(
+      "image steering retains active turn",
+      steered.turnId === active.turnId && events.at(-1)?.turnId === active.turnId,
+    );
+    yield* checkImageMessage(message ?? "");
+  }
+  // Pi echoes user images in its events; a normal upload can exceed the old 2 MB RPC line cap.
+  const largeBytes = Buffer.concat([bytes, Buffer.alloc(1_600_000)]);
+  const largeImage = { ...images[0], id: "pi-large", sizeBytes: largeBytes.length };
+  yield* fileSystem.writeFile(
+    resolveAttachmentPath({ attachmentsDir: config.attachmentsDir, attachment: largeImage }),
+    largeBytes,
+  );
+  yield* complete("large image", { attachments: [largeImage] });
+  yield* checkImageMessage("large image", [
+    { type: "image", data: largeBytes.toString("base64"), mimeType: "image/png" },
+  ]);
+
+  const beforeFailure = yield* instance.adapter.readThread("pi-ci-thread");
+  const missingImage = yield* send("missing image", {
+    attachments: [{ ...images[0], id: "pi-missing" }],
+  }).pipe(Effect.result);
+  const afterFailure = yield* instance.adapter.readThread("pi-ci-thread");
+  check(
+    "unreadable images fail without sending a prompt",
+    missingImage._tag === "Failure" &&
+      missingImage.failure.message.includes("attachment file does not exist") &&
+      JSON.stringify(beforeFailure) === JSON.stringify(afterFailure),
   );
   const tool = yield* complete("!tool ls");
   check(
