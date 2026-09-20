@@ -221,6 +221,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             className={cn(
               "min-w-0 shrink justify-between whitespace-nowrap",
               !props.isComposerOwned && "max-w-48 sm:max-w-56",
+              triggerRoute && "h-auto min-h-9 py-1",
               props.triggerClassName,
             )}
             disabled={props.disabled}
@@ -277,14 +278,16 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
               }
             >
               {props.triggerLabel ?? multipleLabel ?? (
-                <>
-                  {triggerTitle}
+                <span className={cn(triggerRoute && "flex min-w-0 flex-col text-left")}>
+                  <span className={cn("truncate", triggerRoute && "leading-4")}>
+                    {triggerTitle}
+                  </span>
                   {triggerRoute ? (
-                    <span className="ml-1 font-normal text-[10px] text-muted-foreground/70">
+                    <span className="truncate font-normal text-[10px] leading-3 text-muted-foreground/70">
                       {triggerRoute}
                     </span>
                   ) : null}
-                </>
+                </span>
               )}
             </TooltipTrigger>
             <TooltipPopup side="top">{triggerTooltipContent}</TooltipPopup>
