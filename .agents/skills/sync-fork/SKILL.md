@@ -56,7 +56,21 @@ test -z "$(git -C "$WT" rev-list --merges pingdotgg/main..HEAD)"
 
 Completion: the rebase exits 0, `git -C "$WT" status --porcelain` is empty, upstream is an ancestor, and no merge commits sit above it. Otherwise preserve the in-progress state and report the conflict; resume after resolving it. Aborting or skipping unresolved work requires explicit user approval after a backup. Never force a broken rebase through.
 
-## 4. Prove
+## 4. Bump the release version
+
+Every rollout ships different code, so the version has to move. Two builds under one version string cannot be told apart from an installed app, and the DMG name is the download URL.
+
+```
+cd "$WT"
+/opt/homebrew/bin/mise x node@24.19.0 -- node scripts/update-release-package-versions.ts <next patch>
+git -C "$WT" commit -am "chore(release): prepare v<next patch>"
+```
+
+Completion: `apps/server`, `apps/desktop`, `apps/web`, and `packages/contracts` all carry the new version, and that commit is part of the revision you push.
+
+Upstream prepares its own releases with the same script and the same commit subject, so a later rebase can conflict on those four version lines. Keep the fork's version.
+
+## 5. Prove
 
 Refresh dependencies after rebasing, then run focused tests for the touched files from their package directories so their test setup applies. Use office's managed Node:
 
@@ -68,7 +82,7 @@ cd "$WT"
 
 Completion: every touched test file passes. No repo-wide checks.
 
-## 5. Push
+## 6. Push
 
 ```
 git -C "$WT" push --force-with-lease="refs/heads/main:$FROM" origin HEAD:main
@@ -76,15 +90,15 @@ git -C "$WT" push --force-with-lease="refs/heads/main:$FROM" origin HEAD:main
 
 The rebase rewrote fork commits, so this is intentionally a force push against the fork. Completion: `git -C "$WT" rev-parse origin/main` equals the worktree HEAD.
 
-## 6. Gate the builds
+## 7. Gate the builds
 
 ```
 cd "$WT" && bash "$SCRIPTS/changed-areas.sh" "$FROM"
 ```
 
-Prints `mobile=` and `mac=`. `mobile=yes` gates step 7, `mac=yes` gates step 8. Both `no`: skip to the report.
+Prints `mobile=` and `mac=`. `mobile=yes` gates step 8, `mac=yes` gates step 9. Both `no`: skip to the report.
 
-## 7. iOS build (mobile=yes)
+## 8. iOS build (mobile=yes)
 
 Check office's Expo session:
 
@@ -95,7 +109,7 @@ bash "$SCRIPTS/office-ios.sh"
 
 If `whoami` reports `Not logged in`, report iOS skipped (office has no Expo session) and continue. Other CLI failures are tooling errors, not evidence of missing credentials. The helper runs npm outside the monorepo to avoid its override conflict, then submits from the mobile directory using the fork's `preview` profile. Keep the printed build URL; submission is complete when EAS accepts the build. Do not submit a duplicate when retrying a command that already returned a build URL.
 
-## 8. macOS build (mac=yes)
+## 9. macOS build (mac=yes)
 
 ```
 bash "$SCRIPTS/office-macos.sh"
@@ -103,9 +117,9 @@ bash "$SCRIPTS/office-macos.sh"
 
 The script builds the arm64 DMG from the same clean, pushed revision already prepared and tested in the office sync worktree. It serves the release directory through Tailscale on port 8443 and prints `sha=`, `dmg=`, `url=`. The download URL is stable per app version: `https://office.tailedc0c1.ts.net:8443/<dmg name>`. It replaces only its own port-8443 serve; other Tailscale serves on office stay untouched.
 
-## 9. Report
+## 10. Report
 
-Fork `main` SHA, upstream base, dropped commits with their replacements (if any), test result, EAS build URL, DMG URL. State explicitly that sync/build does not update the live server.
+Fork `main` SHA, upstream base, dropped commits with their replacements (if any), test result, released version, EAS build URL, DMG URL. State explicitly that sync/build does not update the live server.
 
 ## Live deployment: separate authorization and orchestration
 
