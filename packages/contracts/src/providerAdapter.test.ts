@@ -97,6 +97,7 @@ describe("ProviderAdapterManifestV1", () => {
         hostProtocol: { minimum: 2, maximum: 2 },
         capabilities: [
           "session.resume",
+          "input.attachments",
           "turn.steer",
           "turn.interrupt",
           "request.structured-input",
@@ -112,7 +113,7 @@ describe("ProviderAdapterManifestV1", () => {
     expect(pi.hostProtocol).toEqual({ minimum: 2, maximum: 2 });
     expect(pi.transport.sessionConcurrency).toBe("one-per-process");
     expect(pi.capabilities).not.toContain("request.approval");
-    expect(pi.capabilities).not.toContain("input.attachments");
+    expect(pi.capabilities).toContain("input.attachments");
     expect(pi.capabilities).not.toContain("stream.context");
     expect(pi.capabilities).not.toContain("stream.subagents");
   });

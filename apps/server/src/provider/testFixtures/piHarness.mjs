@@ -324,11 +324,19 @@ process.stdin.on("data", (chunk) => {
           respond(id, type, true);
           break;
         }
-        const entryId = pushEntry({ role: "user", content: message });
+        const entryId = pushEntry({
+          role: "user",
+          content: command.images?.length
+            ? [{ type: "text", text: message }, ...command.images]
+            : message,
+        });
         state.held = { message };
         // Like Pi, acceptance precedes the asynchronously streamed run.
         respond(id, type, true);
         setImmediate(() => {
+          const userMessage = state.entries.find((entry) => entry.id === entryId).message;
+          emit({ type: "message_start", message: userMessage });
+          emit({ type: "message_end", message: userMessage });
           if (message.startsWith("!hold")) {
             holdTurn();
           } else if (/^\?(select|confirm|input|editor):/.test(message)) {
@@ -354,6 +362,12 @@ process.stdin.on("data", (chunk) => {
         break;
       }
       case "steer": {
+        pushEntry({
+          role: "user",
+          content: command.images?.length
+            ? [{ type: "text", text: command.message }, ...command.images]
+            : command.message,
+        });
         if (state.held) finishHeld(`steered: ${command.message}`);
         respond(id, type, true);
         break;
