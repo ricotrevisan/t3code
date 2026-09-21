@@ -77,6 +77,10 @@ const pushEntry = (message) => {
   const id = `entry-${state.entries.length + 1}`;
   state.entries.push({ type: "message", id, parentId: state.leafId, message });
   state.leafId = id;
+  NodeFS.writeFileSync(
+    state.sessionFile,
+    state.entries.map((entry) => JSON.stringify(entry)).join("\n"),
+  );
   return id;
 };
 
@@ -132,6 +136,7 @@ const runTurn = (message, reply) => {
     ];
     results[1].exitCode = 1;
     results[1].errorMessage = "Audit failed";
+    pushEntry({ role: "toolResult", toolCallId, toolName, ...partialResult() });
     emit({
       type: "tool_execution_end",
       toolCallId,
@@ -266,15 +271,9 @@ process.stdin.on("data", (chunk) => {
         state.sessionFile = command.sessionPath;
         NodeFS.mkdirSync(NodePath.dirname(state.sessionFile), { recursive: true });
         NodeFS.closeSync(NodeFS.openSync(state.sessionFile, "a"));
-        state.entries = [
-          {
-            type: "message",
-            id: "entry-seed",
-            parentId: null,
-            message: { role: "user", content: "seeded history" },
-          },
-        ];
-        state.leafId = "entry-seed";
+        const saved = NodeFS.readFileSync(state.sessionFile, "utf8").trim();
+        state.entries = saved ? saved.split("\n").map((line) => JSON.parse(line)) : [];
+        state.leafId = state.entries.at(-1)?.id ?? null;
         respond(id, type, true, { cancelled: false });
         break;
       }

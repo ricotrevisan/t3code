@@ -374,11 +374,26 @@ const program = Effect.gen(function* () {
       missingImage.failure.message.includes("attachment file does not exist") &&
       JSON.stringify(beforeFailure) === JSON.stringify(afterFailure),
   );
-  const agentActivities = [];
-  for (let run = 1; run <= 2; run++) {
+  const agentActivities = new Map();
+  for (let run = 1; run <= 4; run++) {
+    if (run === 4) {
+      const cursor = (yield* instance.adapter.listSessions()).find(
+        (session) => session.threadId === "pi-ci-thread",
+      ).resumeCursor;
+      yield* instance.adapter.stopSession("pi-ci-thread");
+      yield* instance.adapter.startSession({
+        threadId: "pi-ci-thread",
+        runtimeMode: "full-access",
+        resumeCursor: cursor,
+      });
+    }
     const children = yield* complete("!subagents");
-    agentActivities.push(...children.flatMap((event) => runtimeEventToActivities(event)));
-    const roster = foldSubagentActivities(agentActivities);
+    // Match persisted latest-state replacement, not an append-only event list.
+    for (const activity of children.flatMap((event) => runtimeEventToActivities(event))) {
+      agentActivities.delete(activity.id);
+      agentActivities.set(activity.id, activity);
+    }
+    const roster = foldSubagentActivities([...agentActivities.values()]);
     check(
       "Pi agents reach the client roster",
       roster.length === 2 &&

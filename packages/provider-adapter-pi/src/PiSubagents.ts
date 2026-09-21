@@ -54,7 +54,7 @@ const decodeParts = Schema.decodeUnknownExit(
 );
 type TaskEvent = Extract<
   ProviderRuntimeEvent,
-  { type: "task.started" | "task.progress" | "task.completed" }
+  { type: "task.started" | "task.updated" | "task.progress" | "task.completed" }
 >;
 type Event = TaskEvent extends infer E
   ? E extends TaskEvent
@@ -153,9 +153,10 @@ export function makePiSubagents() {
           if (part.type === "toolCall" && bounded(part.name)) lastToolName = bounded(part.name);
         }
       }
-      if (firstObservation && result.exitCode !== -1) {
+      // Reactivation is history, unlike the replaceable progress snapshot.
+      if (firstObservation) {
         events.push({
-          type: "task.progress",
+          type: "task.updated",
           payload: {
             ...child.linkage,
             description: bounded(result.prompt) ?? child.linkage.title!,
@@ -221,7 +222,30 @@ export function makePiSubagents() {
     return events;
   }
 
+  const decodeToolResult = Schema.decodeUnknownExit(
+    Schema.Struct({
+      role: Schema.Literal("toolResult"),
+      toolName: Schema.Literal("subagent"),
+      toolCallId: Schema.String,
+    }),
+  );
+
   return {
+    // Native tool results survive connection recreation and compaction. Rebuild
+    // totals without re-emitting lifecycle events already persisted by T3.
+    restore: (messages: readonly unknown[]) => {
+      const results = new Map<string, unknown>();
+      for (const message of messages) {
+        const decoded = decodeToolResult(message);
+        if (Exit.isSuccess(decoded)) results.set(decoded.value.toolCallId, message);
+      }
+      totals.clear();
+      calls.clear();
+      for (const [id, message] of results) {
+        observe(id, message);
+        finish(id, "stopped", "Restored interrupted subagent");
+      }
+    },
     observe,
     finish,
     interrupt: () =>

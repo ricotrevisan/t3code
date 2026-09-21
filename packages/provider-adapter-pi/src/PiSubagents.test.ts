@@ -17,7 +17,11 @@ describe("Pi subagent snapshots", () => {
     const tracker = makePiSubagents();
     expect(tracker.observe("call", { details: { results: [child()] } })).toEqual([]);
     const events = tracker.observe("call", snapshot(null, { agent: "broken" }, child()));
-    expect(events.map((event) => event.type)).toEqual(["task.started", "task.progress"]);
+    expect(events.map((event) => event.type)).toEqual([
+      "task.started",
+      "task.updated",
+      "task.progress",
+    ]);
     expect(events[0]?.payload.taskId).toBe("pi:baseline");
   });
 
@@ -37,7 +41,7 @@ describe("Pi subagent snapshots", () => {
       }),
     );
     const events = tracker.observe("call", value);
-    expect(events[1]?.payload).toMatchObject({
+    expect(events[2]?.payload).toMatchObject({
       lastToolName: "read",
       typedUsage: { totalTokens: 17 },
     });
@@ -76,7 +80,7 @@ describe("Pi subagent snapshots", () => {
     const events = tracker.observe("second", value);
     expect(events.map((event) => event.type)).toEqual([
       "task.started",
-      "task.progress",
+      "task.updated",
       "task.completed",
     ]);
     expect(events[1]?.payload).toMatchObject({ status: "running" });
@@ -84,6 +88,19 @@ describe("Pi subagent snapshots", () => {
       taskId: "pi:baseline",
       typedUsage: { totalTokens: 34 },
     });
+  });
+
+  it("restores cumulative usage from native tool results without double-counting duplicates", () => {
+    const result = {
+      role: "toolResult",
+      toolName: "subagent",
+      toolCallId: "first",
+      ...snapshot(child({ exitCode: 0 })),
+    };
+    const tracker = makePiSubagents();
+    tracker.restore([result, result, { ...result, toolName: "other" }]);
+    const events = tracker.observe("second", snapshot(child({ exitCode: 0 })));
+    expect(events.at(-1)?.payload).toMatchObject({ typedUsage: { totalTokens: 34 } });
   });
 
   it("gives anonymous parallel children distinct identities and closes missing final results", () => {

@@ -133,6 +133,7 @@ interface PiConnection {
   readonly scope: Scope.Closeable;
   readonly beginTurn: (turnId: TurnId) => void;
   readonly resetTurn: () => void;
+  readonly restoreSubagents: (messages: readonly unknown[]) => void;
   readonly settleHandledPrompt: (turnId: TurnId, state: typeof PiState.Type) => Effect.Effect<void>;
   readonly uiRequests: Map<string, "select" | "confirm" | "input" | "editor">;
   readonly markAbortRequested: () => void;
@@ -669,6 +670,7 @@ function makeConnection(input: {
       activeTurnId = turnId;
     },
     resetTurn,
+    restoreSubagents: subagents.restore,
     settleHandledPrompt: (turnId, state) =>
       activeTurnId === turnId && !turnStartedEmitted && !state.isStreaming && !state.isCompacting
         ? settleTurn()
@@ -890,6 +892,15 @@ export function makePiAdapter(
                 mustExist: requestedResume !== undefined,
               })
               .pipe(Effect.mapError((cause) => adapterError("startSession", cause.detail, cause)));
+            if (requestedResume !== undefined) {
+              const history = yield* connection.request({ type: "get_entries" }).pipe(
+                Effect.flatMap(decodeEntries),
+                Effect.mapError((cause) =>
+                  adapterError("startSession", "Could not restore Pi subagent usage.", cause),
+                ),
+              );
+              connection.restoreSubagents(history.entries.map((entry) => entry.message));
+            }
             const cursor = { sessionFile, sessionId: state.sessionId };
             const timestamp = yield* nowIso;
             const session = buildSession(
