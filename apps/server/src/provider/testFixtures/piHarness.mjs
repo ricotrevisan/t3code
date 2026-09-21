@@ -77,6 +77,10 @@ const pushEntry = (message) => {
   const id = `entry-${state.entries.length + 1}`;
   state.entries.push({ type: "message", id, parentId: state.leafId, message });
   state.leafId = id;
+  NodeFS.writeFileSync(
+    state.sessionFile,
+    state.entries.map((entry) => JSON.stringify(entry)).join("\n"),
+  );
   return id;
 };
 
@@ -109,6 +113,38 @@ const settle = (message) => {
 const runTurn = (message, reply) => {
   emit({ type: "agent_start" });
   emit({ type: "turn_start" });
+  if (message.startsWith("!subagents")) {
+    const toolCallId = `delegation-${state.entries.length}`;
+    const toolName = "subagent";
+    const results = ["baseline", "audit"].map((handle, callIndex) => ({
+      callIndex,
+      agent: "worker",
+      prompt: `Review ${handle}`,
+      session: { id: `child-${handle}`, handle },
+      exitCode: -1,
+      model: "gpt-6-astra",
+      messages: [],
+      usage: { input: 10, output: 5, cacheRead: 3, cacheWrite: 2 },
+    }));
+    const partialResult = () => ({ details: { kind: "pi-subagent", results } });
+    emit({ type: "tool_execution_start", toolCallId, toolName, args: { calls: [] } });
+    emit({ type: "tool_execution_update", toolCallId, toolName, partialResult: partialResult() });
+    emit({ type: "tool_execution_update", toolCallId, toolName, partialResult: partialResult() });
+    results[0].exitCode = 0;
+    results[0].messages = [
+      { role: "assistant", content: [{ type: "text", text: "Baseline checked" }] },
+    ];
+    results[1].exitCode = 1;
+    results[1].errorMessage = "Audit failed";
+    pushEntry({ role: "toolResult", toolCallId, toolName, ...partialResult() });
+    emit({
+      type: "tool_execution_end",
+      toolCallId,
+      toolName,
+      result: partialResult(),
+      isError: true,
+    });
+  }
   if (message.startsWith("!tool")) {
     emit({
       type: "message_update",
@@ -235,15 +271,9 @@ process.stdin.on("data", (chunk) => {
         state.sessionFile = command.sessionPath;
         NodeFS.mkdirSync(NodePath.dirname(state.sessionFile), { recursive: true });
         NodeFS.closeSync(NodeFS.openSync(state.sessionFile, "a"));
-        state.entries = [
-          {
-            type: "message",
-            id: "entry-seed",
-            parentId: null,
-            message: { role: "user", content: "seeded history" },
-          },
-        ];
-        state.leafId = "entry-seed";
+        const saved = NodeFS.readFileSync(state.sessionFile, "utf8").trim();
+        state.entries = saved ? saved.split("\n").map((line) => JSON.parse(line)) : [];
+        state.leafId = state.entries.at(-1)?.id ?? null;
         respond(id, type, true, { cancelled: false });
         break;
       }
