@@ -207,7 +207,11 @@ const program = Effect.gen(function* () {
       ],
     })
     .pipe(Effect.result);
-  check("unsupported attachments are rejected", attachmentTurn._tag === "Failure");
+  check(
+    "missing file attachments are rejected",
+    attachmentTurn._tag === "Failure" &&
+      attachmentTurn.failure.message.includes("attachment file does not exist"),
+  );
   const emptyTurn = yield* instance.adapter
     .sendTurn({
       threadId: "pi-ci-thread",
@@ -244,7 +248,7 @@ const program = Effect.gen(function* () {
     "steer stays in one turn",
     steeredTurn.turnId === heldTurn.turnId && steered.at(-1)?.turnId === heldTurn.turnId,
   );
-  check("image attachments advertised", pkg.manifest.capabilities.includes("input.attachments"));
+  check("attachments advertised", pkg.manifest.capabilities.includes("input.attachments"));
   const fileSystem = yield* FileSystem.FileSystem;
   const config = yield* ServerConfig;
   const imageData =
@@ -279,9 +283,11 @@ const program = Effect.gen(function* () {
         .flatMap((turn) => turn.items)
         .findLast((item) => item.role === "user");
       check(
-        `image content reaches Pi: ${message || "image-only"}`,
+        `attachment content reaches Pi: ${message || "image-only"}`,
         JSON.stringify(userMessage?.content) ===
-          JSON.stringify([{ type: "text", text: message }, ...expected]),
+          JSON.stringify(
+            expected.length > 0 ? [{ type: "text", text: message }, ...expected] : message,
+          ),
       );
     });
   for (const message of ["describe these images", undefined]) {
@@ -301,6 +307,48 @@ const program = Effect.gen(function* () {
     );
     yield* checkImageMessage(message ?? "");
   }
+  const files = [
+    { name: "contacts.csv", mimeType: "text/csv", content: "email,confirmed\na@example.com,false" },
+    { name: "document.pdf", mimeType: "application/pdf", content: "%PDF-1.7" },
+    { name: "unknown.bin", mimeType: "application/octet-stream", content: "\u0000\u0001" },
+  ];
+  const fileAttachments = files.map((file, index) => ({
+    type: "file",
+    id: `pi-file-${index}`,
+    name: file.name,
+    mimeType: file.mimeType,
+    sizeBytes: Buffer.byteLength(file.content),
+  }));
+  const fileReferences = [];
+  for (const [index, attachment] of fileAttachments.entries()) {
+    const path = resolveAttachmentPath({ attachmentsDir: config.attachmentsDir, attachment });
+    yield* fileSystem.writeFile(path, Buffer.from(files[index].content));
+    fileReferences.push({
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      path: yield* fileSystem.realPath(path),
+    });
+  }
+  const withFiles = (message) =>
+    `${message}\n\nAttached files available on disk (use tools to read as needed):\n${JSON.stringify(fileReferences)}`;
+  for (const message of ["inspect these files", undefined]) {
+    yield* complete(message, { attachments: fileAttachments });
+    yield* checkImageMessage(withFiles(message ?? ""), []);
+  }
+  yield* complete("mixed uploads", { attachments: [...fileAttachments, ...images] });
+  yield* checkImageMessage(withFiles("mixed uploads"));
+  const fileStarted = yield* collectUntil((event) => event.type === "content.delta");
+  const fileActive = yield* send("!hold file steering");
+  yield* drain(fileStarted);
+  const fileCompleted = yield* collectUntil(terminal);
+  const fileSteered = yield* send(undefined, { attachments: fileAttachments });
+  const fileEvents = yield* drain(fileCompleted);
+  check(
+    "file-only steering retains active turn",
+    fileSteered.turnId === fileActive.turnId && fileEvents.at(-1)?.turnId === fileActive.turnId,
+  );
+  yield* checkImageMessage(withFiles(""), []);
+
   // Pi echoes user images in its events; a normal upload can exceed the old 2 MB RPC line cap.
   const largeBytes = Buffer.concat([bytes, Buffer.alloc(1_600_000)]);
   const largeImage = { ...images[0], id: "pi-large", sizeBytes: largeBytes.length };
