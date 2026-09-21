@@ -9,6 +9,8 @@ import { ServerConfig } from "../../config.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { makeExternalProviderDriver } from "../ExternalProviderDriver.ts";
 import { makeExternalProviderProcessSupervisor } from "../ExternalProviderProcessSupervisor.ts";
+import { runtimeEventToActivities } from "../../orchestration/Layers/ProviderRuntimeIngestion.ts";
+import { foldSubagentActivities } from "../../../../../packages/client-runtime/src/state/subagentRuntime.ts";
 const result = { checks: [], allEvents: [] };
 const check = (name, ok, detail) => {
   result.checks.push({ name, ok, ...(detail === void 0 ? {} : { detail }) });
@@ -372,6 +374,56 @@ const program = Effect.gen(function* () {
       missingImage.failure.message.includes("attachment file does not exist") &&
       JSON.stringify(beforeFailure) === JSON.stringify(afterFailure),
   );
+  const agentActivities = new Map();
+  for (let run = 1; run <= 4; run++) {
+    if (run === 4) {
+      const cursor = (yield* instance.adapter.listSessions()).find(
+        (session) => session.threadId === "pi-ci-thread",
+      ).resumeCursor;
+      yield* instance.adapter.stopSession("pi-ci-thread");
+      yield* instance.adapter.startSession({
+        threadId: "pi-ci-thread",
+        runtimeMode: "full-access",
+        resumeCursor: cursor,
+      });
+    }
+    const children = yield* complete("!subagents");
+    // Match persisted latest-state replacement, not an append-only event list.
+    for (const activity of children.flatMap((event) => runtimeEventToActivities(event))) {
+      agentActivities.delete(activity.id);
+      agentActivities.set(activity.id, activity);
+    }
+    const roster = foldSubagentActivities([...agentActivities.values()]);
+    check(
+      "Pi agents reach the client roster",
+      roster.length === 2 &&
+        roster[0].title === "baseline" &&
+        roster[0].status === "completed" &&
+        roster[1].status === "failed",
+    );
+    check(
+      "Pi session reactivation updates the existing row",
+      roster[0]?.activationCount === run && roster[0]?.usage?.totalTokens === run * 20,
+    );
+    const starts = children.filter((event) => event.type === "task.started");
+    const progress = children.filter((event) => event.type === "task.progress");
+    const ends = children.filter((event) => event.type === "task.completed");
+    check(
+      "Pi parallel children have stable identities",
+      starts.length === 2 && starts[0].payload.taskId === "pi:child-baseline",
+    );
+    check("Pi heartbeat is deduplicated", progress.length === 2);
+    check(
+      "Pi children settle independently",
+      ends.length === 2 &&
+        ends[0].payload.status === "completed" &&
+        ends[1].payload.status === "failed",
+    );
+    check(
+      "Pi usage accumulates across reused sessions",
+      ends[0]?.payload.typedUsage?.totalTokens === run * 20,
+    );
+  }
   const tool = yield* complete("!tool ls");
   check(
     "tool item lifecycle",
