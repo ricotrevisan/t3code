@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { makePiSubagents } from "./PiSubagents.ts";
 
@@ -101,6 +105,45 @@ describe("Pi subagent snapshots", () => {
     tracker.restore([result, result, { ...result, toolName: "other" }]);
     const events = tracker.observe("second", snapshot(child({ exitCode: 0 })));
     expect(events.at(-1)?.payload).toMatchObject({ typedUsage: { totalTokens: 34 } });
+  });
+
+  it("streams native history, ignoring unrelated and incomplete records", async () => {
+    const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-subagent-history-"));
+    try {
+      const path = NodePath.join(dir, "session.jsonl");
+      const result = (toolCallId: string) =>
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolName: "subagent",
+            toolCallId,
+            ...snapshot(child({ exitCode: 0 })),
+          },
+        });
+      await NodeFSP.writeFile(
+        path,
+        [
+          result("first"),
+          ...Array.from({ length: 1000 }, () =>
+            JSON.stringify({
+              type: "message",
+              message: { role: "user", content: "x".repeat(1024) },
+            }),
+          ),
+          result("second"),
+          result("second"),
+          '{"partial":',
+        ].join("\n"),
+      );
+      const tracker = makePiSubagents();
+      await tracker.restoreFile(path);
+      expect(
+        tracker.observe("third", snapshot(child({ exitCode: 0 }))).at(-1)?.payload,
+      ).toMatchObject({ typedUsage: { totalTokens: 51 } });
+    } finally {
+      await NodeFSP.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("gives anonymous parallel children distinct identities and closes missing final results", () => {

@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeReadline from "node:readline";
 import {
   RuntimeTaskId,
   type ProviderRuntimeEvent,
@@ -230,20 +233,38 @@ export function makePiSubagents() {
     }),
   );
 
+  const restored = new Set<string>();
+  const restoreMessage = (message: unknown) => {
+    const decoded = decodeToolResult(message);
+    if (Exit.isFailure(decoded) || restored.has(decoded.value.toolCallId)) return;
+    const id = decoded.value.toolCallId;
+    restored.add(id);
+    observe(id, message);
+    finish(id, "stopped", "Restored interrupted subagent");
+  };
+
   return {
     // Native tool results survive connection recreation and compaction. Rebuild
     // totals without re-emitting lifecycle events already persisted by T3.
     restore: (messages: readonly unknown[]) => {
-      const results = new Map<string, unknown>();
-      for (const message of messages) {
-        const decoded = decodeToolResult(message);
-        if (Exit.isSuccess(decoded)) results.set(decoded.value.toolCallId, message);
-      }
-      totals.clear();
-      calls.clear();
-      for (const [id, message] of results) {
-        observe(id, message);
-        finish(id, "stopped", "Restored interrupted subagent");
+      for (const message of messages) restoreMessage(message);
+    },
+    // Only pass a session path validated by the host. Stream records rather than
+    // get_entries: that RPC returns the entire history in a single bounded line.
+    restoreFile: async (sessionFile: string, signal?: AbortSignal) => {
+      const stream = NodeFS.createReadStream(sessionFile, { encoding: "utf8", signal });
+      const lines = NodeReadline.createInterface({ input: stream, crlfDelay: Infinity });
+      const decodeEntry = Schema.decodeUnknownExit(
+        Schema.fromJsonString(Schema.Struct({ message: Schema.optional(Schema.Unknown) })),
+      );
+      try {
+        for await (const line of lines) {
+          const entry = decodeEntry(line);
+          if (Exit.isSuccess(entry)) restoreMessage(entry.value.message);
+        }
+      } finally {
+        lines.close();
+        stream.destroy();
       }
     },
     observe,
