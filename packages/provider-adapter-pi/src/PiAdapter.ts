@@ -1115,24 +1115,36 @@ export function makePiAdapter(
       sendTurn: (turnInput) =>
         Effect.gen(function* () {
           const attachments = turnInput.attachments ?? [];
-          if (attachments.some((attachment) => attachment.type !== "image")) {
-            return yield* adapterError("sendTurn", "Pi only supports image attachments.");
-          }
-          const message = turnInput.input ?? "";
+          let message = turnInput.input ?? "";
           if (!message.trim() && attachments.length === 0) {
-            return yield* adapterError("sendTurn", "Pi requires text or at least one image.");
+            return yield* adapterError("sendTurn", "Pi requires text or at least one attachment.");
           }
           const entry = yield* requireEntry(turnInput.threadId, "sendTurn");
-          const images = yield* Effect.forEach(attachments, (attachment) =>
-            host.attachments.read(attachment).pipe(
-              Effect.map(({ bytes }) => ({
+          const images = [];
+          const files = [];
+          for (const attachment of attachments) {
+            const { bytes, path } = yield* host.attachments
+              .read(attachment)
+              .pipe(Effect.mapError((cause) => adapterError("sendTurn", cause.detail, cause)));
+            if (attachment.type === "image") {
+              images.push({
                 type: "image" as const,
                 data: Encoding.encodeBase64(bytes),
                 mimeType: attachment.mimeType,
-              })),
-              Effect.mapError((cause) => adapterError("sendTurn", cause.detail, cause)),
-            ),
-          );
+              });
+            } else {
+              files.push({ name: attachment.name, mimeType: attachment.mimeType, path });
+            }
+          }
+          // RPC has no generic file blocks; Pi accesses these uploads through its tools.
+          if (files.length > 0) {
+            const references = yield* encodeJson(files).pipe(
+              Effect.mapError((cause) =>
+                adapterError("sendTurn", "Could not encode file references.", cause),
+              ),
+            );
+            message += `\n\nAttached files available on disk (use tools to read as needed):\n${references}`;
+          }
           const prompt = { message, ...(images.length > 0 ? { images } : {}) };
           const activeTurnId = entry.connection.activeTurnId;
           if (activeTurnId !== undefined) {
