@@ -24,14 +24,15 @@ concurrency:
 jobs:
   fingerprint:
     name: Native fingerprint diff
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       issues: write
       pull-requests: write
     env:
       APP_VARIANT: production
-      NODE_OPTIONS: --max-old-space-size=8192
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - name: Checkout
         uses: actions/checkout@v6

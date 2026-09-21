@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   deploy_relay:
+    if: github.repository == 'pingdotgg/t3code'
     name: Deploy production relay
     # A manual run from another branch would deploy that branch to production.
     if: github.ref == 'refs/heads/main'

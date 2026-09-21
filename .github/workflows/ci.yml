@@ -1,6 +1,12 @@
 name: CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish a fork prerelease after checks and builds pass (main only)
+        type: boolean
+        default: false
   pull_request:
   push:
     branches:
@@ -16,8 +22,8 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -55,18 +61,27 @@ jobs:
       - name: Typecheck
         run: vpr typecheck
 
-      - uses: ./.github/actions/setup-apt-mirrors
-
       - name: Install browser secret helper build libraries
-        run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Build desktop pipeline
         run: vp run build:desktop
 
       - name: Verify preload bundle output
         run: node apps/desktop/scripts/verify-preload-bundle.mjs
+
+      - name: Validate GitHub Actions workflows
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: >-
+            -color
+            .github/workflows/ci.yml
+            .github/workflows/fork-build.yml
+            .github/workflows/mobile-fingerprint-check.yml
+            .github/workflows/windows-tests.yml
+            .github/workflows/thread-transfer-report.yml
+            .github/workflows/issue-labels.yml
+            .github/workflows/pr-size.yml
 
   # Everything except `t3` (apps/server). `--parallel` drops the package
   # dependency ordering that `vp run` applies by default: these `test` tasks
@@ -75,8 +90,8 @@ jobs:
   # limit stays at the default 4 so peak load per runner is unchanged.
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -96,12 +111,8 @@ jobs:
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
-      - uses: ./.github/actions/setup-apt-mirrors
-
       - name: Install browser secret helper build libraries
-        run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
 
       - name: Test preview artifact validation
         run: python3 -B .github/scripts/stage-preview-bundle.test.py
@@ -118,8 +129,8 @@ jobs:
   # isolation that flag buys is preserved exactly.
   test_server:
     name: Test Server ${{ matrix.shard }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -185,8 +196,8 @@ jobs:
   # for checks that take under 3s, on the critical path of every PR.
   rust:
     name: Rust
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -213,13 +224,11 @@ jobs:
             cargo test --locked --manifest-path "native/$crate/Cargo.toml"
           done
 
-  # The static analysis below needs a macOS runner, which bills ~6.7x a Linux
-  # minute, so gate it on the native sources it actually lints instead of paying
-  # for it on every push. Detection is API-only (no checkout) and fails open: if
-  # the diff cannot be resolved, the lint runs.
+  # Gate the macOS-only analysis on the sources it actually lints. Detection
+  # is API-only (no checkout) and fails open if the diff cannot be resolved.
   mobile_native_changes:
     name: Mobile Native Changes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -251,7 +260,9 @@ jobs:
           # paths removes a lint input just like editing it.
           row='[.filename, (.previous_filename // empty)] | @tsv'
 
-          if [[ -n "${PR_NUMBER}" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            fail_open "Manual runs check all native sources."
+          elif [[ -n "${PR_NUMBER}" ]]; then
             # The PR files endpoint stops at 3000 files and pagination cannot
             # extend it, so cross-check against the count the PR itself reports.
             expected=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.changed_files') \
@@ -297,8 +308,8 @@ jobs:
     # Skip only on an explicit "no": a gate job that failed or errored leaves the
     # output empty, and that must run the lint rather than silently skip it.
     if: ${{ !cancelled() && needs.mobile_native_changes.outputs.changed != 'false' }}
-    runs-on: blacksmith-6vcpu-macos-26
-    timeout-minutes: 10
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -325,8 +336,8 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -347,3 +358,25 @@ jobs:
 
       - name: Exercise release-only workflow steps
         run: node scripts/release-smoke.ts
+
+  fork_build:
+    name: Fork artifacts
+    needs:
+      - check
+      - test
+      - test_server
+      - rust
+      - mobile_native_changes
+      - mobile_native_static_analysis
+      - release_smoke
+    # Native lint can legitimately be skipped. Failed/cancelled checks cannot.
+    if: >-
+      !cancelled() && !failure() &&
+      github.repository == 'ricotrevisan/t3code' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/fork-build.yml
+    with:
+      publish_release: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
