@@ -109,6 +109,37 @@ const settle = (message) => {
 const runTurn = (message, reply) => {
   emit({ type: "agent_start" });
   emit({ type: "turn_start" });
+  if (message.startsWith("!subagents")) {
+    const toolCallId = `delegation-${state.entries.length}`;
+    const toolName = "subagent";
+    const results = ["baseline", "audit"].map((handle, callIndex) => ({
+      callIndex,
+      agent: "worker",
+      prompt: `Review ${handle}`,
+      session: { id: `child-${handle}`, handle },
+      exitCode: -1,
+      model: "gpt-6-astra",
+      messages: [],
+      usage: { input: 10, output: 5, cacheRead: 3, cacheWrite: 2 },
+    }));
+    const partialResult = () => ({ details: { kind: "pi-subagent", results } });
+    emit({ type: "tool_execution_start", toolCallId, toolName, args: { calls: [] } });
+    emit({ type: "tool_execution_update", toolCallId, toolName, partialResult: partialResult() });
+    emit({ type: "tool_execution_update", toolCallId, toolName, partialResult: partialResult() });
+    results[0].exitCode = 0;
+    results[0].messages = [
+      { role: "assistant", content: [{ type: "text", text: "Baseline checked" }] },
+    ];
+    results[1].exitCode = 1;
+    results[1].errorMessage = "Audit failed";
+    emit({
+      type: "tool_execution_end",
+      toolCallId,
+      toolName,
+      result: partialResult(),
+      isError: true,
+    });
+  }
   if (message.startsWith("!tool")) {
     emit({
       type: "message_update",

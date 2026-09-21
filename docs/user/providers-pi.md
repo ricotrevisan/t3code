@@ -32,7 +32,10 @@ The Pi connection supports:
 - interrupts;
 - provider-qualified model selection and thinking-level selection;
 - reasoning, tool lifecycle, and token-usage streaming;
-- Pi select, confirm, input, and editor questions.
+- Pi select, confirm, input, and editor questions;
+- subagents launched by the `@mjakl/pi-subagent` extension in the Agents panel, with per-child status, model, activity, and reported token usage.
+
+Named subagent sessions reuse their panel row when given more work. Parallel calls appear separately, and each child can finish or fail independently. This requires structured subagent progress from the extension; arbitrary tools named “subagent” do not create agent rows. Previously recorded tool-only activity is not converted into agent history.
 
 T3 waits for Pi's `agent_settled` event before marking a turn complete. This keeps tool loops and retries inside one T3 turn.
 
