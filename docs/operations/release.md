@@ -2,9 +2,39 @@
 
 > For maintainers. Using T3 Code? See [docs/user](../user/).
 
-This document covers the unified release workflow for stable and nightly desktop releases.
+## Personal fork builds
 
-## What the workflow does
+In `ricotrevisan/t3code`, [CI](../../.github/workflows/ci.yml) runs checks, tests, and
+build verification on PRs and `main`. After successful `main` checks,
+[Fork Builds](../../.github/workflows/fork-build.yml) produces Linux x64 server archives
+and macOS Apple Silicon desktop/server artifacts. Download them from the CI run;
+artifacts include commit provenance and SHA-256 checksums and expire after 14 days.
+There are no Windows installers, Linux desktop installers, or mobile store/OTA builds.
+
+To keep a build as a GitHub prerelease, manually run **CI** on `main` with
+`publish_release=true`. This checks and rebuilds the selected commit before publishing
+under a `fork-v…` tag. Merely pushing a tag does not release the fork. Publication needs
+only the workflow's GitHub token; it never publishes npm/AUR packages, deploys hosted
+services, or changes a running installation.
+
+These are personal preview builds, not signed production releases. macOS artifacts are
+ad-hoc signed, not notarized, and Gatekeeper may block them. The desktop replaces the
+existing app and shares its identity and data; it is not a side-by-side installation.
+Back up before installing. Preview builds have no desktop auto-update feed. Install
+server archives manually after verifying their checksums; do not use upstream's
+installer or updater to manage them. Builds contain no hosted T3 Connect configuration;
+connect directly to your servers instead.
+
+Mobile fingerprint/native checks and the manual Windows **test** lane remain available.
+Upstream deployment, publishing, signed-preview, screenshot, webhook, and vouch workflows
+are repository-gated and do not run in this fork. Keep those gates when syncing upstream.
+
+## Upstream release checklist
+
+The rest of this document describes the upstream-only stable/nightly release pipeline,
+not the personal fork workflow above.
+
+### What the workflow does
 
 - Workflow: `.github/workflows/release.yml`
 - Triggers:
