@@ -36,6 +36,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import { makePiSubagents } from "./PiSubagents.ts";
 import type { PiProviderAdapterConfig } from "./index.ts";
 
 const PROVIDER = ProviderDriverKind.make("piRpc");
@@ -278,6 +279,7 @@ function makeConnection(input: {
   readonly scope: Scope.Closeable;
 }): PiConnection {
   const child = input.process;
+  const subagents = makePiSubagents();
   const pending = new Map<string, Deferred.Deferred<unknown, ProviderAdapterV1Error>>();
   const uiRequests = new Map<string, "select" | "confirm" | "input" | "editor">();
   let buffer = "";
@@ -345,6 +347,7 @@ function makeConnection(input: {
         );
       }
       uiRequests.clear();
+      for (const event of subagents.interrupt()) yield* pushEvent(withTurn(event));
       resetTurn();
       yield* pushEvent(terminal);
     });
@@ -364,6 +367,21 @@ function makeConnection(input: {
             },
           }),
         );
+
+  const emitSubagents = (toolCallId: string, toolName: string, value: unknown, ended = false) =>
+    Effect.gen(function* () {
+      if (toolName !== "subagent") return;
+      for (const event of subagents.observe(toolCallId, value)) yield* pushEvent(withTurn(event));
+      if (ended) {
+        for (const event of subagents.finish(
+          toolCallId,
+          abortRequested ? "stopped" : "failed",
+          "Subagent ended without a final result",
+        )) {
+          yield* pushEvent(withTurn(event));
+        }
+      }
+    });
 
   const handlePiEvent = (raw: unknown): Effect.Effect<void> => {
     if (!isRecord(raw)) return Effect.void;
@@ -419,6 +437,7 @@ function makeConnection(input: {
         const toolName = stringField(raw, "toolName");
         if (toolCallId === undefined || toolName === undefined) return Effect.void;
         return emitTurnStarted().pipe(
+          Effect.andThen(emitSubagents(toolCallId, toolName, raw.partialResult)),
           Effect.andThen(
             pushEvent(
               withTurn({
@@ -444,6 +463,7 @@ function makeConnection(input: {
         const toolName = stringField(raw, "toolName");
         if (toolCallId === undefined || toolName === undefined) return Effect.void;
         return emitTurnStarted().pipe(
+          Effect.andThen(emitSubagents(toolCallId, toolName, raw.result, true)),
           Effect.andThen(
             pushEvent(
               withTurn({
@@ -511,6 +531,7 @@ function makeConnection(input: {
 
   const failPending = Effect.gen(function* () {
     transportClosed = true;
+    for (const event of subagents.interrupt()) yield* pushEvent(withTurn(event));
     for (const reply of pending.values()) {
       yield* Deferred.fail(
         reply,
