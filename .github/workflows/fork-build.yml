@@ -1,0 +1,224 @@
+name: Fork Builds
+
+# Called only after CI has passed for this exact commit. No upstream services,
+# signing credentials, npm publication, or installation on live hosts.
+on:
+  workflow_call:
+    inputs:
+      publish_release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    if: >-
+      github.repository == 'ricotrevisan/t3code' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve fork version
+        id: version
+        shell: bash
+        # The existing preview version policy suppresses desktop update feeds.
+        # Run ID + attempt is unique even when a build is rerun.
+        run: echo "version=0.0.0-preview.$(date -u +%Y%m%d).${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            platform: linux
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+          - target: darwin-arm64
+            platform: mac
+            runner: macos-15
+            rust_target: aarch64-apple-darwin
+    env:
+      FORK_VERSION: ${{ needs.metadata.outputs.version }}
+      FORK_TARGET: ${{ matrix.target }}
+      NODE_OPTIONS: --max-old-space-size=6144
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ricotrevisan/t3code
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+              - --filter=@t3tools/desktop...
+              - --filter=@t3tools/scripts...
+
+      - name: Verify native build host
+        run: node -e 'if (process.platform + "-" + process.arch !== process.env.FORK_TARGET) throw new Error("Runner architecture does not match artifact target")'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "$FORK_VERSION"
+
+      - name: Build server and web client
+        if: matrix.platform == 'linux'
+        run: vp run --filter t3 build
+
+      - name: Build resource monitor
+        if: matrix.platform == 'linux'
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target "${{ matrix.rust_target }}"
+
+      # The packager also builds the server, web client and resource monitor.
+      # Without --signed it signs ad hoc, and never contacts Apple's services.
+      - name: Build Apple Silicon desktop
+        if: matrix.platform == 'mac'
+        run: vp run dist:desktop:artifact --platform mac --target dmg --arch arm64 --build-version "$FORK_VERSION" --verbose
+
+      - name: Build CLI single-executable
+        env:
+          # Keep aligned with SEA_NODE_VERSION in apps/server/vite.config.ts.
+          VP_NODE_VERSION: "26.8.2"
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Stage resource monitor
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/resource-monitor/$FORK_TARGET"
+          cp "native/resource-monitor/target/${{ matrix.rust_target }}/release/t3-resource-monitor" \
+            "$RUNNER_TEMP/resource-monitor/$FORK_TARGET/"
+
+      - name: Build self-contained server archive
+        shell: bash
+        run: |
+          node scripts/build-cli-archive.ts \
+            --platform "${{ matrix.platform }}" \
+            --arch "${FORK_TARGET##*-}" \
+            --version "$FORK_VERSION" \
+            --resource-monitor-dir "$RUNNER_TEMP/resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test server archive
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$FORK_VERSION"
+
+      - name: Collect artifacts and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fork-artifacts
+          cp release-cli/*.tar.gz fork-artifacts/
+          if [[ "$FORK_TARGET" == darwin-arm64 ]]; then
+            cp release/*.dmg release/*.zip fork-artifacts/
+            # A preview must never contain a desktop auto-update feed.
+            unzip -Z1 release/*.zip > "$RUNNER_TEMP/desktop-archive-files.txt"
+            if grep -q '/app-update.yml$' "$RUNNER_TEMP/desktop-archive-files.txt"; then
+              echo "Unexpected auto-update feed in fork desktop build" >&2
+              exit 1
+            fi
+          fi
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const env = process.env;
+          const directory = 'fork-artifacts';
+          const files = fs.readdirSync(directory).sort();
+          const checksums = files.map(file => {
+            const hash = crypto.createHash('sha256').update(fs.readFileSync(`${directory}/${file}`)).digest('hex');
+            return `${hash}  ${file}\n`;
+          }).join('');
+          fs.writeFileSync(`${directory}/SHA256SUMS-${env.FORK_TARGET}`, checksums);
+          fs.writeFileSync(`${directory}/provenance-${env.FORK_TARGET}.json`, JSON.stringify({
+            repository: env.GITHUB_REPOSITORY,
+            commit: env.GITHUB_SHA,
+            version: env.FORK_VERSION,
+            target: env.FORK_TARGET,
+            run: `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`,
+            attempt: env.GITHUB_RUN_ATTEMPT,
+            signing: env.FORK_TARGET === 'darwin-arm64' ? 'ad-hoc, not notarized' : 'unsigned',
+          }, null, 2) + '\n');
+          NODE
+
+      - name: Upload fork artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: fork-${{ matrix.target }}-${{ github.sha }}
+          path: fork-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: true
+
+  publish:
+    name: Publish manual fork prerelease
+    needs: [metadata, build]
+    if: inputs.publish_release && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FORK_VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - name: Download tested artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: fork-*-${{ github.sha }}
+          path: fork-artifacts
+          merge-multiple: true
+
+      - name: Verify checksums
+        working-directory: fork-artifacts
+        run: |
+          cat SHA256SUMS-linux-x64 SHA256SUMS-darwin-arm64 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Publish prerelease without an update feed
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Personal fork build of ${GITHUB_SHA}.
+
+          Targets: Linux x64 server, macOS Apple Silicon desktop and server.
+          macOS builds are ad-hoc signed, not notarized; Gatekeeper may block them.
+          Desktop is a replacement for the existing app, not a side-by-side install:
+          it uses the same app identity and data. Back up before installing.
+          No desktop auto-update feed, npm packages, or mobile OTA updates are published.
+          No hosted T3 Connect configuration is included; use direct server connections.
+          Installation and deployment are manual. The CLI archive is self-contained.
+          Verify downloads against SHA256SUMS. Do not use the upstream installer/updater
+          to manage these fork builds.
+
+          Build: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          gh release create "fork-v$FORK_VERSION" fork-artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Fork $FORK_VERSION (${GITHUB_SHA:0:12})" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --prerelease --latest=false
