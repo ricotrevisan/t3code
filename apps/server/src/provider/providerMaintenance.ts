@@ -293,10 +293,19 @@ export function homebrewOwnershipFromCommandPath(
   };
 }
 
-/** The version directory in the keg path; a display value for advisories. */
-export function homebrewKegVersionFromCommandPath(realCommandPath: string): string | null {
+/** The version directory in the keg path, normalized for advisory comparisons. */
+export function homebrewKegVersionFromCommandPath(
+  realCommandPath: string,
+  ownership?: HomebrewOwnership,
+): string | null {
   const match = HOMEBREW_KEG_PATTERN.exec(realCommandPath.replaceAll("\\", "/"));
-  return match ? match[4]! : null;
+  const raw = match ? nonEmptyString(match[4]) : null;
+  if (!raw || !ownership) {
+    return raw;
+  }
+  // Homebrew appends packaging metadata that does not change the upstream
+  // version: cask build identifiers use commas and formula revisions use `_N`.
+  return ownership.kind === "cask" ? raw.split(",", 1)[0]! : raw.replace(/_\d+$/, "");
 }
 
 const HomebrewInfoResponse = Schema.Struct({
@@ -494,7 +503,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       updateCommand: ["brew", ...args].join(" "),
       env: context.env,
       latestVersion: info ? parseHomebrewLatestVersion(info, homebrew) : null,
-      installedVersion: homebrewKegVersionFromCommandPath(context.realCommandPath),
+      installedVersion: homebrewKegVersionFromCommandPath(context.realCommandPath, homebrew),
     });
   }
 

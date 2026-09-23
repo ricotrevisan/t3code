@@ -644,9 +644,14 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
   );
 
   it.effect.each([
-    { directory: "Caskroom", name: "package-tool", kind: "cask" },
-    { directory: "Cellar", name: "package-tool", kind: "formula" },
-    { directory: "Cellar", name: "package-tool@latest", kind: "formula" },
+    { directory: "Caskroom", name: "package-tool", kind: "cask", kegVersion: "0.148.0,42" },
+    { directory: "Cellar", name: "package-tool", kind: "formula", kegVersion: "0.148.0_1" },
+    {
+      directory: "Cellar",
+      name: "package-tool@latest",
+      kind: "formula",
+      kegVersion: "0.148.0_1",
+    },
   ] as const)(
     "upgrades the owning Homebrew $kind $name through an executable alias",
     (fixture) =>
@@ -659,7 +664,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           tempDir,
           fixture.directory,
           fixture.name,
-          "0.148.0",
+          fixture.kegVersion,
           "package-tool-0.148.0",
         );
         writeExecutable(ownedBinary);
