@@ -754,12 +754,10 @@ export function useThreadOutboxDrain(): void {
       modelSelection: ModelSelection,
       runtimeMode: RuntimeMode,
     ) => {
-      const supportedRuntimeModes = serverConfigs
+      const provider = serverConfigs
         .get(queuedMessage.environmentId)
-        ?.providers.find(
-          (provider) => provider.instanceId === modelSelection.instanceId,
-        )?.supportedRuntimeModes;
-      return coerceRuntimeModeToSupported(runtimeMode, supportedRuntimeModes);
+        ?.providers.find((provider) => provider.instanceId === modelSelection.instanceId);
+      return coerceRuntimeModeToSupported(runtimeMode, provider);
     },
     [serverConfigs],
   );

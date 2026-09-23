@@ -21,7 +21,7 @@
  *
  * @module provider/Drivers/CodexDriver
  */
-import { CodexSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { ALL_PROVIDER_RUNTIME_MODES, CodexSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -116,6 +116,7 @@ export type CodexDriverEnv =
 export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
+    runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
     displayName: "Codex",
     supportsMultipleInstances: true,
   },
@@ -135,6 +136,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const homeLayout = yield* resolveCodexHomeLayout(config);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
+        runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
         instanceId,
         driverKind: DRIVER_KIND,
         displayName,

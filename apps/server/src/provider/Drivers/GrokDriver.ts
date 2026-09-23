@@ -1,4 +1,4 @@
-import { GrokSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { ALL_PROVIDER_RUNTIME_MODES, GrokSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -85,6 +85,7 @@ export type GrokDriverEnv =
 export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
+    runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
     displayName: "Grok",
     supportsMultipleInstances: true,
   },
@@ -106,6 +107,7 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         instanceId,
       });
       const stampIdentity = withInstanceIdentity({
+        runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
         instanceId,
         driverKind: DRIVER_KIND,
         displayName,

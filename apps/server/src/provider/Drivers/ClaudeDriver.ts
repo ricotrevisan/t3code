@@ -12,7 +12,7 @@
  *
  * @module provider/Drivers/ClaudeDriver
  */
-import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { ALL_PROVIDER_RUNTIME_MODES, ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
@@ -106,6 +106,7 @@ export type ClaudeDriverEnv =
 export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
+    runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
     displayName: "Claude",
     supportsMultipleInstances: true,
   },
@@ -154,6 +155,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           : undefined,
       );
       const stampIdentity = withInstanceIdentity({
+        runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
         instanceId,
         driverKind: DRIVER_KIND,
         displayName,
