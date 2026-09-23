@@ -26,6 +26,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeExternalProviderAdapterHostV2 } from "../ExternalProviderAdapterHost.ts";
 const decodeRequestLog = Schema.decodeUnknownSync(
@@ -41,6 +42,7 @@ const decodeRequestLog = Schema.decodeUnknownSync(
         confirmed: Schema.optional(Schema.Boolean),
         cancelled: Schema.optional(Schema.Boolean),
         message: Schema.optional(Schema.String),
+        images: Schema.optional(Schema.Array(Schema.Unknown)),
         value: Schema.optional(Schema.String),
       }),
     }),
@@ -912,6 +914,58 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
 
       yield* adapter.stopSession(threadId);
       yield* Fiber.interrupt(eventFiber);
+    }),
+  );
+
+  it.effect("passes video attachments by path instead of encoding them as images", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const requestLogPath = NodePath.join(config.baseDir, "prime-video-requests.ndjson");
+      const binaryPath = yield* Effect.promise(() =>
+        makeMockPrimeWrapper({ T3_PRIME_MOCK_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(binaryPath);
+      const threadId = ThreadId.make("prime-video-thread");
+      const attachment = {
+        type: "file" as const,
+        id: "prime-video-attachment",
+        name: "screen-recording.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: 4,
+      };
+      const attachmentPath = NodePath.join(
+        config.attachmentsDir,
+        attachmentRelativePath(attachment)!,
+      );
+      yield* Effect.promise(() =>
+        NodeFSP.mkdir(NodePath.dirname(attachmentPath), { recursive: true }),
+      );
+      yield* Effect.promise(() => NodeFSP.writeFile(attachmentPath, Uint8Array.from([1, 2, 3, 4])));
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Diagnose this recording",
+        attachments: [attachment],
+      });
+
+      const recorded = (yield* Effect.promise(() => NodeFSP.readFile(requestLogPath, "utf8")))
+        .trim()
+        .split("\n")
+        .map((line) => decodeRequestLog(line));
+      const prompt = recorded.find((entry) => entry.command.type === "prompt");
+      assert.include(prompt?.command.message ?? "", "Diagnose this recording");
+      assert.include(prompt?.command.message ?? "", attachmentPath);
+      assert.include(prompt?.command.message ?? "", "video-analysis skill");
+      assert.isUndefined(prompt?.command.images);
+
+      yield* adapter.stopSession(threadId);
     }),
   );
 
