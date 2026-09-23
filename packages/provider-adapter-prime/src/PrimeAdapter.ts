@@ -9,6 +9,7 @@ import {
 } from "@t3tools/provider-adapter";
 import {
   EventId,
+  isProviderSendTurnSupportedImageMimeType,
   type ModelSelection,
   type ProviderApprovalDecision,
   ProviderDriverKind,
@@ -1826,14 +1827,10 @@ export function makePrimeAdapter(
         return session;
       }).pipe(Effect.scoped);
 
-    const buildTurnAttachments = (turnInput: ProviderSendTurnInput) =>
+    const buildTurnInput = (turnInput: ProviderSendTurnInput) =>
       Effect.forEach(turnInput.attachments ?? [], (attachment) =>
         host.attachments.read(attachment).pipe(
-          Effect.map(({ bytes }) => ({
-            type: "image" as const,
-            data: Encoding.encodeBase64(bytes),
-            mimeType: attachment.mimeType,
-          })),
+          Effect.map(({ bytes, path }) => ({ attachment, bytes, path })),
           Effect.mapError(
             (cause) =>
               new ProviderAdapterV1Error({
@@ -1843,6 +1840,37 @@ export function makePrimeAdapter(
               }),
           ),
         ),
+      ).pipe(
+        Effect.map((resolved) => {
+          const images = resolved.flatMap(({ attachment, bytes }) =>
+            isProviderSendTurnSupportedImageMimeType(attachment.mimeType)
+              ? [
+                  {
+                    type: "image" as const,
+                    data: Encoding.encodeBase64(bytes),
+                    mimeType: attachment.mimeType,
+                  },
+                ]
+              : [],
+          );
+          const fileReferences = resolved.flatMap(({ attachment, path }) => {
+            if (isProviderSendTurnSupportedImageMimeType(attachment.mimeType)) {
+              return [];
+            }
+            const details = `${JSON.stringify(path)} (${attachment.mimeType}, ${attachment.sizeBytes} bytes)`;
+            if (attachment.mimeType.toLowerCase().startsWith("video/")) {
+              return [
+                `Attached video: ${details}. Use the video-analysis skill to inspect the full-duration video and audio before answering.`,
+              ];
+            }
+            return [`Attached file: ${details}. Read or inspect this file before answering.`];
+          });
+          const userMessage = turnInput.input?.trim() ?? "";
+          return {
+            images,
+            message: [userMessage, ...fileReferences].filter(Boolean).join("\n\n"),
+          };
+        }),
       );
 
     const steerRunningTurn = (
@@ -1851,12 +1879,11 @@ export function makePrimeAdapter(
       turnId: TurnId,
     ) =>
       Effect.gen(function* () {
-        const message = input.input?.trim() ?? "";
-        const images = yield* buildTurnAttachments(input);
+        const { images, message } = yield* buildTurnInput(input);
         if (!message && images.length === 0) {
           return yield* new ProviderAdapterV1Error({
             operation: "sendTurn",
-            detail: "Turn requires non-empty text or at least one image.",
+            detail: "Turn requires non-empty text or at least one attachment.",
           });
         }
         yield* ctx.rpc
@@ -1887,12 +1914,11 @@ export function makePrimeAdapter(
       turnId: TurnId,
     ) =>
       Effect.gen(function* () {
-        const message = input.input?.trim() ?? "";
-        const images = yield* buildTurnAttachments(input);
+        const { images, message } = yield* buildTurnInput(input);
         if (!message && images.length === 0) {
           return yield* new ProviderAdapterV1Error({
             operation: "sendTurn",
-            detail: "Turn requires non-empty text or at least one image.",
+            detail: "Turn requires non-empty text or at least one attachment.",
           });
         }
         ctx.parentCycleOpen = true;
@@ -1947,12 +1973,11 @@ export function makePrimeAdapter(
         if (selected.slug !== undefined) {
           ctx.session = { ...ctx.session, model: selected.slug };
         }
-        const message = input.input?.trim() ?? "";
-        const images = yield* buildTurnAttachments(input);
+        const { images, message } = yield* buildTurnInput(input);
         if (!message && images.length === 0) {
           return yield* new ProviderAdapterV1Error({
             operation: "sendTurn",
-            detail: "Turn requires non-empty text or at least one image.",
+            detail: "Turn requires non-empty text or at least one attachment.",
           });
         }
 
