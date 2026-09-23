@@ -77,6 +77,20 @@ export const ProviderAdapterConfigSchema = Schema.Record(Schema.String, Schema.J
 export type ProviderAdapterConfigSchema = typeof ProviderAdapterConfigSchema.Type;
 
 /**
+ * Declares the locally installed harness CLI an adapter package supervises, so
+ * the server can reuse its package-managed maintenance engine (update
+ * advisories and one-click updates) for that CLI. Adapters without a locally
+ * installed harness CLI omit this.
+ */
+export const ProviderAdapterMaintenanceV1 = Schema.Struct({
+  /** npm package that owns the harness CLI, e.g. `@scope/cli`. */
+  npmPackage: TrimmedNonEmptyString,
+  /** Instance config key holding the harness executable path or command name. */
+  binaryConfigKey: TrimmedNonEmptyString,
+});
+export type ProviderAdapterMaintenanceV1 = typeof ProviderAdapterMaintenanceV1.Type;
+
+/**
  * Declarative package metadata. `configSchema` is JSON-Schema-shaped data;
  * executable code remains in the trusted server-side package module.
  */
@@ -90,6 +104,7 @@ export const ProviderAdapterManifestV1 = Schema.Struct({
   transport: ProviderAdapterTransportV1,
   capabilities: ProviderAdapterCapabilitySet,
   configSchema: ProviderAdapterConfigSchema,
+  maintenance: Schema.optionalKey(ProviderAdapterMaintenanceV1),
 });
 export type ProviderAdapterManifestV1 = typeof ProviderAdapterManifestV1.Type;
 

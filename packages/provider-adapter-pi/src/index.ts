@@ -28,6 +28,10 @@ export const PI_PROVIDER_ADAPTER_MANIFEST: ProviderAdapterManifestV1 = {
     sessionConcurrency: "one-per-process",
   },
   capabilities: [...PI_PROVIDER_ADAPTER_CAPABILITIES.features],
+  maintenance: {
+    npmPackage: "@earendil-works/pi-coding-agent",
+    binaryConfigKey: "binaryPath",
+  },
   configSchema: {
     type: "object",
     additionalProperties: false,

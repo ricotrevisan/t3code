@@ -18,10 +18,12 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { ServerConfig } from "../config.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import { makeProviderInstanceRegistry } from "./Layers/ProviderInstanceRegistryLive.ts";
 import { loadTrustedProviderAdapterPackages } from "./TrustedLocalProviderAdapters.ts";
 
@@ -82,9 +84,20 @@ const makeEchoInstance = () =>
     return instance;
   });
 
+const TestHttpClientLive = Layer.succeed(
+  HttpClient.HttpClient,
+  HttpClient.make((request) =>
+    Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ version: "1.0.0" }))),
+  ),
+);
+
 const testLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "echo-adapter-conformance-test-",
-}).pipe(Layer.provideMerge(NodeServices.layer));
+}).pipe(
+  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(ServerSettingsService.layerTest()),
+  Layer.provideMerge(TestHttpClientLive),
+);
 
 describe("echo adapter conformance", () => {
   it.live("drives a harness subprocess through the V1 seam", () =>
