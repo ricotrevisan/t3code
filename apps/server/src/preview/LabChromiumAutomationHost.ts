@@ -12,6 +12,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
+import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -43,7 +44,6 @@ import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import type { Browser, BrowserContext, Page } from "playwright-core";
-import { chromium } from "playwright-core";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -56,6 +56,12 @@ const DEFAULT_VIEWPORT = { width: 1280, height: 720 } as const;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_INTERACTIVE_ELEMENTS = 200;
 const MAX_SCREENSHOT_WIDTH = 1280;
+
+// The CLI executable loads file-backed packages from its sibling node_modules
+// through require; ESM imports of playwright-core fail inside a Node SEA.
+const { chromium } = NodeModule.createRequire(import.meta.url)(
+  "playwright-core",
+) as typeof import("playwright-core");
 
 const defaultLabCdpOrigin = (): string =>
   `http://${LAB_CDP_HOST}:${Number(process.env.T3_BROWSER_DEBUG_PORT ?? LAB_CDP_PORT)}`;
