@@ -436,18 +436,18 @@ export const make = (
         : Object.keys(direnvEnv).length > 0
           ? direnvEnv
           : undefined;
+    const extendEnv = options.spawn.extendEnv ?? true;
     const spawnCommand = yield* resolveSpawnCommand(
       options.spawn.command,
       options.spawn.args,
-      spawnEnv ? { env: spawnEnv, extendEnv: true } : {},
+      spawnEnv ? { env: spawnEnv, extendEnv } : {},
     );
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: options.spawn.env } : {}),
-          extendEnv: options.spawn.extendEnv ?? true,
-          ...(spawnEnv ? { env: spawnEnv, extendEnv: true } : {}),
+          ...(spawnEnv ? { env: spawnEnv } : {}),
+          extendEnv,
           shell: spawnCommand.shell,
         }),
       )
