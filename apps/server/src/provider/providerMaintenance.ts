@@ -294,7 +294,7 @@ export function homebrewOwnershipFromCommandPath(
 }
 
 /** The version directory in the keg path, normalized for advisory comparisons. */
-export function homebrewKegVersionFromCommandPath(
+function homebrewKegVersionFromCommandPath(
   realCommandPath: string,
   ownership?: HomebrewOwnership,
 ): string | null {
