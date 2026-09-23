@@ -159,6 +159,7 @@ it.layer(testLayer)("external provider maintenance", (it) => {
           installedVersion: "1.2.3",
           update: {
             executable: "npm",
+            env: { PATH: NodePath.dirname(binaryPath) },
             args: expect.arrayContaining([
               "--prefix",
               realTempDir,
@@ -175,6 +176,54 @@ it.layer(testLayer)("external provider maintenance", (it) => {
           latestVersion: "2.0.0",
           canUpdate: true,
         });
+      }),
+  );
+
+  it.effect.skipIf(!symlinksSupported)(
+    "sanitizes the adapter version when maintenance enrichment fails",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const tempDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "external-provider-enrichment-failure-",
+        });
+        const packageDir = NodePath.join(
+          tempDir,
+          "lib",
+          "node_modules",
+          "@example",
+          "maintained-harness",
+        );
+        const entryPoint = NodePath.join(packageDir, "bin", "maintained-harness.js");
+        NodeFS.mkdirSync(NodePath.dirname(entryPoint), { recursive: true });
+        NodeFS.writeFileSync(entryPoint, "#!/bin/sh\n");
+        NodeFS.chmodSync(entryPoint, 0o755);
+        NodeFS.writeFileSync(NodePath.join(packageDir, "package.json"), '{"version":"1.2.3"}');
+        const binaryPath = NodePath.join(tempDir, "bin", "maintained-harness");
+        NodeFS.mkdirSync(NodePath.dirname(binaryPath), { recursive: true });
+        NodeFS.symlinkSync(entryPoint, binaryPath);
+
+        const settings = yield* ServerSettingsService;
+        const adapterPackage = makePackage();
+        const driver = makeExternalProviderDriver(adapterPackage, adapterPackage.defaultConfig());
+        const instance = yield* driver
+          .create({
+            instanceId: INSTANCE,
+            displayName: "Maintained Harness",
+            environment: [],
+            enabled: true,
+            config: { binaryPath },
+          })
+          .pipe(
+            Effect.provideService(ServerSettingsService, {
+              ...settings,
+              getSettings: Effect.die("forced snapshot enrichment defect"),
+            }),
+          );
+
+        const snapshot = yield* instance.snapshot.getSnapshot;
+        expect(snapshot.version).toBeNull();
+        expect(snapshot).not.toHaveProperty("versionAdvisory");
       }),
   );
 

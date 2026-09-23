@@ -403,6 +403,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       updateExecutable: "vp",
       updateArgs: ["i", "-g", packageName],
       updateLockKey: "vite-plus-global",
+      env: context.env,
     });
   }
   if (commandPaths.some(isBunGlobalCommandPath)) {
@@ -412,6 +413,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       updateExecutable: "bun",
       updateArgs: ["i", "-g", `${packageName}@latest`],
       updateLockKey: "bun-global",
+      env: context.env,
     });
   }
   if (commandPaths.some(isPnpmGlobalCommandPath)) {
@@ -421,6 +423,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       updateExecutable: "pnpm",
       updateArgs: ["add", "-g", `${packageName}@latest`],
       updateLockKey: "pnpm-global",
+      env: context.env,
     });
   }
 
@@ -447,6 +450,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
         `${packageName}@latest`,
       ],
       updateLockKey: `npm-global:${normalizeCommandPath(npmPrefix)}`,
+      env: context.env,
       installedVersion: yield* readNpmInstalledVersion(context, npmPrefix, packageName),
     });
   }
@@ -488,6 +492,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       updateArgs: args,
       updateLockKey: "homebrew",
       updateCommand: ["brew", ...args].join(" "),
+      env: context.env,
       latestVersion: info ? parseHomebrewLatestVersion(info, homebrew) : null,
       installedVersion: homebrewKegVersionFromCommandPath(context.realCommandPath),
     });

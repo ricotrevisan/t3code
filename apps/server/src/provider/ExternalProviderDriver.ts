@@ -553,45 +553,44 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
               );
         const enrichSnapshotWithMaintenance = (
           snapshot: ServerProvider,
-        ): Effect.Effect<ServerProvider> =>
-          maintenanceServices
-            ? Effect.gen(function* () {
-                const settings = yield* maintenanceServices.serverSettings.getSettings.pipe(
-                  Effect.orElseSucceed(() => undefined),
-                );
-                const capabilities = yield* resolveMaintenance();
-                const installedVersion =
-                  typeof capabilities.installedVersion === "string"
-                    ? capabilities.installedVersion.trim()
-                    : null;
-                // A maintained adapter's own version describes the adapter
-                // package, not necessarily the harness CLI. Publish only a
-                // version proven by the installer; unknown stays null rather
-                // than fabricating an update comparison.
-                const patched = {
-                  ...snapshot,
-                  version:
-                    installedVersion !== null && installedVersion.length > 0
-                      ? installedVersion
-                      : null,
-                };
-                return yield* enrichProviderSnapshotWithVersionAdvisory(patched, capabilities, {
-                  enableProviderUpdateChecks: settings?.enableProviderUpdateChecks,
-                }).pipe(
-                  Effect.provideService(HttpClient.HttpClient, maintenanceServices.httpClient),
-                );
-              }).pipe(
-                // Enrichment must never take the snapshot channel down; an
-                // un-enriched snapshot is stale but honest.
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("External provider snapshot enrichment failed", {
-                    provider,
-                    instanceId,
-                    cause: Cause.pretty(cause),
-                  }).pipe(Effect.as(snapshot)),
-                ),
-              )
-            : Effect.succeed(snapshot);
+        ): Effect.Effect<ServerProvider> => {
+          if (!maintenanceServices) {
+            return Effect.succeed(snapshot);
+          }
+          // A maintained adapter's own version describes the adapter package,
+          // not necessarily the harness CLI. Even an enrichment failure must
+          // not let that unproven value escape as the installed CLI version.
+          const { versionAdvisory: _unprovenAdvisory, ...snapshotWithoutAdvisory } = snapshot;
+          const sanitizedSnapshot = { ...snapshotWithoutAdvisory, version: null };
+          return Effect.gen(function* () {
+            const settings = yield* maintenanceServices.serverSettings.getSettings.pipe(
+              Effect.orElseSucceed(() => undefined),
+            );
+            const capabilities = yield* resolveMaintenance();
+            const installedVersion =
+              typeof capabilities.installedVersion === "string"
+                ? capabilities.installedVersion.trim()
+                : null;
+            const patched = {
+              ...sanitizedSnapshot,
+              version:
+                installedVersion !== null && installedVersion.length > 0 ? installedVersion : null,
+            };
+            return yield* enrichProviderSnapshotWithVersionAdvisory(patched, capabilities, {
+              enableProviderUpdateChecks: settings?.enableProviderUpdateChecks,
+            }).pipe(Effect.provideService(HttpClient.HttpClient, maintenanceServices.httpClient));
+          }).pipe(
+            // Enrichment must never take the snapshot channel down; publish a
+            // sanitized snapshot when the advisory lookup fails.
+            Effect.catchCause((cause) =>
+              Effect.logWarning("External provider snapshot enrichment failed", {
+                provider,
+                instanceId,
+                cause: Cause.pretty(cause),
+              }).pipe(Effect.as(sanitizedSnapshot)),
+            ),
+          );
+        };
         const snapshot: ProviderInstance["snapshot"] = {
           resolveMaintenance,
           // V1 packages own their published snapshot, so a runtime usage-limit update cannot be

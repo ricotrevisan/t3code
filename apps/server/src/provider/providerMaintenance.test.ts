@@ -283,6 +283,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
               "@example/package-tool@latest",
             ],
             lockKey: `npm-global:${normalizeCommandPath(realTempDir)}`,
+            env: { PATH: "" },
           },
         });
       }),
@@ -710,6 +711,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
                 ? ["upgrade", "--cask", fixture.name]
                 : ["upgrade", fixture.name],
             lockKey: "homebrew",
+            env: { PATH: brewBinDir },
           },
         });
       }),
