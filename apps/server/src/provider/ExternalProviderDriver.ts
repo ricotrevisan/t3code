@@ -228,6 +228,9 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
     adapterPackage: adapterPackageRef,
     metadata: {
       displayName: adapterPackage.manifest.displayName,
+      ...(adapterPackage.manifest.runtimeModes
+        ? { runtimeModes: adapterPackage.manifest.runtimeModes }
+        : {}),
       supportsMultipleInstances: true,
     },
     configSchema: adapterPackage.configSchema,
@@ -335,6 +338,7 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
         });
         const withSnapshotIdentity = (snapshot: ServerProvider): ServerProvider => ({
           ...snapshot,
+          ...adapterPackage.manifest.runtimeModes,
           instanceId,
           driver: provider,
           adapterPackage: adapterPackageRef,
@@ -408,7 +412,22 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
             protocol: capabilities,
           },
           startSession: (input) =>
-            invoke("startSession", () => external.adapter.startSession(input)).pipe(
+            invoke("startSession", () =>
+              Effect.gen(function* () {
+                const snapshot = withSnapshotIdentity(yield* external.snapshot.getSnapshot);
+                if (
+                  snapshot.supportedRuntimeModes &&
+                  !snapshot.supportedRuntimeModes.includes(input.runtimeMode)
+                ) {
+                  return yield* adapterFailure(
+                    provider,
+                    "startSession",
+                    `Provider '${provider}' does not support runtime mode '${input.runtimeMode}'. Supported modes: ${snapshot.supportedRuntimeModes.join(", ")}.`,
+                  );
+                }
+                return yield* external.adapter.startSession(input);
+              }),
+            ).pipe(
               Effect.flatMap((session) =>
                 decodeProviderSession(session).pipe(
                   Effect.mapError((error) => invalidOutput("startSession", error)),

@@ -1740,14 +1740,18 @@ it("keeps the current runtime mode when provider support is unspecified", () => 
 
 it("uses full access when the current runtime mode is unsupported", () => {
   assert.strictEqual(
-    coerceRuntimeModeToSupported("approval-required", ["auto", "full-access"]),
+    coerceRuntimeModeToSupported("approval-required", {
+      supportedRuntimeModes: ["auto", "full-access"],
+    }),
     "full-access",
   );
 });
 
 it("uses the first reported mode when full access is unavailable", () => {
   assert.strictEqual(
-    coerceRuntimeModeToSupported("approval-required", ["auto-accept-edits", "auto"]),
+    coerceRuntimeModeToSupported("approval-required", {
+      supportedRuntimeModes: ["auto-accept-edits", "auto"],
+    }),
     "auto-accept-edits",
   );
 });

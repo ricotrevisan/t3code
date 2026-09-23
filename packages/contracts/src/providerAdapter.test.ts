@@ -34,6 +34,24 @@ const manifest = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("ProviderAdapterManifestV1", () => {
+  it("serializes canonical runtime modes and rejects invalid capabilities", () => {
+    const runtimeModes = {
+      supportedRuntimeModes: ["approval-required", "full-access"],
+      defaultRuntimeMode: "approval-required",
+    };
+    const decoded = decodeManifest(manifest({ runtimeModes }));
+    expect(decoded.runtimeModes).toEqual(runtimeModes);
+    expect(decodeManifest(JSON.parse(JSON.stringify(decoded))).runtimeModes).toEqual(runtimeModes);
+    for (const invalid of [
+      { ...runtimeModes, defaultRuntimeMode: "auto-accept-edits" },
+      { ...runtimeModes, supportedRuntimeModes: [] },
+      { ...runtimeModes, supportedRuntimeModes: ["full-access", "full-access"] },
+      { supportedRuntimeModes: ["provider-owned-mode"], defaultRuntimeMode: "provider-owned-mode" },
+    ]) {
+      expect(() => decodeManifest(manifest({ runtimeModes: invalid }))).toThrow();
+    }
+  });
+
   it("decodes a versioned trusted-local stdio adapter manifest", () => {
     const decoded = decodeManifest(manifest());
     expect(decoded.id).toBe("fixture-adapter");

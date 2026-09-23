@@ -16,3 +16,12 @@ export function runtimeModeOptionsForProvider(
   const supported = new Set(provider.supportedRuntimeModes);
   return ALL_RUNTIME_MODE_OPTIONS.filter((mode) => supported.has(mode));
 }
+
+/** Fan-out turns use one visible policy, so it must work for every selected instance. */
+export function runtimeModeOptionsForProviders(
+  providers: ReadonlyArray<Pick<ServerProvider, "supportedRuntimeModes"> | undefined>,
+): ReadonlyArray<RuntimeMode> {
+  return ALL_RUNTIME_MODE_OPTIONS.filter((mode) =>
+    providers.every((provider) => runtimeModeOptionsForProvider(provider).includes(mode)),
+  );
+}

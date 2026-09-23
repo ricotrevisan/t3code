@@ -1,4 +1,9 @@
-Never commit or make PRs against `pingdotgg/t3code`. We are working on a fork of that project; they don't take outside contributions.
+This repository is Rico's maintained fork of Theo Browne's `pingdotgg/t3code`.
+
+- `origin` is the fork and is the only normal push/PR target.
+- `pingdotgg` is the read-only upstream reference. Never push branches or open PRs there.
+- Preserve upstream compatibility when it serves the fork, but optimize decisions for this fork's users, infrastructure, providers, and release process. Fork requirements may intentionally diverge from upstream.
+- When porting or syncing upstream work, distinguish upstream behavior from fork-owned behavior and preserve the latter deliberately.
 
 # T3 Code
 
@@ -8,7 +13,7 @@ You can think of T3 Code as an open source "bring-your-own-subscription" alterna
 
 ## What makes T3 Code special?
 
-We have over 200,000 users who love T3 Code. It's important we maintain the things they love as we continue to iterate on the product. Here's a brief list of the things we can never compromise on.
+Upstream T3 Code has a large user base and established product strengths. The fork inherits those strengths while adding its own provider, infrastructure, and workflow requirements. Preserve the qualities below unless a fork-specific decision deliberately changes them.
 
 ### 1. Open at the core
 
@@ -32,13 +37,13 @@ T3 Code has 3 key app surfaces: **web**, **desktop**, and **mobile**.
 
 **Mobile** is a React Native app for both iOS and Android, available on the App Store and Google Play. The mobile app allows for connecting to any T3 Code server to control work remotely.
 
-## A note from Theo
+## Upstream product principles
 
-I like ambitious ideas, simple systems, and software that feels obvious. Do not preserve complexity just because it already exists. Do not introduce machinery because it looks architecturally impressive. Understand the real constraint, then fight for the smallest model that makes the correct behavior unsurprising.
+Theo's upstream guidance favors ambitious ideas, simple systems, and software that feels obvious. Do not preserve complexity just because it already exists. Do not introduce machinery because it looks architecturally impressive. Understand the real constraint, then fight for the smallest model that makes the correct behavior unsurprising.
 
 Channel both "measure twice, cut once" and "yagni". Fight scope creep. Try to honor the dev's intent in both a minimal and realistic fashion.
 
-The rest of this document is meant to help you navigate the codebase and make changes effectively. Think of these instructions less as "hard rules", more as "good defaults". The developer's preferences should be able to override anything here.
+The rest of this document helps you navigate the fork and make changes effectively. Treat these instructions as strong defaults. Rico's explicit direction and fork-specific requirements override upstream preferences.
 
 Of note: Most T3 Code contributions will come from T3 Code itself, often controlled remotely. This means you should be careful about accessing data, killing dev servers, and other things that may damage the T3 Code instance that the contributor is using.
 
@@ -47,7 +52,8 @@ Of note: Most T3 Code contributions will come from T3 Code itself, often control
 We need to be on the same page with terminology. When communicating, use this language:
 
 - **you** means the agent reading this file and changing T3 Code.
-- **we, us, and maintainers** mean Theo, Julius and the people building T3 Code. These are who you are talking to now.
+- **we, us, and maintainers** mean Rico and the maintainers of this fork.
+- **upstream** means Theo Browne, the upstream maintainers, and `pingdotgg/t3code`.
 - **user** means the person using T3 Code to direct coding agents.
 - **agent** means the coding agent a user runs inside T3 Code. Depending on context, that may also include you.
 - **provider** means the agent runtime or harness T3 Code talks to, such as Codex, Claude, Cursor, or OpenCode.
@@ -120,7 +126,6 @@ For authorized mobile verification, a missing or outdated native client is a bui
 - Never make a PR unless the developer explicitly asks you to do so.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
-- UI changes need before/after images. Motion or timing needs a short video.
 - Upload PR evidence to GitHub. Never commit PR-only screenshots or assets such as `.github/pr-assets/`.
 - One concern per PR. If the description says "also", split it.
 - When babysitting: poll checks and comments newer than the last push, verify each bot finding against the source, fix real ones, dismiss false positives with a written reason. Stay quiet when nothing is new. Stop when the bots are green on the latest commit.
@@ -140,7 +145,7 @@ Most code changes do not need an internal documentation change. Agents can read 
 ## Plans and work artifacts
 
 - Do not commit implementation plans, research notes, or agent scratch files. Keep temporary working material outside the worktree. `.plans/` is gitignored only as a safety net for legacy tooling.
-- Track active maintainer work in the GitHub issue or project item that owns it. External proposals follow `CONTRIBUTING.md` and belong in Ideas discussions.
+- Track active fork work in the GitHub issue or project item that owns it. Treat upstream discussions and `CONTRIBUTING.md` as reference material, not as the fork's workflow authority.
 - A merged PR is the implementation record. Close or update its tracking item when the work lands; do not preserve a second checklist in the repository.
 
 ## How it works

@@ -241,7 +241,8 @@ it.layer(primeProviderTestLayer, { excludeTestServices: true })(
         expect(snapshot.status).toBe("disabled");
         expect(snapshot.installed).toBe(false);
         expect(snapshot.message).toContain("disabled");
-        expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
+        expect(snapshot.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
+        expect(snapshot.defaultRuntimeMode).toBe("approval-required");
       }),
     );
 
@@ -256,7 +257,8 @@ it.layer(primeProviderTestLayer, { excludeTestServices: true })(
         const snapshot = yield* provider.getSnapshot;
         expect(snapshot.enabled).toBe(false);
         expect(snapshot.status).toBe("disabled");
-        expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
+        expect(snapshot.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
+        expect(snapshot.defaultRuntimeMode).toBe("approval-required");
       }),
     );
 
@@ -277,7 +279,8 @@ it.layer(primeProviderTestLayer, { excludeTestServices: true })(
         expect(snapshot.status).toBe("warning");
         expect(snapshot.version).toBeNull();
         expect(snapshot.message).toContain("Checking Prime Agent");
-        expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
+        expect(snapshot.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
+        expect(snapshot.defaultRuntimeMode).toBe("approval-required");
       }),
     );
   },
@@ -375,7 +378,7 @@ it.layer(primeProviderTestLayer, { excludeTestServices: true })(
         expect(snapshot.version).toBe("0.0.1");
         expect(snapshot.auth.status).toBe("authenticated");
         expect(snapshot.requiresNewThreadForModelChange).toBe(false);
-        expect(snapshot.supportedRuntimeModes).toEqual(["full-access", "approval-required"]);
+        expect(snapshot.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
         expect(snapshot.models.map((model) => model.slug)).toEqual([
           "anthropic/claude-sonnet-4",
           "openai-codex/gpt-5.6-sol",
@@ -567,11 +570,10 @@ it.layer(primeProviderTestLayer, { excludeTestServices: true })(
       }),
     );
 
-    it.effect("advertises approval-required only after the exact extension handshake", () =>
+    it.effect("advertises the package runtime modes without starting an approval probe", () =>
       Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
           const fixture = yield* makeApprovalHandshakeFixture("valid");
           const snapshot = yield* checkPrimeStatus(
             decodePrimeSettings({ enabled: true, binaryPath: fixture.binaryPath }),
@@ -584,7 +586,7 @@ it.layer(primeProviderTestLayer, { excludeTestServices: true })(
 
           expect(snapshot.status).toBe("ready");
           expect(snapshot.models.length).toBeGreaterThan(0);
-          expect(snapshot.supportedRuntimeModes).toEqual(["full-access", "approval-required"]);
+          expect(snapshot.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
           expect(snapshot.showInteractionModeToggle).toBe(false);
 
           const invocations = (yield* fs.readFileString(fixture.requestLogPath))
@@ -596,51 +598,33 @@ it.layer(primeProviderTestLayer, { excludeTestServices: true })(
           const handshakeArgs = invocations.find(
             (entry) => entry.command.type === "get_commands",
           )?.args;
-          const config = yield* ServerConfig;
-          const extensionPath = path.resolve(
-            config.baseDir,
-            "prime-agent",
-            "artifacts",
-            "approval-v1",
-            "t3-approval-v1.ts",
-          );
-          expect(handshakeArgs).toEqual([
-            "--mode",
-            "rpc",
-            "--no-session",
-            "--no-tools",
-            "--no-extensions",
-            "--extension",
-            extensionPath,
-            "--t3-approval-mode=approval-required",
-          ]);
+          expect(handshakeArgs).toBeUndefined();
         }),
       ),
     );
 
     for (const kind of ["missing", "malformed", "wrong-path", "wrong-source"] as const) {
-      it.effect(
-        `keeps model health usable and advertises full-access only for ${kind} handshake`,
-        () =>
-          Effect.scoped(
-            Effect.gen(function* () {
-              const fixture = yield* makeApprovalHandshakeFixture(kind);
-              const snapshot = yield* checkPrimeStatus(
-                decodePrimeSettings({ enabled: true, binaryPath: fixture.binaryPath }),
-                {
-                  ...PATH_TRAP_ENV,
-                  T3_PRIME_MOCK_APPROVAL_HANDSHAKE: fixture.kind,
-                  T3_PRIME_MOCK_REQUEST_LOG_PATH: fixture.requestLogPath,
-                },
-              );
+      it.effect(`keeps model discovery independent of a ${kind} handshake`, () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fixture = yield* makeApprovalHandshakeFixture(kind);
+            const snapshot = yield* checkPrimeStatus(
+              decodePrimeSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+              {
+                ...PATH_TRAP_ENV,
+                T3_PRIME_MOCK_APPROVAL_HANDSHAKE: fixture.kind,
+                T3_PRIME_MOCK_REQUEST_LOG_PATH: fixture.requestLogPath,
+              },
+            );
 
-              expect(snapshot.status).toBe("ready");
-              expect(snapshot.auth.status).toBe("authenticated");
-              expect(snapshot.models.length).toBeGreaterThan(0);
-              expect(snapshot.supportedRuntimeModes).toEqual(["full-access"]);
-              expect(snapshot.showInteractionModeToggle).toBe(false);
-            }),
-          ),
+            expect(snapshot.status).toBe("ready");
+            expect(snapshot.auth.status).toBe("authenticated");
+            expect(snapshot.models.length).toBeGreaterThan(0);
+            expect(snapshot.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
+            expect(snapshot.defaultRuntimeMode).toBe("approval-required");
+            expect(snapshot.showInteractionModeToggle).toBe(false);
+          }),
+        ),
       );
     }
   },

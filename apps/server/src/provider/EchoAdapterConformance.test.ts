@@ -13,6 +13,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  ServerProvider,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -35,6 +36,9 @@ const ECHO_PACKAGE = {
   version: ProviderAdapterPackageVersion.make("1.0.0"),
   protocolVersion: 1,
 };
+
+const encodeProvider = Schema.encodeSync(Schema.fromJsonString(ServerProvider));
+const decodeProvider = Schema.decodeUnknownSync(Schema.fromJsonString(ServerProvider));
 
 const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -100,6 +104,31 @@ const testLayer = ServerConfig.layerTest(process.cwd(), {
 );
 
 describe("echo adapter conformance", () => {
+  it.live(
+    "serializes advertised modes and rejects unsupported requests at the package boundary",
+    () =>
+      Effect.gen(function* () {
+        const instance = yield* makeEchoInstance();
+        const snapshot = decodeProvider(encodeProvider(yield* instance.snapshot.getSnapshot));
+        assert.deepStrictEqual(snapshot.supportedRuntimeModes, [
+          "approval-required",
+          "full-access",
+        ]);
+        assert.equal(snapshot.defaultRuntimeMode, "approval-required");
+        for (const runtimeMode of ["auto-accept-edits", "auto"] as const) {
+          const error = yield* instance.adapter
+            .startSession({
+              threadId: ECHO_THREAD,
+              providerInstanceId: ECHO_INSTANCE,
+              runtimeMode,
+            })
+            .pipe(Effect.flip);
+          assert.include(error.message, `does not support runtime mode '${runtimeMode}'`);
+          assert.deepStrictEqual(yield* instance.adapter.listSessions(), []);
+        }
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
   it.live("drives a harness subprocess through the V1 seam", () =>
     Effect.gen(function* () {
       const instance = yield* makeEchoInstance();

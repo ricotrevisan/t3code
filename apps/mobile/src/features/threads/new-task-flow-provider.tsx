@@ -545,7 +545,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       )?.supportedRuntimeModes,
     [selectedEnvironmentServerConfig, selectedModel?.instanceId],
   );
-  const runtimeMode = coerceRuntimeModeToSupported(storedRuntimeMode, supportedRuntimeModes);
+  const runtimeMode = coerceRuntimeModeToSupported(storedRuntimeMode, selectedProviderStatus);
   const setSelectedModelKey = useCallback(
     // Options ride along in the same write: a follow-up setSelectedModelOptions
     // call would rebuild the selection from the stale pre-switch model.
@@ -563,13 +563,14 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       );
       updateComposerDraftSettings(selectedProjectDraftKey, {
         modelSelection: selection,
+        runtimeMode: coerceRuntimeModeToSupported(runtimeMode, provider),
         ...(provider?.showInteractionModeToggle === false
           ? { interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE }
           : {}),
       });
       setStickyComposerModelSelection(selection);
     },
-    [modelOptions, selectedEnvironmentServerConfig, selectedProjectDraftKey],
+    [modelOptions, selectedEnvironmentServerConfig, selectedProjectDraftKey, runtimeMode],
   );
   const setSelectedModelOptions = useCallback(
     (options: ReadonlyArray<ProviderOptionSelection> | undefined) => {
@@ -1009,7 +1010,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
           draft.runtimeMode ?? defaultRuntimeMode,
           selectedEnvironmentServerConfig?.providers.find(
             (provider) => provider.instanceId === draftModelSelection.instanceId,
-          )?.supportedRuntimeModes,
+          ),
         ),
         interactionMode: resolvePendingTaskInteractionMode({
           preferenceLoaded: planModePreferenceLoaded,

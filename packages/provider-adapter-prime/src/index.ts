@@ -1,3 +1,4 @@
+import { PRIME_RUNTIME_MODES } from "./runtimeModes.ts";
 import {
   ProviderAdapterPackageId,
   ProviderAdapterPackageVersion,
@@ -33,6 +34,7 @@ export const PRIME_PROVIDER_ADAPTER_MANIFEST: ProviderAdapterManifestV1 = {
     sessionConcurrency: "one-per-process",
   },
   capabilities: [...PRIME_ADAPTER_PROTOCOL_CAPABILITIES.features],
+  runtimeModes: PRIME_RUNTIME_MODES,
   configSchema: {
     type: "object",
     additionalProperties: false,

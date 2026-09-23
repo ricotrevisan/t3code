@@ -1,4 +1,4 @@
-import type { ProviderDriverKind, ServerProvider } from "@t3tools/contracts";
+import type { ProviderRuntimeModes, ProviderDriverKind, ServerProvider } from "@t3tools/contracts";
 
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
@@ -17,9 +17,11 @@ export const withInstanceIdentity =
     readonly displayName: string | undefined;
     readonly accentColor: string | undefined;
     readonly continuationGroupKey: string;
+    readonly runtimeModes?: ProviderRuntimeModes;
   }) =>
   (snapshot: ServerProviderDraft): ServerProvider => ({
     ...snapshot,
+    ...input.runtimeModes,
     instanceId: input.instanceId,
     driver: input.driverKind,
     ...(input.displayName ? { displayName: input.displayName } : {}),

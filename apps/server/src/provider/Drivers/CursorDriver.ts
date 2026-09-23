@@ -11,7 +11,7 @@
  *
  * @module provider/Drivers/CursorDriver
  */
-import { CursorSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { ALL_PROVIDER_RUNTIME_MODES, CursorSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -94,6 +94,7 @@ export type CursorDriverEnv =
 export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
+    runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
     displayName: "Cursor",
     supportsMultipleInstances: true,
   },
@@ -114,6 +115,7 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         instanceId,
       });
       const stampIdentity = withInstanceIdentity({
+        runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
         instanceId,
         driverKind: DRIVER_KIND,
         displayName,
