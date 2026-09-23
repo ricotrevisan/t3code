@@ -21,6 +21,8 @@ Confirm that the `pi` command works and complete any provider sign-in or API-key
 5. Keep the default executable `pi`, or enter an absolute executable path if `pi` is not on the server's `PATH`. T3 adds Pi's RPC and session-storage arguments itself. Use **Arguments** only for additional safe Pi options.
 6. Save the instance.
 
+When the selected `pi` executable belongs to the documented global npm package, T3 Code checks npm for newer Pi releases. Available updates appear in **Settings → Providers** and can be installed there. Custom or unrecognized installations remain manual-only.
+
 Environment variables configured on the instance are passed to Pi. Keep credentials there instead of putting them in adapter arguments. T3 rejects Pi session-selection flags because it owns session storage and validates every resume file.
 
 ## Supported behavior

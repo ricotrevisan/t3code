@@ -45,6 +45,26 @@ describe("ProviderAdapterManifestV1", () => {
     expect(isProviderAdapterManifestCompatible(decoded)).toBe(true);
   });
 
+  it("decodes optional package-managed harness maintenance metadata", () => {
+    expect(decodeManifest(manifest()).maintenance).toBeUndefined();
+    expect(
+      decodeManifest(
+        manifest({
+          maintenance: {
+            npmPackage: "@example/fixture-harness",
+            binaryConfigKey: "binaryPath",
+          },
+        }),
+      ).maintenance,
+    ).toEqual({
+      npmPackage: "@example/fixture-harness",
+      binaryConfigKey: "binaryPath",
+    });
+    expect(() =>
+      decodeManifest(manifest({ maintenance: { npmPackage: "", binaryConfigKey: "binaryPath" } })),
+    ).toThrow();
+  });
+
   it("fails closed for a future adapter protocol version", () => {
     expect(() => decodeManifest(manifest({ protocolVersion: 2 }))).toThrow();
   });

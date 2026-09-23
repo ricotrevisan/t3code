@@ -254,6 +254,11 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           "@example",
           "package-tool",
         ]);
+        NodeFS.writeFileSync(
+          NodePath.join(tempDir, "lib", "node_modules", "@example", "package-tool", "package.json"),
+          '{"version":"1.2.3"}',
+        );
+        const realTempDir = NodeFS.realpathSync(tempDir);
 
         const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
           packageToolUpdate,
@@ -266,18 +271,20 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         expect(capabilities).toEqual({
           provider: driver("packageTool"),
           packageName: "@example/package-tool",
+          installedVersion: "1.2.3",
           update: {
-            command: `npm install -g --prefix ${tempDir} --allow-scripts=@example/package-tool @example/package-tool@latest`,
+            command: `npm install -g --prefix ${realTempDir} --allow-scripts=@example/package-tool @example/package-tool@latest`,
             executable: "npm",
             args: [
               "install",
               "-g",
               "--prefix",
-              tempDir,
+              realTempDir,
               "--allow-scripts=@example/package-tool",
               "@example/package-tool@latest",
             ],
-            lockKey: `npm-global:${normalizeCommandPath(tempDir)}`,
+            lockKey: `npm-global:${normalizeCommandPath(realTempDir)}`,
+            env: { PATH: "" },
           },
         });
       }),
@@ -359,7 +366,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       });
       NodeFS.writeFileSync(
         NodePath.join(tempDir, "node_modules", "@example", "package-tool", "package.json"),
-        "{}",
+        '{"version":"4.5.6"}',
       );
 
       const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
@@ -370,9 +377,12 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn),
       );
 
-      expect(capabilities.update).toMatchObject({
-        executable: "npm",
-        args: ["install", "-g", "--prefix", tempDir, expect.any(String), expect.any(String)],
+      expect(capabilities).toMatchObject({
+        installedVersion: "4.5.6",
+        update: {
+          executable: "npm",
+          args: ["install", "-g", "--prefix", tempDir, expect.any(String), expect.any(String)],
+        },
       });
 
       // The same layout on POSIX is a project checkout, not a global install.
@@ -529,6 +539,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         const link = NodePath.join(tempDir, "bin", "package-tool");
         NodeFS.mkdirSync(NodePath.dirname(link), { recursive: true });
         NodeFS.symlinkSync(target, link);
+        const realKeg = NodeFS.realpathSync(keg);
 
         const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
           packageToolUpdate,
@@ -540,8 +551,8 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
 
         expect(capabilities.update).toMatchObject({
           executable: "npm",
-          args: expect.arrayContaining(["--prefix", keg]),
-          lockKey: `npm-global:${normalizeCommandPath(keg)}`,
+          args: expect.arrayContaining(["--prefix", realKeg]),
+          lockKey: `npm-global:${normalizeCommandPath(realKeg)}`,
         });
       }),
   );
@@ -634,9 +645,14 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
   );
 
   it.effect.each([
-    { directory: "Caskroom", name: "package-tool", kind: "cask" },
-    { directory: "Cellar", name: "package-tool", kind: "formula" },
-    { directory: "Cellar", name: "package-tool@latest", kind: "formula" },
+    { directory: "Caskroom", name: "package-tool", kind: "cask", kegVersion: "0.148.0,42" },
+    { directory: "Cellar", name: "package-tool", kind: "formula", kegVersion: "0.148.0_1" },
+    {
+      directory: "Cellar",
+      name: "package-tool@latest",
+      kind: "formula",
+      kegVersion: "0.148.0_1",
+    },
   ] as const)(
     "upgrades the owning Homebrew $kind $name through an executable alias",
     (fixture) =>
@@ -649,7 +665,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           tempDir,
           fixture.directory,
           fixture.name,
-          "0.148.0",
+          fixture.kegVersion,
           "package-tool-0.148.0",
         );
         writeExecutable(ownedBinary);
@@ -689,6 +705,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           provider: driver("packageTool"),
           packageName: "@example/package-tool",
           latestVersion: "0.148.0",
+          installedVersion: "0.148.0",
           update: {
             command:
               fixture.kind === "cask"
@@ -700,6 +717,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
                 ? ["upgrade", "--cask", fixture.name]
                 : ["upgrade", fixture.name],
             lockKey: "homebrew",
+            env: { PATH: brewBinDir },
           },
         });
       }),

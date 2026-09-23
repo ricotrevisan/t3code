@@ -13,6 +13,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -25,6 +26,7 @@ import {
 } from "@t3tools/provider-adapter";
 
 import { ServerConfig } from "../config.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import { makeProviderInstanceRegistry } from "./Layers/ProviderInstanceRegistryLive.ts";
 import {
   type ExternalProviderAdapterPackageV1,
@@ -159,9 +161,20 @@ const registryConfig: ProviderInstanceConfigMap = {
   },
 };
 
+const TestHttpClientLive = Layer.succeed(
+  HttpClient.HttpClient,
+  HttpClient.make((request) =>
+    Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ version: "1.0.0" }))),
+  ),
+);
+
 const testLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "trusted-local-provider-adapters-test-",
-}).pipe(Layer.provideMerge(NodeServices.layer));
+}).pipe(
+  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(ServerSettingsService.layerTest()),
+  Layer.provideMerge(TestHttpClientLive),
+);
 
 describe("trusted local provider adapter packages", () => {
   it.effect("loads a registered package and materializes its provider instance", () =>
