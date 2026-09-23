@@ -148,9 +148,9 @@ it.layer(testLayer)("external provider maintenance", (it) => {
         const instance = yield* driver.create({
           instanceId: INSTANCE,
           displayName: "Maintained Harness",
-          environment: [],
+          environment: [{ name: "PATH", value: NodePath.dirname(binaryPath), sensitive: false }],
           enabled: true,
-          config: { binaryPath },
+          config: { binaryPath: "maintained-harness" },
         });
 
         const maintenance = yield* instance.snapshot.resolveMaintenance();
@@ -174,6 +174,42 @@ it.layer(testLayer)("external provider maintenance", (it) => {
           currentVersion: "1.2.3",
           latestVersion: "2.0.0",
           canUpdate: true,
+        });
+      }),
+  );
+
+  it.effect(
+    "does not publish the adapter package version for an unrecognized harness install",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const tempDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "external-provider-custom-",
+        });
+        const binaryPath = NodePath.join(tempDir, "maintained-harness");
+        NodeFS.writeFileSync(binaryPath, "#!/bin/sh\n");
+        NodeFS.chmodSync(binaryPath, 0o755);
+
+        const adapterPackage = makePackage();
+        const driver = makeExternalProviderDriver(adapterPackage, adapterPackage.defaultConfig());
+        const instance = yield* driver.create({
+          instanceId: INSTANCE,
+          displayName: "Maintained Harness",
+          environment: [],
+          enabled: true,
+          config: { binaryPath },
+        });
+
+        const maintenance = yield* instance.snapshot.resolveMaintenance();
+        expect(maintenance.update).toBeNull();
+
+        const snapshot = yield* instance.snapshot.getSnapshot;
+        expect(snapshot.version).toBeNull();
+        expect(snapshot.versionAdvisory).toMatchObject({
+          status: "unknown",
+          currentVersion: null,
+          latestVersion: null,
+          canUpdate: false,
         });
       }),
   );

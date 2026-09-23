@@ -237,6 +237,7 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const fileSystem = yield* FileSystem.FileSystem;
         const pathService = yield* Path.Path;
+        const processEnv = mergeProviderInstanceEnvironment(environment);
         const negotiatedProtocolVersion = negotiateHostProtocolVersion(
           adapterPackage.manifest.hostProtocol.minimum,
           adapterPackage.manifest.hostProtocol.maximum,
@@ -288,7 +289,7 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
               instanceId,
               displayName,
               accentColor,
-              environment: mergeProviderInstanceEnvironment(environment),
+              environment: processEnv,
               enabled,
               config,
             },
@@ -539,7 +540,7 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
                   npmPackageName: maintenance.npmPackage,
                   nativeUpdate: null,
                 }),
-                { binaryPath: binaryPathFromConfig() },
+                { binaryPath: binaryPathFromConfig(), env: processEnv },
               ).pipe(
                 Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
                 Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -563,13 +564,17 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
                   typeof capabilities.installedVersion === "string"
                     ? capabilities.installedVersion.trim()
                     : null;
-                // The owning installer's record outranks the adapter's own
-                // version string, which describes the adapter package and may
-                // be unrelated to the harness CLI it supervises.
-                const patched =
-                  installedVersion !== null && installedVersion.length > 0
-                    ? { ...snapshot, version: installedVersion }
-                    : snapshot;
+                // A maintained adapter's own version describes the adapter
+                // package, not necessarily the harness CLI. Publish only a
+                // version proven by the installer; unknown stays null rather
+                // than fabricating an update comparison.
+                const patched = {
+                  ...snapshot,
+                  version:
+                    installedVersion !== null && installedVersion.length > 0
+                      ? installedVersion
+                      : null,
+                };
                 return yield* enrichProviderSnapshotWithVersionAdvisory(patched, capabilities, {
                   enableProviderUpdateChecks: settings?.enableProviderUpdateChecks,
                 }).pipe(
