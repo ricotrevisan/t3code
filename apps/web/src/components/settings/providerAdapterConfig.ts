@@ -212,7 +212,7 @@ export function validateAdapterConfig(
   return errors;
 }
 
-export function sameAdapterPackage(
+function sameAdapterPackage(
   left: ProviderAdapterPackageReference | undefined,
   right: ProviderAdapterPackageReference | undefined,
 ): boolean {
