@@ -826,6 +826,7 @@ const buildAppUnderTest = (options?: {
           Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
             getInstance: () => Effect.succeed(undefined),
             listInstances: Effect.succeed([]),
+            listAdapterManifests: Effect.succeed([]),
             ...options?.layers?.providerInstanceRegistry,
           }),
           Layer.mock(AntigravityInstallation)({
