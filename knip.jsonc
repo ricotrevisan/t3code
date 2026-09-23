@@ -26,6 +26,8 @@
         "scripts/evaluate-thread-titles.ts",
         "scripts/measure-pr-preview.ts",
         "src/provider/testFixtures/*.mjs",
+        // Provider tests execute this fixture by path rather than importing it.
+        "src/scripts/prime-rpc-mock-agent.ts",
       ],
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.
