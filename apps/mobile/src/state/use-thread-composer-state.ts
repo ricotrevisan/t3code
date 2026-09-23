@@ -5,6 +5,7 @@ import { Alert } from "react-native";
 
 import {
   CommandId,
+  coerceRuntimeModeToSupported,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -762,12 +763,20 @@ export function useThreadComposerState() {
       );
       updateComposerDraftSettings(selectedThreadKey, {
         modelSelection: value,
+        ...(runtimeMode === null
+          ? {}
+          : {
+              runtimeMode: coerceRuntimeModeToSupported(
+                coerceRuntimeModeToSupported(runtimeMode, selectedProvider),
+                provider,
+              ),
+            }),
         ...(provider?.showInteractionModeToggle === false
           ? { interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE }
           : {}),
       });
     },
-    [selectedEnvironmentRuntime?.serverConfig, selectedThreadKey],
+    [selectedEnvironmentRuntime?.serverConfig, selectedThreadKey, runtimeMode, selectedProvider],
   );
 
   const onUpdateRuntimeMode = useCallback(

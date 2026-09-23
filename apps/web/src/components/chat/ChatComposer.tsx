@@ -1,7 +1,7 @@
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
-import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
+import { runtimeModeConfig } from "./runtimeModeConfig";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { AttachmentFilePreview } from "../files/AttachmentFilePreview";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -251,7 +251,7 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerImageThumbnail } from "./ComposerImageThumbnail";
-import { runtimeModeOptionsForProvider } from "./runtimeModeOptions";
+import { runtimeModeOptionsForProviders } from "./runtimeModeOptions";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -1897,12 +1897,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectModelSelection: activeProjectDefaultModelSelection,
     settings,
   });
+  const runtimeModeOptions = useMemo(
+    () =>
+      runtimeModeOptionsForProviders(
+        multipleModelSelections === null
+          ? [selectedProviderEntry?.snapshot]
+          : multipleModelSelections.map((selection) =>
+              providerStatuses.find((provider) => provider.instanceId === selection.instanceId),
+            ),
+      ),
+    [multipleModelSelections, providerStatuses, selectedProviderEntry],
+  );
+  const effectiveRuntimeMode = coerceRuntimeModeToSupported(runtimeMode, {
+    supportedRuntimeModes: runtimeModeOptions,
+    defaultRuntimeMode: selectedProviderEntry?.snapshot.defaultRuntimeMode,
+  });
   const providerSendBlockReason = getAntigravitySendBlockReason(
     selectedProviderEntry?.snapshot,
     selectedModel,
   );
   const sendDisabledReason =
     externalSendDisabledReason ??
+    (runtimeModeOptions.length === 0 ? "Selected providers have no shared runtime mode." : null) ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
     (activePendingProgress
       ? attachmentBlockReason
@@ -1974,14 +1990,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
     }, retryLater);
   }, [environmentId, gitCwd, prompt, refreshProviders, selectedProviderEntry]);
-  const runtimeModeOptions = useMemo(
-    () => runtimeModeOptionsForProvider(selectedProviderStatus),
-    [selectedProviderStatus],
-  );
-  const effectiveRuntimeMode = coerceRuntimeModeToSupported(
-    runtimeMode,
-    selectedProviderStatus?.supportedRuntimeModes,
-  );
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],

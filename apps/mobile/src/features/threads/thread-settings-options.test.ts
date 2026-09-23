@@ -1,3 +1,4 @@
+import { ALL_PROVIDER_RUNTIME_MODES, coerceRuntimeModeToSupported } from "@t3tools/contracts";
 import type { ProviderOptionDescriptor } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -19,6 +20,22 @@ const effortDescriptor: Extract<ProviderOptionDescriptor, { type: "select" }> = 
 };
 
 describe("runtimeModeChoices", () => {
+  it("renders Prime versus Codex modes and selects the visible provider default on switching", () => {
+    const prime = {
+      supportedRuntimeModes: ["approval-required", "full-access"] as const,
+      defaultRuntimeMode: "approval-required" as const,
+    };
+    for (const provider of [prime, ALL_PROVIDER_RUNTIME_MODES]) {
+      const choices = runtimeModeChoices(provider.supportedRuntimeModes).map(
+        (choice) => choice.mode,
+      );
+      expect(choices).toEqual(provider.supportedRuntimeModes);
+      const selected = coerceRuntimeModeToSupported("auto-accept-edits", provider);
+      expect(choices).toContain(selected);
+      expect(selected).toBe(provider === prime ? "approval-required" : "auto-accept-edits");
+    }
+  });
+
   it("keeps all current modes for legacy provider snapshots", () => {
     expect(runtimeModeChoices(undefined).map((choice) => choice.mode)).toEqual([
       "approval-required",

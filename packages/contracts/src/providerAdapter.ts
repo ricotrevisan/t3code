@@ -5,6 +5,7 @@
  * configuration. Clients may receive these declarative values, but never load
  * the package module itself.
  */
+import { ProviderRuntimeModes } from "./runtimeModes.ts";
 import * as Schema from "effect/Schema";
 import { ForwardCompatibleArray, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
@@ -105,6 +106,8 @@ export const ProviderAdapterManifestV1 = Schema.Struct({
   capabilities: ProviderAdapterCapabilitySet,
   configSchema: ProviderAdapterConfigSchema,
   maintenance: Schema.optionalKey(ProviderAdapterMaintenanceV1),
+  /** Optional for older V1 packages. New packages should advertise their execution policies. */
+  runtimeModes: Schema.optional(ProviderRuntimeModes),
 });
 export type ProviderAdapterManifestV1 = typeof ProviderAdapterManifestV1.Type;
 

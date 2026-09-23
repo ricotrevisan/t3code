@@ -1,5 +1,10 @@
 import { withAgentDeviceEnvironment } from "../../mcp/McpProviderSession.ts";
-import { AntigravitySettings, ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
+import {
+  ALL_PROVIDER_RUNTIME_MODES,
+  AntigravitySettings,
+  ProviderDriverKind,
+  ProviderSetupError,
+} from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   NodeRuntimeUnavailableError,
@@ -80,7 +85,11 @@ export type AntigravityDriverEnv =
 /** Each instance owns its Google profile. Executable releases are shared by the environment. */
 export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityDriverEnv> = {
   driverKind: DRIVER,
-  metadata: { displayName: "Antigravity", supportsMultipleInstances: true },
+  metadata: {
+    runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
+    displayName: "Antigravity",
+    supportsMultipleInstances: true,
+  },
   configSchema: AntigravitySettings,
   defaultConfig: () => decodeSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
@@ -117,6 +126,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         instanceId,
       });
       const stampIdentity = withInstanceIdentity({
+        runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
         instanceId,
         driverKind: DRIVER,
         displayName,

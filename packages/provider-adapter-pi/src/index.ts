@@ -32,6 +32,7 @@ export const PI_PROVIDER_ADAPTER_MANIFEST: ProviderAdapterManifestV1 = {
     npmPackage: "@earendil-works/pi-coding-agent",
     binaryConfigKey: "binaryPath",
   },
+  runtimeModes: { supportedRuntimeModes: ["full-access"], defaultRuntimeMode: "full-access" },
   configSchema: {
     type: "object",
     additionalProperties: false,

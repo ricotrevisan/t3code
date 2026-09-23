@@ -82,6 +82,18 @@ it.layer(testLayer)("CodexDriver", (it) => {
           },
         });
 
+        const snapshot = yield* instance.snapshot.getSnapshot;
+        expect(snapshot.supportedRuntimeModes).toEqual([
+          "approval-required",
+          "auto-accept-edits",
+          "auto",
+          "full-access",
+        ]);
+        expect(snapshot.defaultRuntimeMode).toBe("full-access");
+        expect(CodexDriver.metadata.runtimeModes).toEqual({
+          supportedRuntimeModes: snapshot.supportedRuntimeModes,
+          defaultRuntimeMode: snapshot.defaultRuntimeMode,
+        });
         const capabilities = yield* instance.snapshot.resolveMaintenance();
         expect(capabilities.update).toMatchObject({
           executable: binaryPath,

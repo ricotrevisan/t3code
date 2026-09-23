@@ -22,6 +22,7 @@
  * @module provider/ProviderDriver
  */
 import type {
+  ProviderRuntimeModes,
   ProviderConsumeResetCreditOutcome,
   ProviderAdapterPackageReference,
   ProviderDriverKind,
@@ -47,6 +48,7 @@ import type { ProviderAuthController } from "./Services/ProviderAuthService.ts";
 export interface ProviderDriverMetadata {
   /** Human-readable name for the driver itself (e.g. "Codex"). */
   readonly displayName: string;
+  readonly runtimeModes?: ProviderRuntimeModes;
   /**
    * Whether the driver may be instantiated more than once concurrently.
    * Defaults to `true`. Set to `false` for drivers that wrap a global

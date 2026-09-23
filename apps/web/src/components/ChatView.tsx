@@ -7159,7 +7159,7 @@ export default function ChatView(props: ChatViewProps) {
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
-        runtimeMode,
+        runtimeMode: context.runtimeMode,
         interactionMode: context.interactionMode,
       });
       const result =
@@ -7171,7 +7171,7 @@ export default function ChatView(props: ChatViewProps) {
                 threadId,
                 message: { messageId, role: "user", text: "/compact", attachments: [] },
                 modelSelection: context.selectedModelSelection,
-                runtimeMode,
+                runtimeMode: context.runtimeMode,
                 interactionMode: context.interactionMode,
                 createdAt,
               },
@@ -8004,14 +8004,14 @@ export default function ChatView(props: ChatViewProps) {
                   },
                   modelSelection: target.selection,
                   titleSeed: title,
-                  runtimeMode,
+                  runtimeMode: runtimeModeForSend,
                   interactionMode: target.interactionMode,
                   bootstrap: {
                     createThread: {
                       projectId: activeProject.id,
                       title,
                       modelSelection: target.selection,
-                      runtimeMode,
+                      runtimeMode: runtimeModeForSend,
                       interactionMode: target.interactionMode,
                       branch: activeThreadBranch,
                       worktreePath: null,
@@ -9117,7 +9117,7 @@ export default function ChatView(props: ChatViewProps) {
       defaultRuntimeMode,
       providerStatuses.find(
         (provider) => provider.instanceId === ctxSelectedModelSelection.instanceId,
-      )?.supportedRuntimeModes,
+      ),
     );
 
     const createdAt = new Date().toISOString();
@@ -9336,11 +9336,21 @@ export default function ChatView(props: ChatViewProps) {
         nextModelSelection,
         { explicit: true },
       );
+      setComposerDraftRuntimeMode(
+        scopeThreadRef(activeThread.environmentId, activeThread.id),
+        coerceRuntimeModeToSupported(
+          composerRef.current?.getSendContext().runtimeMode ?? runtimeMode,
+          entry,
+        ),
+      );
       setStickyComposerModelSelection(nextModelSelection);
       if (options?.focusComposer !== false) scheduleComposerFocus();
     },
     [
       activeThread,
+      composerRef,
+      runtimeMode,
+      setComposerDraftRuntimeMode,
       lockedProvider,
       scheduleComposerFocus,
       setComposerDraftModelSelection,

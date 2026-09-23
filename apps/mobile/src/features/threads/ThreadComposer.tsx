@@ -334,7 +334,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const supportedRuntimeModes = selectedProviderStatus?.supportedRuntimeModes;
   const effectiveRuntimeMode = coerceRuntimeModeToSupported(
     currentRuntimeMode,
-    supportedRuntimeModes,
+    selectedProviderStatus,
   );
   const composerOwnerKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
   const openDraftDocument = (attachment: ComposerDocumentAttachment) => {
@@ -570,6 +570,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     [
       currentModelSelection,
       effectiveRuntimeMode,
+      props.environmentId,
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
       providerOptionDescriptors,

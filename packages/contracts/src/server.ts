@@ -222,7 +222,10 @@ export const ServerProvider = Schema.Struct({
       canInstall: Schema.Boolean,
     }),
   ),
-  supportedRuntimeModes: Schema.optional(Schema.Array(RuntimeMode)),
+  supportedRuntimeModes: Schema.optional(
+    Schema.Array(RuntimeMode).check(Schema.isMinLength(1), Schema.isUnique()),
+  ),
+  defaultRuntimeMode: Schema.optional(RuntimeMode),
   enabled: Schema.Boolean,
   installed: Schema.Boolean,
   version: Schema.NullOr(TrimmedNonEmptyString),
@@ -249,7 +252,14 @@ export const ServerProvider = Schema.Struct({
   usageLimits: Schema.optional(ServerProviderUsageLimits),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
-});
+}).check(
+  Schema.makeFilter(
+    (provider) =>
+      provider.defaultRuntimeMode === undefined ||
+      provider.supportedRuntimeModes?.includes(provider.defaultRuntimeMode) === true ||
+      "The default runtime mode must be supported by the provider.",
+  ),
+);
 export type ServerProvider = typeof ServerProvider.Type;
 
 // Provider status kinds grow over time (ServerProviderState,
