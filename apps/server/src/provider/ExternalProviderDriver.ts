@@ -27,8 +27,10 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import { HttpClient } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import { ProviderAdapterRequestError, ProviderDriverError } from "./Errors.ts";
 import { makeExternalProviderAdapterHostV2 } from "./ExternalProviderAdapterHost.ts";
 import {
@@ -37,14 +39,22 @@ import {
   type ProviderInstance,
 } from "./ProviderDriver.ts";
 import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
+import {
+  enrichProviderSnapshotWithVersionAdvisory,
+  makeCachedProviderMaintenanceResolution,
+  makeManualOnlyProviderMaintenanceCapabilities,
+  makePackageManagedProviderMaintenanceResolver,
+  resolveProviderMaintenanceCapabilitiesEffect,
+} from "./providerMaintenance.ts";
 import { buildUnavailableProviderSnapshot } from "./unavailableProviderSnapshot.ts";
 
 export type ExternalProviderDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | Path.Path
-  | ServerConfig;
+  | HttpClient.HttpClient
+  | ServerConfig
+  | ServerSettingsService;
 
 const packageReference = <Config, Host extends ProviderAdapterHost>(
   adapterPackage: ProviderAdapterPackageV1<Config, Host>,
@@ -224,6 +234,9 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
     defaultConfig: () => defaultConfig,
     create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
       Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
         const negotiatedProtocolVersion = negotiateHostProtocolVersion(
           adapterPackage.manifest.hostProtocol.minimum,
           adapterPackage.manifest.hostProtocol.maximum,
@@ -493,19 +506,102 @@ export const makeExternalProviderDriver = <Config, Host extends ProviderAdapterH
             Effect.catch((error) => unavailableSnapshot(operation, error)),
             Effect.catchDefect((defect) => unavailableSnapshot(operation, defect)),
           );
+        // Adapters that declare a locally installed harness CLI opt into the
+        // server's package-managed maintenance engine: update advisories on
+        // their snapshots and a one-click update command derived from whoever
+        // owns the executable. Adapters without the declaration stay
+        // manual-only and publish snapshots untouched.
+        const maintenance = adapterPackage.manifest.maintenance;
+        const maintenanceServices = maintenance
+          ? {
+              httpClient: yield* HttpClient.HttpClient,
+              serverSettings: yield* ServerSettingsService,
+            }
+          : null;
+        const binaryPathFromConfig = (): string | null => {
+          if (!maintenance) {
+            return null;
+          }
+          const readKey = (value: unknown): string | null => {
+            if (!isRecord(value)) {
+              return null;
+            }
+            const raw = value[maintenance.binaryConfigKey];
+            return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+          };
+          return readKey(config) ?? readKey(defaultConfig);
+        };
+        const resolveMaintenance: ProviderInstance["snapshot"]["resolveMaintenance"] = maintenance
+          ? yield* makeCachedProviderMaintenanceResolution(
+              resolveProviderMaintenanceCapabilitiesEffect(
+                makePackageManagedProviderMaintenanceResolver({
+                  provider,
+                  npmPackageName: maintenance.npmPackage,
+                  nativeUpdate: null,
+                }),
+                { binaryPath: binaryPathFromConfig() },
+              ).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, pathService),
+              ),
+            )
+          : () =>
+              Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
+              );
+        const enrichSnapshotWithMaintenance = (
+          snapshot: ServerProvider,
+        ): Effect.Effect<ServerProvider> =>
+          maintenanceServices
+            ? Effect.gen(function* () {
+                const settings = yield* maintenanceServices.serverSettings.getSettings.pipe(
+                  Effect.orElseSucceed(() => undefined),
+                );
+                const capabilities = yield* resolveMaintenance();
+                const installedVersion =
+                  typeof capabilities.installedVersion === "string"
+                    ? capabilities.installedVersion.trim()
+                    : null;
+                // The owning installer's record outranks the adapter's own
+                // version string, which describes the adapter package and may
+                // be unrelated to the harness CLI it supervises.
+                const patched =
+                  installedVersion !== null && installedVersion.length > 0
+                    ? { ...snapshot, version: installedVersion }
+                    : snapshot;
+                return yield* enrichProviderSnapshotWithVersionAdvisory(patched, capabilities, {
+                  enableProviderUpdateChecks: settings?.enableProviderUpdateChecks,
+                }).pipe(
+                  Effect.provideService(HttpClient.HttpClient, maintenanceServices.httpClient),
+                );
+              }).pipe(
+                // Enrichment must never take the snapshot channel down; an
+                // un-enriched snapshot is stale but honest.
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("External provider snapshot enrichment failed", {
+                    provider,
+                    instanceId,
+                    cause: Cause.pretty(cause),
+                  }).pipe(Effect.as(snapshot)),
+                ),
+              )
+            : Effect.succeed(snapshot);
         const snapshot: ProviderInstance["snapshot"] = {
-          resolveMaintenance: () =>
-            Effect.succeed(
-              makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
-            ),
+          resolveMaintenance,
           // V1 packages own their published snapshot, so a runtime usage-limit update cannot be
           // folded into it. External adapters that support limits report them inside snapshots.
           applyUsageLimits: () => Effect.void,
-          getSnapshot: safeSnapshot("snapshot read", external.snapshot.getSnapshot),
-          refresh: safeSnapshot("snapshot refresh", external.snapshot.refresh),
+          getSnapshot: safeSnapshot("snapshot read", external.snapshot.getSnapshot).pipe(
+            Effect.flatMap(enrichSnapshotWithMaintenance),
+          ),
+          refresh: safeSnapshot("snapshot refresh", external.snapshot.refresh).pipe(
+            Effect.flatMap(enrichSnapshotWithMaintenance),
+          ),
           streamChanges: external.snapshot.streamChanges.pipe(
             Stream.mapEffect((snapshot) => decodeServerProvider(snapshot)),
             Stream.map(withSnapshotIdentity),
+            Stream.mapEffect(enrichSnapshotWithMaintenance),
             Stream.catchCause((cause) =>
               Cause.hasInterruptsOnly(cause)
                 ? Stream.failCause(cause as Cause.Cause<never>)

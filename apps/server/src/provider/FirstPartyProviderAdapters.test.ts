@@ -130,6 +130,10 @@ describe("Pi first-party provider adapter package", () => {
         protocol: "jsonl-rpc",
         sessionConcurrency: "one-per-process",
       },
+      maintenance: {
+        npmPackage: "@earendil-works/pi-coding-agent",
+        binaryConfigKey: "binaryPath",
+      },
     });
     expect(PI_PROVIDER_ADAPTER_MANIFEST.capabilities).toEqual(
       PI_PROVIDER_ADAPTER_CAPABILITIES.features,

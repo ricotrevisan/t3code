@@ -59,6 +59,12 @@ export interface ProviderMaintenanceCapabilities {
   readonly packageName: string | null;
   readonly update: ProviderMaintenanceCommandAction | null;
   /**
+   * Installed version as recorded by the installer that owns the executable.
+   * `undefined` means the resolver never asked (native updaters, non-npm
+   * global layouts); `null` means it asked and could not read one.
+   */
+  readonly installedVersion?: string | null;
+  /**
    * Latest version reported by the installer that owns the executable.
    * `undefined` means the installer has no channel of its own and the npm
    * registry entry for `packageName` is authoritative; `null` means the
@@ -127,6 +133,12 @@ export const ProviderVersionCache = Context.Reference<Map<string, ProviderVersio
 const NpmLatestVersionResponse = Schema.Struct({
   version: Schema.optional(Schema.String),
 });
+const NpmInstalledPackageManifest = Schema.Struct({
+  version: Schema.optional(Schema.String),
+});
+const decodeNpmInstalledPackageManifest = Schema.decodeUnknownOption(
+  Schema.fromJsonString(NpmInstalledPackageManifest),
+);
 
 function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -161,6 +173,7 @@ export function makeProviderMaintenanceCapabilities(input: {
   readonly platform?: NodeJS.Platform;
   readonly env?: NodeJS.ProcessEnv;
   readonly latestVersion?: string | null;
+  readonly installedVersion?: string | null;
 }): ProviderMaintenanceCapabilities {
   const platform = input.platform ?? HostProcessPlatform.defaultValue();
   const update =
@@ -183,6 +196,7 @@ export function makeProviderMaintenanceCapabilities(input: {
     packageName: input.packageName,
     update,
     ...("latestVersion" in input ? { latestVersion: input.latestVersion } : {}),
+    ...("installedVersion" in input ? { installedVersion: input.installedVersion } : {}),
   };
 }
 
@@ -251,7 +265,7 @@ export function npmGlobalPrefixFromCommandPath(
 
 // `<prefix>/Cellar/<name>/<version>/…` or `<prefix>/Caskroom/<name>/<version>/…`.
 // Homebrew always nests a version directory under the keg.
-const HOMEBREW_KEG_PATTERN = /^(.*)\/(cellar|caskroom)\/([^/]+)\/[^/]+\//i;
+const HOMEBREW_KEG_PATTERN = /^(.*)\/(cellar|caskroom)\/([^/]+)\/([^/]+)\//i;
 
 export interface HomebrewOwnership {
   readonly kind: "formula" | "cask";
@@ -277,6 +291,12 @@ export function homebrewOwnershipFromCommandPath(
     name: match[3]!,
     prefix: match[1]!,
   };
+}
+
+/** The version directory in the keg path; a display value for advisories. */
+export function homebrewKegVersionFromCommandPath(realCommandPath: string): string | null {
+  const match = HOMEBREW_KEG_PATTERN.exec(realCommandPath.replaceAll("\\", "/"));
+  return match ? match[4]! : null;
 }
 
 const HomebrewInfoResponse = Schema.Struct({
@@ -427,6 +447,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
         `${packageName}@latest`,
       ],
       updateLockKey: `npm-global:${normalizeCommandPath(npmPrefix)}`,
+      installedVersion: yield* readNpmInstalledVersion(context, npmPrefix, packageName),
     });
   }
 
@@ -468,10 +489,37 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       updateLockKey: "homebrew",
       updateCommand: ["brew", ...args].join(" "),
       latestVersion: info ? parseHomebrewLatestVersion(info, homebrew) : null,
+      installedVersion: homebrewKegVersionFromCommandPath(context.realCommandPath),
     });
   }
 
   return manual;
+});
+
+/**
+ * The version the owning npm prefix records for the package. The prefix layout
+ * matches the one `resolveNpmGlobalPrefix` proved: `<prefix>/lib/node_modules/…`
+ * on POSIX, shims beside `node_modules` on Windows.
+ */
+const readNpmInstalledVersion = Effect.fn("readNpmInstalledVersion")(function* (
+  context: ProviderMaintenanceResolutionContext,
+  npmPrefix: string,
+  packageName: string,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const manifestPath =
+    context.platform === "win32"
+      ? path.join(npmPrefix, "node_modules", ...packageName.split("/"), "package.json")
+      : path.join(npmPrefix, "lib", "node_modules", ...packageName.split("/"), "package.json");
+  const raw = yield* fileSystem.readFileString(manifestPath).pipe(Effect.orElseSucceed(() => null));
+  if (raw === null) {
+    return null;
+  }
+  return Option.match(decodeNpmInstalledPackageManifest(raw), {
+    onNone: () => null,
+    onSome: (manifest) => nonEmptyString(manifest.version),
+  });
 });
 
 /**
