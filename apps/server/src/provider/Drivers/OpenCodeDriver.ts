@@ -12,7 +12,11 @@
  *
  * @module provider/Drivers/OpenCodeDriver
  */
-import { OpenCodeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  ALL_PROVIDER_RUNTIME_MODES,
+  OpenCodeSettings,
+  ProviderDriverKind,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -93,6 +97,7 @@ export type OpenCodeDriverEnv =
 export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
+    runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
     displayName: "OpenCode",
     supportsMultipleInstances: true,
   },
@@ -114,6 +119,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         instanceId,
       });
       const stampIdentity = withInstanceIdentity({
+        runtimeModes: ALL_PROVIDER_RUNTIME_MODES,
         instanceId,
         driverKind: DRIVER_KIND,
         displayName,

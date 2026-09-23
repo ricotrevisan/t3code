@@ -138,6 +138,10 @@ export default {
       protocol: "jsonl-rpc",
       sessionConcurrency: "one-per-process",
     },
+    runtimeModes: {
+      supportedRuntimeModes: ["approval-required", "full-access"],
+      defaultRuntimeMode: "approval-required",
+    },
     capabilities: ["turn.interrupt"],
     configSchema: { type: "object", additionalProperties: false },
   },

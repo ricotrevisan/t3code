@@ -62,10 +62,23 @@ describe("ServerProvider", () => {
       instanceId: "primeAgent",
       driver: "primeAgent",
       supportedRuntimeModes: ["approval-required", "full-access"],
+      defaultRuntimeMode: "approval-required",
     });
 
     expect(legacy.supportedRuntimeModes).toBeUndefined();
     expect(restricted.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
+    expect(restricted.defaultRuntimeMode).toBe("approval-required");
+    expect(decodeServerProvider(JSON.parse(JSON.stringify(restricted)))).toEqual(restricted);
+  });
+
+  it("rejects an unsupported advertised default", () => {
+    expect(() =>
+      decodeServerProvider({
+        ...baseProviderSnapshot,
+        supportedRuntimeModes: ["approval-required", "full-access"],
+        defaultRuntimeMode: "auto-accept-edits",
+      }),
+    ).toThrow("default runtime mode must be supported");
   });
 
   it("defaults one-click update support when decoding older advisory snapshots", () => {

@@ -359,7 +359,7 @@ identity against trusted-local replacement, and pins legacy or explicitly unpinn
 configs during hydration. An explicit stale package reference is never rewritten; normal registry
 matching leaves that instance visible but unavailable.
 
-Prime requires Host V2. Its RPC sessions and version/model/approval probes use host-supervised
+Prime requires Host V2. Its RPC sessions and version/model probes use host-supervised
 processes. Session directories, extension artifacts, resume containment, workspace resolution, and
 attachment bytes come from the host resource broker. The package owns JSONL framing, request
 correlation, Prime protocol translation, canonical terminal events, and package snapshots. The

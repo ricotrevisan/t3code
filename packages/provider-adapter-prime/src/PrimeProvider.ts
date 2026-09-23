@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import { PRIME_RUNTIME_MODES } from "./runtimeModes.ts";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -27,11 +28,6 @@ import * as Stream from "effect/Stream";
 
 import type { PrimeAdapterConfig } from "./PrimeAdapter.ts";
 import { makePrimeRpcClient, PrimeRpcError } from "./PrimeRpcClient.ts";
-import {
-  isPrimeApprovalExtensionHandshake,
-  preparePrimeApprovalExtension,
-  PRIME_APPROVAL_EXTENSION_MODE_FLAG,
-} from "./primeApprovalExtension.ts";
 import { loggedInPrimeProvidersFromAuthData, mapPrimeAvailableModels } from "./primeModels.ts";
 import { primePackageCatalogExtensionArgs } from "./primePackageCatalogExtensions.ts";
 import { preparePrimeOpenRouterCatalogExtension } from "./primeOpenRouterCatalogExtension.ts";
@@ -45,7 +41,6 @@ export const PRIME_PRESENTATION = {
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const MODELS_PROBE_TIMEOUT_MS = 10_000;
-const APPROVAL_PROBE_TIMEOUT_MS = 4_000;
 
 const PrimeListedModel = Schema.Struct({
   id: Schema.String,
@@ -200,43 +195,6 @@ const listPrimeModels = (
     }),
   );
 
-const probePrimeApprovalExtension = (
-  config: PrimeAdapterConfig,
-  environment: Readonly<Record<string, string | undefined>>,
-  cwd: string,
-  host: ProviderAdapterHostV2,
-) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const extensionPath = yield* preparePrimeApprovalExtension(host.storage).pipe(
-        Effect.mapError(
-          (cause) =>
-            new PrimeRpcError({ operation: "approval_probe", detail: cause.detail, cause }),
-        ),
-      );
-      const rpc = yield* makePrimeProbeRpcClient(host, {
-        command: config.binaryPath || "prime-agent",
-        args: [
-          "--mode",
-          "rpc",
-          "--no-session",
-          "--no-tools",
-          "--no-extensions",
-          "--extension",
-          extensionPath,
-          `--${PRIME_APPROVAL_EXTENSION_MODE_FLAG}=approval-required`,
-        ],
-        cwd,
-        environment,
-      });
-      const response = yield* rpc.request(
-        { type: "get_commands" },
-        { timeoutMs: APPROVAL_PROBE_TIMEOUT_MS },
-      );
-      return isPrimeApprovalExtensionHandshake(response.data, extensionPath);
-    }),
-  );
-
 export interface PrimeSnapshotOptions {
   readonly packageId: ProviderAdapterPackageReference["id"];
   readonly packageVersion: ProviderAdapterPackageReference["version"];
@@ -259,7 +217,7 @@ const baseSnapshot = (
   badgeLabel: PRIME_PRESENTATION.badgeLabel,
   showInteractionModeToggle: PRIME_PRESENTATION.showInteractionModeToggle,
   requiresNewThreadForModelChange: PRIME_PRESENTATION.requiresNewThreadForModelChange,
-  supportedRuntimeModes: ["full-access"],
+  ...PRIME_RUNTIME_MODES,
   enabled: input.enabled,
   installed: input.enabled,
   version: null,
@@ -351,20 +309,6 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
     };
   }
 
-  const approvalResult = yield* probePrimeApprovalExtension(
-    input.config,
-    input.environment,
-    cwd,
-    host,
-  ).pipe(Effect.timeoutOption(APPROVAL_PROBE_TIMEOUT_MS), Effect.result);
-  const approvalRequired =
-    Result.isSuccess(approvalResult) &&
-    Option.isSome(approvalResult.success) &&
-    approvalResult.success.value;
-  const supportedRuntimeModes: ServerProvider["supportedRuntimeModes"] = approvalRequired
-    ? ["full-access", "approval-required"]
-    : ["full-access"];
-
   const modelsResult = yield* listPrimeModels(input.config, input.environment, cwd, host).pipe(
     Effect.timeoutOption(MODELS_PROBE_TIMEOUT_MS),
     Effect.result,
@@ -374,7 +318,6 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
       ...initial,
       installed: true,
       version,
-      supportedRuntimeModes,
       status: "warning" as const,
       message:
         Result.isSuccess(modelsResult) && Option.isNone(modelsResult.success)
@@ -388,7 +331,6 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
       ...initial,
       installed: true,
       version,
-      supportedRuntimeModes,
       status: "warning" as const,
       auth: { status: "unauthenticated" },
       message: "Prime Agent is installed but has no logged-in providers.",
@@ -399,7 +341,6 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
     ...withoutMessage,
     installed: true,
     version,
-    supportedRuntimeModes,
     status: "ready" as const,
     auth: { status: "authenticated" },
     models,
