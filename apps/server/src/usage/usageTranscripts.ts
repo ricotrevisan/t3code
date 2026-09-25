@@ -675,6 +675,7 @@ export function parsePrimeAgentLine(line: string, state: PrimeAgentScanState): U
     sessionId: state.sessionId,
     totals,
     reportedCostUsd: primeAgentReportedCostUsd(usageRecord),
+    fast: false,
     dedupeKey,
   };
 }

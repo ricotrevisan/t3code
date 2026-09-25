@@ -65,7 +65,7 @@ import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import ClearAutomaticProjectModelDefaults from "./Migrations/051_ClearAutomaticProjectModelDefaults.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
-import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
+import Migration0053 from "./Migrations/056_PullRequestFilesViewed.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
 import RepairForkProjectionSchema from "./Migrations/053_RepairForkProjectionSchema.ts";
 import Migration0055 from "./Migrations/055_ProviderAdapterPackageSessionIdentity.ts";
