@@ -298,6 +298,12 @@ function makeConnection(input: {
   let abortRequested = false;
   let turnStartedEmitted = false;
   let lastAssistantMessage: PiAssistantMessage | undefined;
+  let assistantMessageSequence = 0;
+  let assistantMessageEnded = false;
+  const assistantItemId = () =>
+    activeTurnId === undefined
+      ? undefined
+      : RuntimeItemId.make(`${activeTurnId}:pi-assistant:${assistantMessageSequence}`);
   let transportClosed = false;
 
   const pushEvent = (event: PiEventInput) =>
@@ -329,6 +335,8 @@ function makeConnection(input: {
     turnStartedEmitted = false;
     abortRequested = false;
     lastAssistantMessage = undefined;
+    assistantMessageSequence = 0;
+    assistantMessageEnded = false;
   };
 
   const settleTurn = () =>
@@ -400,19 +408,25 @@ function makeConnection(input: {
       case "agent_start":
       case "turn_start":
         return emitTurnStarted();
+      case "message_start":
+        assistantMessageEnded = false;
+        return Effect.void;
       case "message_update": {
         if (!isRecord(raw.assistantMessageEvent)) return Effect.void;
+        assistantMessageEnded = false;
         const delta = raw.assistantMessageEvent;
         const deltaType = stringField(delta, "type");
         if (deltaType === "text_delta" || deltaType === "thinking_delta") {
           const text = stringField(delta, "delta");
           if (text === undefined) return Effect.void;
           const contentIndex = numberField(delta, "contentIndex");
+          const itemId = assistantItemId();
           return emitTurnStarted().pipe(
             Effect.andThen(
               pushEvent(
                 withTurn({
                   type: "content.delta",
+                  ...(itemId === undefined ? {} : { itemId }),
                   payload: {
                     streamKind: deltaType === "text_delta" ? "assistant_text" : "reasoning_text",
                     delta: text,
@@ -491,9 +505,33 @@ function makeConnection(input: {
       }
       case "message_end": {
         const message = parseAssistantMessage(raw.message);
-        if (message === undefined) return Effect.void;
+        if (message === undefined || assistantMessageEnded) return Effect.void;
+        assistantMessageEnded = true;
         lastAssistantMessage = message;
-        return emitUsage(message.usage);
+        const messageItemId = assistantItemId();
+        assistantMessageSequence += 1;
+        const content =
+          isRecord(raw.message) && Array.isArray(raw.message.content) ? raw.message.content : [];
+        const text = content
+          .filter(
+            (part): part is Record<string, unknown> =>
+              isRecord(part) && part.type === "text" && typeof part.text === "string",
+          )
+          .map((part) => part.text)
+          .join("");
+        // Pi can finish several assistant messages in one T3 turn. Closing each
+        // native message lets ingestion start a new segment for the next one.
+        return (
+          text.length > 0
+            ? pushEvent(
+                withTurn({
+                  type: "item.completed",
+                  ...(messageItemId === undefined ? {} : { itemId: messageItemId }),
+                  payload: { itemType: "assistant_message", status: "completed", detail: text },
+                }),
+              )
+            : Effect.void
+        ).pipe(Effect.andThen(emitUsage(message.usage)));
       }
       case "turn_end": {
         const message = parseAssistantMessage(raw.message);

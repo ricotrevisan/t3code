@@ -113,6 +113,28 @@ const settle = (message) => {
 const runTurn = (message, reply) => {
   emit({ type: "agent_start" });
   emit({ type: "turn_start" });
+  if (message.startsWith("!multi-text")) {
+    const text = (delta) =>
+      emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
+      });
+    text("Smoke ");
+    text("check.");
+    const firstMessage = finishMessage("Smoke check.", "toolUse");
+    emit({ type: "message_end", message: firstMessage });
+    emit({ type: "tool_execution_start", toolCallId: "check", toolName: "bash", args: {} });
+    emit({ type: "tool_execution_end", toolCallId: "check", toolName: "bash", result: {} });
+    emit({ type: "turn_start" });
+    text("Test is unchanged.");
+    finishMessage("Test is unchanged.", "toolUse");
+    emit({ type: "tool_execution_start", toolCallId: "deploy", toolName: "bash", args: {} });
+    emit({ type: "tool_execution_end", toolCallId: "deploy", toolName: "bash", result: {} });
+    emit({ type: "turn_start" });
+    text("**Deployed.**");
+    settle(finishMessage("**Deployed.**"));
+    return;
+  }
   if (message.startsWith("!subagents")) {
     const toolCallId = `delegation-${state.entries.length}`;
     const toolName = "subagent";
