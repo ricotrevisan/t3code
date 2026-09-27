@@ -230,6 +230,7 @@ const program = Effect.gen(function* () {
         "turn.started",
         "content.delta",
         "content.delta",
+        "item.completed",
         "thread.token-usage.updated",
         "turn.completed",
       ]),
@@ -237,7 +238,7 @@ const program = Effect.gen(function* () {
   check("reasoning delta", plain[1]?.payload.streamKind === "reasoning_text");
   check(
     "authoritative final usage",
-    plain[3]?.payload.usage.usedTokens === 150 && plain[3]?.payload.usage.outputTokens === 30,
+    plain[4]?.payload.usage.usedTokens === 150 && plain[4]?.payload.usage.outputTokens === 30,
   );
   const heldFiber = yield* collectUntil((event) => event.type === "content.delta");
   const heldTurn = yield* send("!hold please");
@@ -438,6 +439,37 @@ const program = Effect.gen(function* () {
         (event) => event.type === "content.delta" && event.payload.delta === "tool output handled",
       ) &&
       tool.filter((event) => event.type === "turn.started").length === 1,
+  );
+  const emissions = yield* complete("!multi-text");
+  const textAndCompletions = emissions.filter(
+    (event) =>
+      (event.type === "content.delta" && event.payload.streamKind === "assistant_text") ||
+      event.type === "item.completed",
+  );
+  check(
+    "Pi progress, post-tool text and final answer preserve message boundaries",
+    JSON.stringify(
+      textAndCompletions.map((event) =>
+        event.type === "content.delta" ? event.payload.delta : event.payload.itemType,
+      ),
+    ) ===
+      JSON.stringify([
+        "Smoke ",
+        "check.",
+        "assistant_message",
+        "command_execution",
+        "Test is unchanged.",
+        "assistant_message",
+        "command_execution",
+        "**Deployed.**",
+        "assistant_message",
+      ]) &&
+      emissions.filter((event) => event.type === "turn.started").length === 1 &&
+      emissions.filter(terminal).length === 1 &&
+      textAndCompletions[0]?.itemId === textAndCompletions[1]?.itemId &&
+      textAndCompletions[1]?.itemId === textAndCompletions[2]?.itemId &&
+      textAndCompletions[2]?.itemId !== textAndCompletions[4]?.itemId &&
+      textAndCompletions[4]?.itemId !== textAndCompletions[7]?.itemId,
   );
   const retry = yield* complete("!retry transient");
   check(

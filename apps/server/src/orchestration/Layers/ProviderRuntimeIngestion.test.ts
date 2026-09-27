@@ -1494,6 +1494,71 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("keeps separate Pi assistant messages in one turn after tool calls", async () => {
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
+    const base = {
+      provider: ProviderDriverKind.make("piRpc"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("pi-multi-text"),
+    };
+    harness.emit({ ...base, type: "turn.started", eventId: asEventId("pi-start") });
+    for (const [index, text] of ["Smoke check.", "Test is unchanged.", "**Deployed.**"].entries()) {
+      const itemId = asItemId(`pi-multi-text:pi-assistant:${index}`);
+      harness.emit({
+        ...base,
+        type: "content.delta",
+        eventId: asEventId(`pi-text-${index}`),
+        itemId,
+        payload: { streamKind: "assistant_text", delta: text },
+      });
+      harness.emit({
+        ...base,
+        type: "item.completed",
+        eventId: asEventId(`pi-message-end-${index}`),
+        itemId,
+        payload: { itemType: "assistant_message", status: "completed", detail: text },
+      });
+      if (index < 2) {
+        const toolId = asItemId(`pi-tool-${index}`);
+        harness.emit({
+          ...base,
+          type: "item.started",
+          eventId: asEventId(`pi-tool-start-${index}`),
+          itemId: toolId,
+          payload: { itemType: "command_execution", title: "bash" },
+        });
+        harness.emit({
+          ...base,
+          type: "item.completed",
+          eventId: asEventId(`pi-tool-end-${index}`),
+          itemId: toolId,
+          payload: { itemType: "command_execution", status: "completed" },
+        });
+      }
+    }
+    harness.emit({
+      ...base,
+      type: "turn.completed",
+      eventId: asEventId("pi-completed"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === base.threadId);
+    expect(
+      thread?.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => ({
+          text: message.text,
+          streaming: message.streaming,
+        })),
+    ).toEqual([
+      { text: "Smoke check.", streaming: false },
+      { text: "Test is unchanged.", streaming: false },
+      { text: "**Deployed.**", streaming: false },
+    ]);
+  });
+
   it("streams reasoning deltas into a finalized reasoning message", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
