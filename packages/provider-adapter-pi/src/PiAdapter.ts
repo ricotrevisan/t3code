@@ -36,6 +36,11 @@ import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import {
+  preparePiPreviewExtension,
+  PI_PREVIEW_EMPTY_ENVIRONMENT,
+  PI_PREVIEW_HEALTH_COMMAND,
+} from "./piPreviewExtension.ts";
 import { makePiSubagents } from "./PiSubagents.ts";
 import type { PiProviderAdapterConfig } from "./index.ts";
 
@@ -70,6 +75,10 @@ const PiState = Schema.Struct({
   isCompacting: Schema.Boolean,
   thinkingLevel: Schema.optional(Schema.String),
 });
+const PiCommands = Schema.Struct({
+  commands: Schema.Array(Schema.Struct({ name: Schema.String, source: Schema.String })),
+});
+const decodeCommands = Schema.decodeUnknownEffect(PiCommands);
 const PiModels = Schema.Struct({
   models: Schema.Array(
     Schema.Struct({
@@ -127,6 +136,7 @@ interface PiConnection {
     command: Readonly<Record<string, unknown>>,
   ) => Effect.Effect<void, ProviderAdapterV1Error>;
   readonly startPump: Effect.Effect<void>;
+  readonly checkPreviewHealth: Effect.Effect<void, ProviderAdapterV1Error>;
   readonly exitCode: ProviderAdapterProcessV1["exitCode"];
   readonly expectExit: ProviderAdapterProcessV1["expectExit"];
   readonly close: ProviderAdapterProcessV1["close"];
@@ -247,13 +257,11 @@ function forbiddenLaunchFlag(args: ReadonlyArray<string>): string | undefined {
   );
 }
 
-const launchArgs = (args: ReadonlyArray<string>, sessionDirectory: string) => [
-  ...args,
-  "--mode",
-  "rpc",
-  "--session-dir",
-  sessionDirectory,
-];
+export const piLaunchArgs = (
+  args: ReadonlyArray<string>,
+  sessionDirectory: string,
+  trustedExtensionArgs: ReadonlyArray<string> = [],
+) => [...trustedExtensionArgs, ...args, "--mode", "rpc", "--session-dir", sessionDirectory];
 
 function commandAppearsMissing(cause: unknown, seen = new Set<unknown>()): boolean {
   if (seen.has(cause)) return false;
@@ -274,6 +282,7 @@ function commandAppearsMissing(cause: unknown, seen = new Set<unknown>()): boole
 
 function makeConnection(input: {
   readonly process: ProviderAdapterProcessV1;
+  readonly previewRequired?: boolean;
   readonly providerInstanceId: ProviderAdapterCreateInputV1<PiProviderAdapterConfig>["instanceId"];
   readonly threadId: ThreadId;
   readonly events: PubSub.PubSub<ProviderRuntimeEvent>;
@@ -657,6 +666,25 @@ function makeConnection(input: {
     threadId: input.threadId,
     request,
     notify,
+    checkPreviewHealth: input.previewRequired
+      ? request({ type: "get_commands" }).pipe(
+          Effect.flatMap(decodeCommands),
+          Effect.flatMap(({ commands }) =>
+            commands.some(
+              (command) =>
+                command.name === PI_PREVIEW_HEALTH_COMMAND && command.source === "extension",
+            )
+              ? Effect.void
+              : Effect.fail(adapterError("preview", "Missing bridge acknowledgement.")),
+          ),
+          Effect.mapError(() =>
+            adapterError(
+              "startSession",
+              "T3 preview bridge did not initialize. Restart the Pi session to retry.",
+            ),
+          ),
+        )
+      : Effect.void,
     startPump: Effect.all([pump, child.stderr.pipe(Stream.runDrain)], {
       concurrency: "unbounded",
       discard: true,
@@ -756,12 +784,16 @@ export function makePiAdapter(
           const cwd = yield* host.workspaces
             .resolveCwd(requestedCwd ?? config.cwd)
             .pipe(Effect.mapError((cause) => adapterError("startSession", cause.detail, cause)));
+          const preview = yield* preparePiPreviewExtension(host, threadId).pipe(
+            Effect.mapError((cause) => adapterError("startSession", cause.detail)),
+          );
           const spawned = yield* host.processes
             .spawn({
               command: config.binaryPath,
-              args: launchArgs(config.args, storage.sessionDirectory),
+              args: piLaunchArgs(config.args, storage.sessionDirectory, preview.args),
               cwd,
               environment: input.environment,
+              protectedEnvironment: preview.protectedEnvironment,
               purpose: { kind: "session", threadId },
             })
             .pipe(
@@ -772,12 +804,14 @@ export function makePiAdapter(
             );
           const connection = makeConnection({
             process: spawned,
+            previewRequired: preview.required,
             providerInstanceId: input.instanceId,
             threadId,
             events,
             scope,
           });
           yield* connection.startPump;
+          yield* connection.checkPreviewHealth;
           return connection;
         }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
       });
@@ -864,6 +898,7 @@ export function makePiAdapter(
               if (switchResult.cancelled === true) {
                 return yield* adapterError("startSession", "Pi session resume was cancelled.");
               }
+              yield* connection.checkPreviewHealth;
             }
             yield* applyModelSelection(
               connection,
@@ -1017,9 +1052,10 @@ export function makePiAdapter(
         const probe = yield* host.processes
           .spawn({
             command: config.binaryPath,
-            args: launchArgs(config.args, storage.sessionDirectory),
+            args: piLaunchArgs(config.args, storage.sessionDirectory),
             cwd,
             environment: input.environment,
+            protectedEnvironment: PI_PREVIEW_EMPTY_ENVIRONMENT,
             purpose: { kind: "probe" },
           })
           .pipe(Effect.provideService(Scope.Scope, scope), Effect.result);
@@ -1151,6 +1187,7 @@ export function makePiAdapter(
             return yield* adapterError("sendTurn", "Pi requires text or at least one attachment.");
           }
           const entry = yield* requireEntry(turnInput.threadId, "sendTurn");
+          yield* entry.connection.checkPreviewHealth;
           const images = [];
           const files = [];
           for (const attachment of attachments) {

@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  EnvironmentId,
   ProviderAdapterPackageId,
   ProviderInstanceId,
   ThreadId,
@@ -14,6 +15,8 @@ import * as Path from "effect/Path";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { ServerConfig, layerTest } from "../config.ts";
 import { ProviderAdapterHostResourceError } from "@t3tools/provider-adapter";
+
+import * as McpProviderSession from "../mcp/McpProviderSession.ts";
 
 import { makeExternalProviderAdapterHostV2 } from "./ExternalProviderAdapterHost.ts";
 
@@ -66,6 +69,54 @@ const expectResourceFailure = Effect.fn(function* <A, R>(
 });
 
 describe("ExternalProviderAdapterHostV2", () => {
+  it.effect(
+    "reads only this provider's current thread credential and observes recovery and clearing",
+    () =>
+      runHostTest(
+        Effect.gen(function* () {
+          const { host } = yield* makeHost();
+          const other = ThreadId.make("mcp-other-thread");
+          const config = {
+            environmentId: EnvironmentId.make("test-environment"),
+            threadId: THREAD_ID,
+            providerInstanceId: INSTANCE_ID,
+            providerSessionId: "initial",
+            endpoint: "http://localhost/mcp",
+            authorizationHeader: "Bearer test-initial",
+            capabilities: new Set(["preview"]),
+          };
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              McpProviderSession.clearMcpProviderSession(THREAD_ID);
+              McpProviderSession.clearMcpProviderSession(other);
+            }),
+          );
+          McpProviderSession.setMcpProviderSession(config);
+          McpProviderSession.setMcpProviderSession({
+            ...config,
+            threadId: other,
+            providerInstanceId: ProviderInstanceId.make("different-provider"),
+          });
+          assert.equal(
+            (yield* host.mcp!.readSession(THREAD_ID))?.authorizationHeader,
+            "Bearer test-initial",
+          );
+          assert.equal(yield* host.mcp!.readSession(other), undefined);
+          McpProviderSession.setMcpProviderSession({
+            ...config,
+            providerSessionId: "recovered",
+            authorizationHeader: "Bearer test-recovered",
+          });
+          assert.equal(
+            (yield* host.mcp!.readSession(THREAD_ID))?.authorizationHeader,
+            "Bearer test-recovered",
+          );
+          McpProviderSession.clearMcpProviderSession(THREAD_ID);
+          assert.equal(yield* host.mcp!.readSession(THREAD_ID), undefined);
+        }),
+      ),
+  );
+
   it.effect("uses package/instance storage by default and preserves a legacy storage key", () =>
     runHostTest(
       Effect.gen(function* () {

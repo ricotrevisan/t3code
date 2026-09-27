@@ -295,6 +295,7 @@ describe("trusted local provider adapter packages", () => {
       assert.equal(v2Host.protocolVersion, 2);
       assert.deepStrictEqual(Object.keys(v2Host).sort(), [
         "attachments",
+        "mcp",
         "processes",
         "protocolVersion",
         "storage",

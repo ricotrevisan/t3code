@@ -16,6 +16,7 @@ import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessS
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { ServerConfig } from "../config.ts";
+import { readMcpProviderSession } from "../mcp/McpProviderSession.ts";
 import {
   makeExternalProviderProcessSupervisor,
   type ExternalProviderProcessSupervisor,
@@ -482,6 +483,19 @@ export const makeExternalProviderAdapterHostV2 = Effect.fn("makeExternalProvider
         workspaces: { resolveCwd },
         storage: { prepareSession, validateSessionFile, materializeArtifact },
         attachments: { read: readAttachment },
+        mcp: {
+          readSession: (threadId) =>
+            Effect.sync(() => {
+              const session = readMcpProviderSession(threadId);
+              return session?.providerInstanceId === input.instanceId
+                ? {
+                    endpoint: session.endpoint,
+                    authorizationHeader: session.authorizationHeader,
+                    capabilities: session.capabilities,
+                  }
+                : undefined;
+            }),
+        },
       },
       unexpectedExits: processSupervisor.unexpectedExits,
     };
