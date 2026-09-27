@@ -36,6 +36,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import { preparePiPreviewExtension, PI_PREVIEW_EMPTY_ENVIRONMENT } from "./piPreviewExtension.ts";
 import { makePiSubagents } from "./PiSubagents.ts";
 import type { PiProviderAdapterConfig } from "./index.ts";
 
@@ -756,12 +757,16 @@ export function makePiAdapter(
           const cwd = yield* host.workspaces
             .resolveCwd(requestedCwd ?? config.cwd)
             .pipe(Effect.mapError((cause) => adapterError("startSession", cause.detail, cause)));
+          const preview = yield* preparePiPreviewExtension(host, threadId).pipe(
+            Effect.mapError((cause) => adapterError("startSession", cause.detail)),
+          );
           const spawned = yield* host.processes
             .spawn({
               command: config.binaryPath,
-              args: launchArgs(config.args, storage.sessionDirectory),
+              args: launchArgs([...config.args, ...preview.args], storage.sessionDirectory),
               cwd,
               environment: input.environment,
+              protectedEnvironment: preview.protectedEnvironment,
               purpose: { kind: "session", threadId },
             })
             .pipe(
@@ -1020,6 +1025,7 @@ export function makePiAdapter(
             args: launchArgs(config.args, storage.sessionDirectory),
             cwd,
             environment: input.environment,
+            protectedEnvironment: PI_PREVIEW_EMPTY_ENVIRONMENT,
             purpose: { kind: "probe" },
           })
           .pipe(Effect.provideService(Scope.Scope, scope), Effect.result);
