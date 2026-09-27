@@ -59,19 +59,24 @@ export const makeExternalProviderProcessSupervisor = Effect.fn(
         input.cwd === undefined
           ? {}
           : loadDirenvExportedEnv(input.cwd, { env: input.environment ?? process.env });
-      const environment =
-        input.environment === undefined
-          ? Object.keys(direnvEnv).length > 0
-            ? { ...process.env, ...direnvEnv }
-            : undefined
-          : { ...input.environment, ...direnvEnv };
-      const resolved = yield* resolveSpawnCommand(
-        input.command,
-        args,
-        environment === undefined ? {} : { env: environment, extendEnv: true },
-      ).pipe(
+      // Protected keys are authoritative even when absent (for example probes).
+      const environment = {
+        ...process.env,
+        ...input.environment,
+        ...direnvEnv,
+        ...input.protectedEnvironment,
+      };
+      // Spawn errors can retain command options, including the credential env.
+      const resolved = yield* resolveSpawnCommand(input.command, args, {
+        env: environment,
+        extendEnv: false,
+      }).pipe(
         Effect.mapError((cause) =>
-          processError("resolve", `Could not resolve '${input.command}'.`, cause),
+          processError(
+            "resolve",
+            `Could not resolve '${input.command}'.`,
+            input.protectedEnvironment ? undefined : cause,
+          ),
         ),
       );
       const outgoing = yield* Queue.bounded<Uint8Array, Cause.Done<void>>(64);
@@ -84,9 +89,8 @@ export const makeExternalProviderProcessSupervisor = Effect.fn(
         .spawn(
           ChildProcess.make(resolved.command, resolved.args, {
             ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-            ...(environment === undefined
-              ? { extendEnv: true }
-              : { env: environment, extendEnv: true }),
+            env: environment,
+            extendEnv: false,
             shell: resolved.shell,
             stdin: { stream: Stream.fromQueue(outgoing), endOnDone: true },
             stdout: "pipe",
@@ -97,7 +101,11 @@ export const makeExternalProviderProcessSupervisor = Effect.fn(
         )
         .pipe(
           Effect.mapError((cause) =>
-            processError("spawn", `Could not start '${input.command}'.`, cause),
+            processError(
+              "spawn",
+              `Could not start '${input.command}'.`,
+              input.protectedEnvironment ? undefined : cause,
+            ),
           ),
         );
       yield* Effect.gen(function* () {

@@ -25,6 +25,10 @@ When the selected `pi` executable belongs to the documented global npm package, 
 
 Environment variables configured on the instance are passed to Pi. Keep credentials there instead of putting them in adapter arguments. T3 rejects Pi session-selection flags because it owns session storage and validates every resume file.
 
+## Collaborative browser
+
+Enable agent browser access in **Settings → Integrations**, then start a new Pi session and ask Pi to use T3 Code's browser. Pi can open the collaborative preview, inspect pages, and interact with the browser shared with you. A compatible preview host must be connected; having browser tools available does not mean a browser is ready. Browser access changes take effect when the agent session next starts.
+
 ## Supported behavior
 
 The Pi connection supports:

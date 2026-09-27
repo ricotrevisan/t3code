@@ -98,6 +98,8 @@ export interface ProviderAdapterProcessSpawnV1 {
   readonly args?: ReadonlyArray<string> | undefined;
   readonly cwd?: string | undefined;
   readonly environment?: Readonly<Record<string, string | undefined>> | undefined;
+  /** Applied after inherited and workspace env; undefined removes a protected key. */
+  readonly protectedEnvironment?: Readonly<Record<string, string | undefined>>;
   /** Required ownership lets the host turn unexpected harness exits into canonical failures. */
   readonly purpose: ProviderAdapterProcessPurposeV1;
 }
@@ -173,12 +175,24 @@ export interface ProviderAdapterAttachmentsV2 {
   ) => Effect.Effect<ProviderAdapterAttachmentReadResultV2, ProviderAdapterHostResourceError>;
 }
 
+export interface ProviderAdapterMcpSessionV2 {
+  readonly endpoint: string;
+  readonly authorizationHeader: string;
+  readonly capabilities: ReadonlySet<string>;
+}
+
 export interface ProviderAdapterHostV2 {
   readonly protocolVersion: typeof T3_PROVIDER_ADAPTER_HOST_PROTOCOL_VERSION;
   readonly processes: ProviderAdapterProcessSupervisorV1;
   readonly workspaces: ProviderAdapterWorkspacesV2;
   readonly storage: ProviderAdapterStorageV2;
   readonly attachments: ProviderAdapterAttachmentsV2;
+  /** Ephemeral credentials scoped by this host to its provider instance. Never persist. */
+  readonly mcp?: {
+    readonly readSession: (
+      threadId: ThreadId,
+    ) => Effect.Effect<ProviderAdapterMcpSessionV2 | undefined>;
+  };
 }
 
 export type ProviderAdapterHost = ProviderAdapterHostV1 | ProviderAdapterHostV2;
