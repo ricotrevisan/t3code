@@ -2,6 +2,8 @@ import type { ThreadId } from "@t3tools/contracts";
 import type { ProviderAdapterHostV2 } from "@t3tools/provider-adapter";
 import * as Effect from "effect/Effect";
 
+export const PI_PREVIEW_HEALTH_COMMAND = "t3-preview-health";
+
 export const PI_PREVIEW_EMPTY_ENVIRONMENT = {
   T3_PI_MCP_ENDPOINT: undefined,
   T3_PI_MCP_AUTHORIZATION: undefined,
@@ -11,11 +13,21 @@ export const PI_PREVIEW_EMPTY_ENVIRONMENT = {
 // do not depend on a source-tree path or on Pi resolving T3's dependencies.
 export const PI_PREVIEW_EXTENSION_SOURCE = String.raw`
 export default async function t3Preview(pi) {
-  const endpoint = process.env.T3_PI_MCP_ENDPOINT;
-  const authorization = process.env.T3_PI_MCP_AUTHORIZATION;
+  // Pi recreates factories on resume/new/fork/reload. Keep the handoff in
+  // process memory, never re-expose it to later factories through process.env.
+  // This is not a sandbox: same-process extensions are trusted code.
+  const credentialKey = Symbol.for("t3.pi.preview.credential");
+  const previous = globalThis[credentialKey];
+  const endpoint = process.env.T3_PI_MCP_ENDPOINT || previous?.endpoint;
+  const authorization = process.env.T3_PI_MCP_AUTHORIZATION || previous?.authorization;
   delete process.env.T3_PI_MCP_ENDPOINT;
   delete process.env.T3_PI_MCP_AUTHORIZATION;
   if (!endpoint || !authorization) return;
+  const credential = { endpoint, authorization };
+  Object.defineProperty(globalThis, credentialKey, { value: credential, configurable: true });
+  const forgetCredential = () => {
+    if (globalThis[credentialKey] === credential) delete globalThis[credentialKey];
+  };
 
   let sessionId;
   let sequence = 0;
@@ -97,27 +109,26 @@ export default async function t3Preview(pi) {
   };
   pi.on("session_shutdown", async event => {
     await shutdown();
-    // Pi reloads factories in the same process. Hand credentials to the new
-    // factory, which immediately removes them again before tools can run.
-    if (event?.reason === "reload") {
-      process.env.T3_PI_MCP_ENDPOINT = endpoint;
-      process.env.T3_PI_MCP_AUTHORIZATION = authorization;
-    }
+    if (!["resume", "reload", "new", "fork"].includes(event?.reason)) forgetCredential();
   });
 
   try {
+    const bootstrap = AbortSignal.timeout(10000);
     await request("initialize", {
       protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t3-pi-preview", version: "1.0.0" },
-    });
+    }, bootstrap);
     await notify("notifications/initialized", {});
     let cursor;
     const tools = [];
     do {
-      const page = await request("tools/list", cursor ? { cursor } : {});
+      const page = await request("tools/list", cursor ? { cursor } : {}, bootstrap);
       if (!Array.isArray(page.tools)) throw new Error("Invalid T3 preview catalog.");
       tools.push(...page.tools.filter(tool => typeof tool.name === "string" && tool.name.startsWith("preview_")));
       cursor = page.nextCursor;
     } while (cursor);
+    if (!["preview_status", "preview_open", "preview_snapshot"].every(name => tools.some(tool => tool.name === name))) {
+      throw new Error("Incomplete T3 preview catalog.");
+    }
     for (const tool of tools) {
       pi.registerTool({
         name: tool.name, label: tool.name, description: tool.description || tool.name,
@@ -134,10 +145,17 @@ export default async function t3Preview(pi) {
         },
       });
     }
+    // get_commands is Pi's RPC acknowledgement surface. Register this only
+    // after the required tools, so a swallowed factory error fails T3 startup.
+    pi.registerCommand("${PI_PREVIEW_HEALTH_COMMAND}", {
+      description: "Check T3 browser tool registration",
+      handler: async (_args, ctx) => ctx.ui.notify("T3 browser tools are registered. Use preview_status to check browser availability.", "info"),
+    });
     if (tools.length) pi.on("before_agent_start", event => ({
       systemPrompt: event.systemPrompt + "\nT3 Code collaborative browser: use preview_status first. If no automation-capable preview is attached, call preview_open. Use preview_snapshot locators and the preview_* tools for the browser shared with the user. Tool registration does not mean a preview host is ready. Only use another browser when explicitly requested or preview_open reports unsupported/unavailable.",
     }));
   } catch {
+    forgetCredential();
     await shutdown();
     throw new Error("T3 preview bridge initialization failed. Restart the provider session to retry.");
   }
@@ -150,7 +168,7 @@ export const preparePiPreviewExtension = Effect.fn("preparePiPreviewExtension")(
 ) {
   const session = host.mcp ? yield* host.mcp.readSession(threadId) : undefined;
   if (!session?.capabilities.has("preview")) {
-    return { args: [], protectedEnvironment: PI_PREVIEW_EMPTY_ENVIRONMENT };
+    return { required: false, args: [], protectedEnvironment: PI_PREVIEW_EMPTY_ENVIRONMENT };
   }
   const path = yield* host.storage.materializeArtifact({
     key: "t3-preview",
@@ -158,6 +176,7 @@ export const preparePiPreviewExtension = Effect.fn("preparePiPreviewExtension")(
     content: PI_PREVIEW_EXTENSION_SOURCE,
   });
   return {
+    required: true,
     args: ["--extension", path],
     protectedEnvironment: {
       T3_PI_MCP_ENDPOINT: session.endpoint,

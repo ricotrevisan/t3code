@@ -3,6 +3,9 @@ import * as NodeHttp from "node:http";
 import * as NodeVM from "node:vm";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import { ThreadId, ProviderInstanceId } from "@t3tools/contracts";
 import {
   ProviderAdapterHostProcessError,
@@ -12,6 +15,11 @@ import {
 import { makePiAdapter } from "./PiAdapter.ts";
 import { PI_PREVIEW_EXTENSION_SOURCE, preparePiPreviewExtension } from "./piPreviewExtension.ts";
 
+const decodeCommand = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ id: Schema.String, type: Schema.String })),
+);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
 type Block = { type: string; text?: string; data?: string; mimeType?: string };
 type Tool = {
   name: string;
@@ -19,26 +27,32 @@ type Tool = {
   execute: (id: string, params: unknown, signal?: AbortSignal) => Promise<{ content: Block[] }>;
 };
 
-async function loadBridge(endpoint: string, authorization: string) {
+async function loadBridge(
+  endpoint: string,
+  authorization: string,
+  context = NodeVM.createContext({
+    process: { env: { T3_PI_MCP_ENDPOINT: endpoint, T3_PI_MCP_AUTHORIZATION: authorization } },
+    fetch,
+    AbortController,
+    AbortSignal,
+    TextDecoder,
+  }),
+) {
   const tools = new Map<string, Tool>();
   const handlers = new Map<string, (event?: unknown) => Promise<unknown>>();
-  const env = { T3_PI_MCP_ENDPOINT: endpoint, T3_PI_MCP_AUTHORIZATION: authorization };
-  const factory = NodeVM.runInNewContext(
+  const commands = new Set<string>();
+  const env: Record<string, string | undefined> = context.process.env;
+  const factory = NodeVM.runInContext(
     PI_PREVIEW_EXTENSION_SOURCE.replace("export default ", "") + "\nt3Preview;",
-    {
-      process: { env },
-      fetch,
-      AbortController,
-      AbortSignal,
-      TextDecoder,
-    },
+    context,
   );
   await factory({
     registerTool: (tool: Tool) => tools.set(tool.name, tool),
+    registerCommand: (name: string) => commands.add(name),
     on: (name: string, handler: (event?: unknown) => Promise<unknown>) =>
       handlers.set(name, handler),
   });
-  return { tools, handlers, env };
+  return { tools, handlers, commands, env, context };
 }
 
 async function serverFixture() {
@@ -174,29 +188,29 @@ describe("Pi preview bridge", () => {
     }
   });
 
-  it("closes the old transport on reload and hands credentials to the replacement factory", async () => {
-    const server = await serverFixture();
-    try {
-      const bridge = await loadBridge(server.endpoint, "Bearer first");
-      await bridge.handlers.get("session_shutdown")!({ reason: "reload" });
-      expect(bridge.env).toEqual({
-        T3_PI_MCP_ENDPOINT: server.endpoint,
-        T3_PI_MCP_AUTHORIZATION: "Bearer first",
-      });
-      await expect(bridge.tools.get("preview_status")!.execute("old", {})).rejects.toThrow();
-      const replacement = await loadBridge(
-        bridge.env.T3_PI_MCP_ENDPOINT,
-        bridge.env.T3_PI_MCP_AUTHORIZATION,
-      );
-      expect(replacement.env).toEqual({});
-      expect(
-        (await replacement.tools.get("preview_status")!.execute("new", {})).content[0]?.text,
-      ).toBe("thread-one");
-      await replacement.handlers.get("session_shutdown")!();
-    } finally {
-      server.close();
-    }
-  });
+  it.each(["resume", "reload", "new", "fork"])(
+    "preserves credentials in memory across %s without exposing env",
+    async (reason) => {
+      const server = await serverFixture();
+      try {
+        const bridge = await loadBridge(server.endpoint, "Bearer first");
+        await bridge.handlers.get("session_shutdown")!({ reason });
+        expect(bridge.env).toEqual({});
+        await expect(bridge.tools.get("preview_status")!.execute("old", {})).rejects.toThrow();
+        const replacement = await loadBridge("", "", bridge.context);
+        expect(replacement.env).toEqual({});
+        expect(replacement.commands.has("t3-preview-health")).toBe(true);
+        expect(
+          (await replacement.tools.get("preview_status")!.execute("new", {})).content[0]?.text,
+        ).toBe("thread-one");
+        await replacement.handlers.get("session_shutdown")!({ reason: "exit" });
+        const stopped = await loadBridge("", "", bridge.context);
+        expect(stopped.tools.size).toBe(0);
+      } finally {
+        server.close();
+      }
+    },
+  );
 
   it.effect(
     "keeps older hosts and denied sessions credential-free and materializes only trusted source",
@@ -305,6 +319,9 @@ describe("Pi preview bridge", () => {
         expect(reads).toEqual(["allowed", "allowed", "denied"]);
         expect(spawns[0]?.args).toContain("/user/extension.ts");
         expect(spawns[0]?.args).toContain("/trusted/bridge.mjs");
+        expect(spawns[0]!.args!.indexOf("/trusted/bridge.mjs")).toBeLessThan(
+          spawns[0]!.args!.indexOf("/user/extension.ts"),
+        );
         expect(spawns[0]?.protectedEnvironment?.T3_PI_MCP_AUTHORIZATION).toBe("Bearer initial");
         expect(spawns[1]?.protectedEnvironment?.T3_PI_MCP_AUTHORIZATION).toBe("Bearer recovered");
         for (const spawn of spawns.slice(2)) {
@@ -316,5 +333,100 @@ describe("Pi preview bridge", () => {
           true,
         );
       }).pipe(Effect.scoped),
+  );
+  it.effect("fails closed when Pi stays alive but silently omits the bridge acknowledgement", () =>
+    Effect.gen(function* () {
+      const output = yield* Queue.unbounded<Uint8Array>();
+      let closed = false;
+      const requests: string[] = [];
+      const close = Effect.sync(() => {
+        closed = true;
+      });
+      const host: ProviderAdapterHostV2 = {
+        protocolVersion: 2,
+        processes: {
+          spawn: () =>
+            Effect.acquireRelease(
+              Effect.succeed({
+                pid: 1,
+                attachSession: () => Effect.void,
+                detachSession: () => Effect.void,
+                expectExit: Effect.void,
+                exitCode: Effect.never,
+                close,
+                stdout: Stream.fromQueue(output),
+                stderr: Stream.empty,
+                write: (chunk) =>
+                  Effect.gen(function* () {
+                    const command = decodeCommand(new TextDecoder().decode(chunk));
+                    requests.push(command.type);
+                    // Pi is responsive and reports a normal native session, but its
+                    // loader swallowed the extension error and get_commands is empty.
+                    const data =
+                      command.type === "get_commands"
+                        ? { commands: [] }
+                        : {
+                            sessionFile: "/tmp/test/session.jsonl",
+                            sessionId: "native",
+                            isStreaming: false,
+                            isCompacting: false,
+                          };
+                    yield* Queue.offer(
+                      output,
+                      new TextEncoder().encode(
+                        encodeJson({
+                          type: "response",
+                          id: command.id,
+                          command: command.type,
+                          success: true,
+                          data,
+                        }) + "\n",
+                      ),
+                    );
+                  }),
+              }),
+              () => close,
+            ),
+        },
+        workspaces: { resolveCwd: () => Effect.succeed("/tmp") },
+        storage: {
+          prepareSession: () =>
+            Effect.succeed({ sessionDirectory: "/tmp/test", sharedDirectory: "/tmp" }),
+          validateSessionFile: (input) => Effect.succeed(input.path),
+          materializeArtifact: () => Effect.succeed("/trusted/bridge.mjs"),
+        },
+        attachments: { read: () => Effect.die("unused") },
+        mcp: {
+          readSession: () =>
+            Effect.succeed({
+              endpoint: "http://localhost/mcp",
+              authorizationHeader: "Bearer synthetic",
+              capabilities: new Set(["preview"]),
+            }),
+        },
+      };
+      const config = { binaryPath: "pi", args: [] };
+      const instance = yield* makePiAdapter(
+        config,
+        {
+          config,
+          instanceId: ProviderInstanceId.make("pi-health"),
+          displayName: undefined,
+          accentColor: undefined,
+          environment: {},
+          enabled: true,
+        },
+        host,
+      );
+      const result = yield* instance.adapter
+        .startSession({ threadId: ThreadId.make("health"), runtimeMode: "full-access" })
+        .pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure")
+        expect(result.failure.detail).toContain("T3 preview bridge did not initialize");
+      expect(requests).toContain("get_commands");
+      expect(closed).toBe(true);
+      expect(yield* instance.adapter.listSessions()).toEqual([]);
+    }).pipe(Effect.scoped),
   );
 });
