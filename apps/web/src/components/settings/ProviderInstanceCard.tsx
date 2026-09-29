@@ -911,8 +911,8 @@ export function ProviderInstanceCard({
           isPackageBound ? (
             <span>
               This adapter package is not available with the exact saved version and protocol.
-              Configuration values are preserved, but this instance is read-only until the
-              matching package is installed again.
+              Configuration values are preserved, but this instance is read-only until the matching
+              package is installed again.
             </span>
           ) : (
             <span>

@@ -258,7 +258,10 @@ export function AddProviderInstanceDialog({
     // accounts go through AddManagedCodexAccountDialog instead.
     const config =
       driver === "codex" && selectedManifest === undefined
-        ? { ...configDraft, setupMode: "existing" }
+        ? {
+            ...(typeof configDraft === "object" && configDraft !== null ? configDraft : {}),
+            setupMode: "existing",
+          }
         : configDraft;
     const hasConfig = config !== undefined;
     const normalizedAccentColor = normalizeProviderAccentColor(accentColor);

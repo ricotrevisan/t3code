@@ -845,7 +845,7 @@ describe("mergeUsage", () => {
     );
 
     expect(merged.costUsd).toBe(12);
-    expect(merged.staleEnvironments).toEqual([]);
+    expect(merged.contractMismatches).toEqual([]);
     expect(merged.providers[0]?.nativeSessions).toBe(1);
     expect(merged.providers[0]?.primeAgentSessions).toBe(1);
   });

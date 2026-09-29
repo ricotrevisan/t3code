@@ -886,9 +886,9 @@ describe("UsageService", () => {
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;
       yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5, "example-model")));
-      const transcriptDir = yield* Effect.promise(() =>
-        NodeFSP.realpath(NodePath.join(home, "claude", "projects")),
-      );
+      // The service resolves this configured path; on macOS temp dirs sit
+      // behind the /var -> /private/var symlink, so match the unresolved form.
+      const transcriptDir = NodePath.join(home, "claude", "projects");
 
       yield* Effect.gen(function* () {
         const settingsService = yield* ServerSettings.ServerSettingsService;

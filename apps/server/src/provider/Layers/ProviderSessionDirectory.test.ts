@@ -463,6 +463,7 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
           providerName: "codex",
           providerInstanceId: ProviderInstanceId.make("codex"),
           adapterKey: "codex",
+          adapterPackage: null,
           runtimeMode: "full-access",
           status,
           lastSeenAt: "2026-04-14T12:00:00.000Z",

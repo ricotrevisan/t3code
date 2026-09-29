@@ -9,12 +9,13 @@ import {
   readTranscriptRecords as readWithDefaultThreshold,
   type TranscriptParsePosition,
 } from "./usageTranscriptReader.ts";
+import type { UsageScanKind } from "./usageTranscripts.ts";
 
 // Exercise the same transition with compact fixtures. UsageService tests and
 // external 65/517 MiB fixtures also exercise the production threshold.
 const readTranscriptRecords = (
   path: string,
-  provider: "claude" | "codex" | "grok",
+  provider: UsageScanKind,
   position?: TranscriptParsePosition,
 ) => readWithDefaultThreshold(path, provider, position, { streamingThresholdBytes: 256 * 1024 });
 
@@ -92,12 +93,22 @@ const grok = {
     },
   },
 };
+const primeAgent = [
+  { type: "session", id: "s1", timestamp },
+  {
+    type: "message",
+    id: "e1",
+    timestamp,
+    message: {
+      role: "assistant",
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      usage: { input: 100, output: 99, cacheRead: 20, cacheWrite: 5, cost: { total: 0.25 } },
+    },
+  },
+];
 
-async function scan(
-  lines: readonly unknown[],
-  provider: "claude" | "codex" | "grok",
-  name = "history",
-) {
+async function scan(lines: readonly unknown[], provider: UsageScanKind, name = "history") {
   const path = NodePath.join(dir, `${name}.jsonl`);
   await NodeFSP.writeFile(path, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
   const result = await readTranscriptRecords(path, provider);
@@ -123,12 +134,13 @@ describe("large usage records", () => {
         },
         reportedCostUsd: 0.25,
         fast: true,
+        harness: "native",
         dedupeKey: "m1:r-m1",
       },
     ]);
   });
 
-  it.each(["claude", "codex", "grok"] as const)(
+  it.each(["claude", "codex", "grok", "primeAgent"] as const)(
     "matches ordinary %s records with large irrelevant fields in either order",
     async (provider) => {
       const small =
@@ -136,8 +148,11 @@ describe("large usage records", () => {
           ? codex
           : provider === "grok"
             ? [grok]
-            : [{ ...claude(), message: { ...claude().message, content: [] } }];
+            : provider === "primeAgent"
+              ? primeAgent
+              : [{ ...claude(), message: { ...claude().message, content: [] } }];
       const expected = await scan(small, provider, "small");
+      expect(expected.records).toHaveLength(1);
       for (const first of [true, false]) {
         const large = small.map((record) =>
           first ? { padding: content, ...record } : { ...record, padding: content },
@@ -145,6 +160,7 @@ describe("large usage records", () => {
         const actual = await scan(large, provider);
         expect(actual.records).toEqual(expected.records);
         expect(actual.position.codexState).toEqual(expected.position.codexState);
+        expect(actual.position.primeAgentState).toEqual(expected.position.primeAgentState);
       }
     },
   );
