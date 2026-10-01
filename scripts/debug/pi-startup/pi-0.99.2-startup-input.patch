@@ -1,0 +1,38 @@
+--- a/dist/modes/rpc/rpc-mode.js
++++ b/dist/modes/rpc/rpc-mode.js
+@@ -286,8 +286,10 @@
+             signalCleanupHandlers.push(() => process.off(signal, handler));
+         }
+     };
+-    await rebindSession();
+-    registerSignalHandlers();
++    // Read UI responses during startup, but gate ordinary commands until all
++    // extension session_start handlers have finished.
++    const initialized = Promise.withResolvers();
++    initialized.promise.catch(() => {});
+     // Handle a single command
+     const handleCommand = async (command) => {
+         const id = command.id;
+@@ -624,6 +626,7 @@
+         }
+         const command = parsed;
+         try {
++            await initialized.promise;
+             const response = await handleCommand(command);
+             if (response) {
+                 output(response);
+@@ -649,6 +652,14 @@
+             process.stdin.off("end", onInputEnd);
+         };
+     })();
++    registerSignalHandlers();
++    try {
++        await rebindSession();
++        initialized.resolve();
++    } catch (error) {
++        initialized.reject(error);
++        throw error;
++    }
+     // Keep process alive forever
+     return new Promise(() => { });
+ }

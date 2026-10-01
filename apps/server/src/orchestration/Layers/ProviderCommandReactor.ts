@@ -1898,6 +1898,10 @@ const make = Effect.gen(function* () {
     );
 
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  // A startup extension can await UI consent inside the session handshake.
+  // Its response must not sit behind that handshake on the serial command lane.
+  // Keep all ordinary session/turn commands on their existing ordered lane.
+  const startupInputWorker = yield* makeDrainableWorker(processDomainEventSafely);
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const pendingTitles = yield* findPendingThreadTitles().pipe(
@@ -1912,6 +1916,12 @@ const make = Effect.gen(function* () {
       }),
     );
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
+      if (event.type === "thread.user-input-response-requested") {
+        const thread = yield* resolveThreadShell(event.payload.threadId);
+        if (thread?.session?.status === "starting") {
+          return yield* startupInputWorker.enqueue(event);
+        }
+      }
       if (
         (event.type === "thread.meta-updated" &&
           (event.payload.regenerateTitle === true ||
@@ -1968,6 +1978,7 @@ const make = Effect.gen(function* () {
     start,
     drain: Effect.gen(function* () {
       yield* worker.drain;
+      yield* startupInputWorker.drain;
       yield* threadTitleRegenerationWorker.drain;
     }),
   } satisfies ProviderCommandReactorShape;

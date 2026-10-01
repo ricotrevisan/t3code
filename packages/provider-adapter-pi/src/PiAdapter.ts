@@ -587,6 +587,16 @@ function makeConnection(input: {
       );
     }
     pending.clear();
+    for (const requestId of uiRequests.keys()) {
+      yield* pushEvent(
+        withTurn({
+          type: "user-input.resolved",
+          requestId: RuntimeRequestId.make(requestId),
+          payload: { answers: {} },
+        }),
+      );
+    }
+    uiRequests.clear();
   });
 
   const pump = child.stdout.pipe(
@@ -668,19 +678,25 @@ function makeConnection(input: {
           result.failure,
         );
       }
-      return yield* Deferred.await(reply).pipe(
-        Effect.timeout(command.type === "abort" ? "2 minutes" : "30 seconds"),
-        Effect.mapError((cause) =>
-          isAdapterError(cause)
-            ? cause
-            : adapterError(
-                String(command.type),
-                `Timed out waiting for Pi RPC command '${String(command.type)}'.`,
-                cause,
-              ),
-        ),
-        Effect.ensuring(Effect.sync(() => pending.delete(id))),
-      );
+      // Human extension UI (including project MCP consent during session_start)
+      // is not evidence of an unresponsive RPC transport. Retain the ordinary
+      // deadline when no UI request is outstanding; never bypass bridge validation.
+      const awaitReply = (): Effect.Effect<unknown, ProviderAdapterV1Error> =>
+        Deferred.await(reply).pipe(
+          Effect.timeout(command.type === "abort" ? "2 minutes" : "30 seconds"),
+          Effect.catchTag("TimeoutError", (cause) =>
+            uiRequests.size > 0
+              ? Effect.suspend(awaitReply)
+              : Effect.fail(
+                  adapterError(
+                    String(command.type),
+                    `Timed out waiting for Pi RPC command '${String(command.type)}'.`,
+                    cause,
+                  ),
+                ),
+          ),
+        );
+      return yield* awaitReply().pipe(Effect.ensuring(Effect.sync(() => pending.delete(id))));
     });
 
   const notify = (command: Readonly<Record<string, unknown>>) =>
@@ -811,6 +827,9 @@ export function makePiAdapter(
     const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
     const sessionMutation = yield* Semaphore.make(1);
     const sessions = new Map<ThreadId, PiSessionEntry>();
+    // Extension session_start handlers may request UI before get_commands/get_state
+    // return. Keep their live transports routable without advertising a ready session.
+    const startingConnections = new Map<ThreadId, PiConnection>();
 
     const spawnConnection = (threadId: ThreadId, requestedCwd?: string) =>
       Effect.gen(function* () {
@@ -849,7 +868,6 @@ export function makePiAdapter(
             scope,
           });
           yield* connection.startPump;
-          yield* connection.checkPreviewHealth;
           return connection;
         }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
       });
@@ -906,7 +924,9 @@ export function makePiAdapter(
             .resolveCwd(sessionInput.cwd ?? config.cwd)
             .pipe(Effect.mapError((cause) => adapterError("startSession", cause.detail, cause)));
           const connection = yield* spawnConnection(sessionInput.threadId, resolvedCwd);
+          startingConnections.set(sessionInput.threadId, connection);
           return yield* Effect.gen(function* () {
+            yield* connection.checkPreviewHealth;
             const requestedResume = parseResumeCursor(sessionInput.resumeCursor);
             if (sessionInput.resumeCursor !== undefined && requestedResume === undefined) {
               return yield* adapterError(
@@ -996,6 +1016,13 @@ export function makePiAdapter(
             );
             return session;
           }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (startingConnections.get(sessionInput.threadId) === connection) {
+                  startingConnections.delete(sessionInput.threadId);
+                }
+              }),
+            ),
             Effect.onError(() =>
               Effect.all([connection.close, Scope.close(connection.scope, Exit.void)], {
                 discard: true,
@@ -1283,8 +1310,10 @@ export function makePiAdapter(
         ),
       respondToUserInput: (threadId, requestId, answers: ProviderUserInputAnswers) =>
         Effect.gen(function* () {
-          const entry = yield* requireEntry(threadId, "respondToUserInput");
-          const method = entry.connection.uiRequests.get(requestId);
+          const connection =
+            startingConnections.get(threadId) ??
+            (yield* requireEntry(threadId, "respondToUserInput")).connection;
+          const method = connection.uiRequests.get(requestId);
           if (method === undefined) {
             return yield* adapterError("respondToUserInput", "Unknown Pi UI request.");
           }
@@ -1299,8 +1328,8 @@ export function makePiAdapter(
                     confirmed: answer === true || answer === "Yes" || answer === "true",
                   }
                 : { type: "extension_ui_response", id: requestId, value: String(answer) };
-          yield* entry.connection.notify(response);
-          entry.connection.uiRequests.delete(requestId);
+          yield* connection.notify(response);
+          connection.uiRequests.delete(requestId);
           yield* PubSub.publish(events, {
             eventId: EventId.make(yield* Effect.sync(NodeCrypto.randomUUID)),
             provider: PROVIDER,

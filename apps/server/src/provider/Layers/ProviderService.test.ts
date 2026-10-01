@@ -145,7 +145,9 @@ function makeFakeCodexAdapter(
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
-  const startSession = vi.fn((input: ProviderSessionStartInput) =>
+  const startSession = vi.fn<
+    (input: ProviderSessionStartInput) => Effect.Effect<ProviderSession, ProviderAdapterError>
+  >((input) =>
     Effect.sync(() => {
       const now = "2026-01-01T00:00:00.000Z";
       const session: ProviderSession = {
@@ -477,6 +479,109 @@ function makeProviderServiceLayer(
     layer,
   };
 }
+
+const startupApprovalAdapter = makeFakeCodexAdapter(ProviderDriverKind.make("piRpc"));
+const startupApprovalInstanceId = ProviderInstanceId.make("pi-startup-approval");
+const startupApproval = makeProviderServiceLayer({
+  registry: makeStaticInstanceRegistry([
+    [startupApprovalInstanceId, startupApprovalAdapter.adapter],
+  ]),
+});
+startupApproval.layer("ProviderService startup approval", (it) => {
+  it.effect("routes startup user input before a persisted binding exists", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("pi-startup-approval");
+      const entered = yield* Deferred.make<void>();
+      const approved = yield* Deferred.make<void>();
+      const originalStart = startupApprovalAdapter.startSession.getMockImplementation()!;
+      startupApprovalAdapter.startSession.mockImplementationOnce((input) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(approved);
+          return yield* originalStart(input);
+        }),
+      );
+      startupApprovalAdapter.respondToUserInput.mockImplementationOnce(() =>
+        Deferred.succeed(approved, undefined).pipe(Effect.asVoid),
+      );
+      const start = yield* provider
+        .startSession(threadId, {
+          threadId,
+          providerInstanceId: startupApprovalInstanceId,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      assert.ok(Option.isNone(yield* directory.getBinding(threadId)));
+      const duplicate = yield* provider
+        .startSession(threadId, {
+          threadId,
+          providerInstanceId: startupApprovalInstanceId,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+      assert.equal(duplicate._tag, "Failure");
+      if (duplicate._tag === "Failure")
+        assert.include(duplicate.failure.message, "already starting");
+      yield* provider.respondToUserInput({
+        threadId,
+        requestId: asRequestId("startup-mcp"),
+        answers: { "startup-mcp": "Yes" },
+      });
+      const session = yield* Fiber.join(start);
+      assert.equal(session.status, "ready");
+      assert.ok(Option.isSome(yield* directory.getBinding(threadId)));
+    }),
+  );
+  it.effect.each(["failure", "interruption"] as const)(
+    "clears startup UI routing after %s",
+    (mode) =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const threadId = asThreadId(`pi-startup-${mode}`);
+        const entered = yield* Deferred.make<void>();
+        const released = yield* Deferred.make<void>();
+        startupApprovalAdapter.startSession.mockImplementationOnce(() =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(released);
+            return yield* new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("piRpc"),
+              method: "startSession",
+              detail: "fixture startup failed",
+            });
+          }),
+        );
+        const start = yield* provider
+          .startSession(threadId, {
+            threadId,
+            providerInstanceId: startupApprovalInstanceId,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(entered);
+        if (mode === "interruption") yield* Fiber.interrupt(start);
+        else {
+          yield* Deferred.succeed(released, undefined);
+          assert.equal((yield* Fiber.join(start))._tag, "Failure");
+        }
+        assert.ok(Option.isNone(yield* directory.getBinding(threadId)));
+        const callsBefore = startupApprovalAdapter.respondToUserInput.mock.calls.length;
+        const late = yield* provider
+          .respondToUserInput({
+            threadId,
+            requestId: asRequestId("startup-mcp"),
+            answers: { "startup-mcp": "Yes" },
+          })
+          .pipe(Effect.result);
+        assert.equal(late._tag, "Failure");
+        assert.equal(startupApprovalAdapter.respondToUserInput.mock.calls.length, callsBefore);
+      }),
+  );
+});
 
 for (const [enabled, completed] of [
   [false, false],

@@ -639,6 +639,53 @@ describe("ProviderCommandReactor", () => {
     };
   }
 
+  it("delivers startup user input without queuing behind its own session handshake", async () => {
+    const entered = Promise.withResolvers<void>();
+    const approved = Promise.withResolvers<void>();
+    const harness = await createHarness({
+      startSessionEffect: (session) =>
+        Effect.gen(function* () {
+          entered.resolve();
+          yield* Effect.promise(() => approved.promise);
+          return session;
+        }),
+    });
+    harness.respondToUserInput.mockImplementation(() => Effect.sync(() => approved.resolve()));
+    const threadId = ThreadId.make("thread-1");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-startup-approval-start"),
+        threadId,
+        message: {
+          messageId: asMessageId("startup-message"),
+          role: "user",
+          text: "fixture",
+          attachments: [],
+        },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt,
+      }),
+    );
+    await entered.promise;
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.user-input.respond",
+        commandId: CommandId.make("cmd-startup-approval-response"),
+        threadId,
+        requestId: asApprovalRequestId("startup-mcp"),
+        answers: { "startup-mcp": "Yes" },
+        createdAt,
+      }),
+    );
+    await waitFor(() => harness.respondToUserInput.mock.calls.length === 1, 500);
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
   effectIt.effect.each(["new", "ready", "stopped"] as const)(
     "handles sign-out for a %s thread before worktree repair, text helpers, or startup",
     (sessionStatus) =>
