@@ -160,15 +160,15 @@ describe("current priority move planning", () => {
       ]),
       pinned: {
         orderedIds: ["p"],
-        keysById: new Map([["p", "a0"]]),
+        keysById: new Map([["p", "g"]]),
         reorderableKeys: new Set(["p"]),
       },
       active: {
         orderedIds: ["a", "c", "b"],
         keysById: new Map([
-          ["a", "a0"],
-          ["b", "a2"],
-          ["c", "a1"],
+          ["a", "g"],
+          ["b", "t"],
+          ["c", "n"],
         ]),
         reorderableKeys: new Set(["a", "b", "c"]),
       },
@@ -179,19 +179,20 @@ describe("current priority move planning", () => {
     const state = currentOrder();
     const plan = planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" });
     expect(plan?.section).toBe("active");
+    expect(plan?.order).toEqual(["a", "b", "c"]);
     const keys = new Map(state.active.keysById);
     for (const assignment of plan?.assignments ?? []) keys.set(assignment.id, assignment.orderKey);
     expect(
       [...keys].sort(([, left], [, right]) => left.localeCompare(right)).map(([id]) => id),
     ).toEqual(["a", "b", "c"]);
-    expect(state.pinned.keysById).toEqual(new Map([["p", "a0"]]));
+    expect(state.pinned.keysById).toEqual(new Map([["p", "g"]]));
   });
 
   it("uses pin ordering if the thread was pinned while its menu was open", () => {
     const state = currentOrder();
     state.sectionByThreadKey.set("b", "pinned");
     state.pinned.orderedIds.push("b");
-    state.pinned.keysById.set("b", "a1");
+    state.pinned.keysById.set("b", "n");
     state.pinned.reorderableKeys.add("b");
     const plan = planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" });
     expect(plan?.section).toBe("pinned");
@@ -200,7 +201,7 @@ describe("current priority move planning", () => {
     expect(
       [...keys].sort(([, left], [, right]) => left.localeCompare(right)).map(([id]) => id),
     ).toEqual(["b", "p"]);
-    expect(state.active.keysById.get("b")).toBe("a2");
+    expect(state.active.keysById.get("b")).toBe("t");
   });
 
   it.each(["snoozed", "settled"] as const)(
@@ -211,6 +212,87 @@ describe("current priority move planning", () => {
       expect(planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" })).toBeNull();
     },
   );
+
+  it("rejects moves that would need to arrange a keyless unsupported neighbor", () => {
+    const active = {
+      orderedIds: ["a", "x", "b"],
+      keysById: new Map<string, string | null>([
+        ["a", null],
+        ["x", null],
+        ["b", null],
+      ]),
+      reorderableKeys: new Set(["a", "b"]),
+    };
+    expect(
+      planSidebarPriorityMove({
+        ...currentOrder(),
+        active,
+        sectionByThreadKey: new Map(active.orderedIds.map((id) => [id, "active" as const])),
+        threadKey: "b",
+        direction: "up",
+      }),
+    ).toBeNull();
+    expect([...active.keysById.values()]).toEqual([null, null, null]);
+  });
+
+  it("keeps a keyed unsupported neighbor as a read-only ordering anchor", () => {
+    const active = {
+      orderedIds: ["a", "x", "b"],
+      keysById: new Map([
+        ["a", "g"],
+        ["x", "n"],
+        ["b", "t"],
+      ]),
+      reorderableKeys: new Set(["a", "b"]),
+    };
+    const plan = planSidebarPriorityMove({
+      ...currentOrder(),
+      active,
+      sectionByThreadKey: new Map(active.orderedIds.map((id) => [id, "active" as const])),
+      threadKey: "b",
+      direction: "up",
+    });
+    expect(plan?.order).toEqual(["a", "b", "x"]);
+    expect(plan?.assignments.map(({ id }) => id)).toEqual(["b"]);
+    expect(active.keysById.get("x")).toBe("n");
+  });
+
+  it("holds the complete intended order throughout keyless batch materialization", () => {
+    let shells: Array<{ id: string; createdAt: string; activeOrderKey: string | null }> = [
+      "a",
+      "b",
+      "c",
+    ].map((id, index) => ({
+      id,
+      createdAt: `2026-06-0${index + 1}T00:00:00.000Z`,
+      activeOrderKey: null,
+    }));
+    const active = {
+      orderedIds: shells.map(({ id }) => id),
+      keysById: new Map(shells.map(({ id, activeOrderKey }) => [id, activeOrderKey])),
+      reorderableKeys: new Set(shells.map(({ id }) => id)),
+    };
+    const plan = planSidebarPriorityMove({
+      ...currentOrder(),
+      active,
+      sectionByThreadKey: new Map(active.orderedIds.map((id) => [id, "active" as const])),
+      threadKey: "c",
+      direction: "up",
+    });
+    expect(plan?.order).toEqual(["a", "c", "b"]);
+    for (const assignment of plan?.assignments ?? []) {
+      shells = shells.map((shell) =>
+        shell.id === assignment.id ? { ...shell, activeOrderKey: assignment.orderKey } : shell,
+      );
+      const displayed = orderItemsByPreferredIds({
+        items: sortThreadsForSidebar(shells),
+        preferredIds: plan?.order ?? [],
+        getId: (shell) => shell.id,
+      });
+      expect(displayed.map(({ id }) => id)).toEqual(["a", "c", "b"]);
+    }
+    expect(sortThreadsForSidebar(shells).map(({ id }) => id)).toEqual(["a", "c", "b"]);
+  });
 
   it("does not write a thread whose environment stopped supporting reorder", () => {
     const state = currentOrder();

@@ -435,13 +435,20 @@ export function planSidebarPriorityMove(input: {
   const section = input.sectionByThreadKey.get(input.threadKey);
   if (section !== "pinned" && section !== "active") return null;
   const state = input[section];
+  if (!state.reorderableKeys.has(input.threadKey)) return null;
   const assignments = planPinnedMove({
-    orderedIds: state.orderedIds.filter((key) => state.reorderableKeys.has(key)),
+    orderedIds: state.orderedIds,
     keysById: state.keysById,
     movedId: input.threadKey,
     direction: input.direction,
   });
-  return assignments === null ? null : { section, assignments };
+  if (assignments === null || assignments.some(({ id }) => !state.reorderableKeys.has(id)))
+    return null;
+  const order = [...state.orderedIds];
+  const index = order.indexOf(input.threadKey);
+  order.splice(index, 1);
+  order.splice(index + (input.direction === "up" ? -1 : 1), 0, input.threadKey);
+  return { section, assignments, order };
 }
 
 /**
