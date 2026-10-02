@@ -4824,17 +4824,6 @@ export default function Sidebar() {
             <Link
               to="/machines"
               className="text-xs text-sidebar-muted-foreground hover:text-sidebar-foreground"
-              onClick={(event) => {
-                if (
-                  isMobile &&
-                  event.button === 0 &&
-                  !event.metaKey &&
-                  !event.ctrlKey &&
-                  !event.shiftKey &&
-                  !event.altKey
-                )
-                  setOpenMobile(false);
-              }}
             >
               Dashboard
             </Link>
