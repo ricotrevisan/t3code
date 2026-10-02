@@ -25,6 +25,19 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
+## Choose a thread view
+
+Choose **My priority**, **By project**, or **By machine** in the thread list.
+Priority keeps your manual order; the grouped views help you locate active work
+and show how many threads are running in each group. Snoozed and settled work
+remain on their shelves. Switching views never changes your saved order or pins.
+
+On web and desktop, you can also change the view in **Settings → General** or
+through the command palette. In Priority view, drag to reorder; in any view,
+use **Move up** or **Move down** in a thread's menu. Ordering is saved by the
+thread's environment and appears on your other connected devices. View selection
+and collapsed groups are local to the client.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.

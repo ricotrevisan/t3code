@@ -39,7 +39,8 @@ import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
-import { useHomeListOptions } from "../home/home-list-options";
+import { useHomeListOptions, useThreadNavigationOptions } from "../home/home-list-options";
+import { ThreadNavigationControls, ThreadNavigationGroupHeader } from "./ThreadNavigationControls";
 import { buildHomeListFilterMenu } from "../home/home-list-filter-menu";
 import { buildHomeProjectScopes } from "../home/homeThreadList";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "../home/thread-swipe-actions";
@@ -137,6 +138,7 @@ function ThreadNavigationSidebarPane(
   const { fabClearance } = useAndroidControlSizing();
   const projects = useProjects();
   const threads = useThreadShells();
+  const navigation = useThreadNavigationOptions();
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const searchInputRef = useRef<TextInput>(null);
@@ -506,6 +508,25 @@ function ThreadNavigationSidebarPane(
       queuedThreadKeys,
       moveAvailability: threadMoveAvailability,
       shelfPreferencesLoading: !shelfPreferencesLoaded,
+      navigation: {
+        ...navigation,
+        selectedThreadKey: props.selectedThreadKey,
+        describe: (thread) =>
+          navigation.view === "machine"
+            ? {
+                key: `machine:${thread.environmentId}`,
+                label:
+                  savedConnectionsById[thread.environmentId]?.environmentLabel ??
+                  thread.environmentId,
+              }
+            : {
+                key: `project:${thread.environmentId}:${thread.projectId}`,
+                label:
+                  projectTitleByProjectKey.get(
+                    scopedProjectKey(thread.environmentId, thread.projectId),
+                  ) ?? "Unknown project",
+              },
+      },
     });
     if (settledShelfExpanded && threadListV2Layout.hiddenSettledCount > 0) {
       items.push({
@@ -517,6 +538,10 @@ function ThreadNavigationSidebarPane(
     return items;
   }, [
     nowMinute,
+    navigation,
+    props.selectedThreadKey,
+    projectTitleByProjectKey,
+    savedConnectionsById,
     options.selectedEnvironmentId,
     pendingTasks,
     props.searchQuery,
@@ -799,6 +824,16 @@ function ThreadNavigationSidebarPane(
             />
           );
         }
+        case "v2-navigation-group":
+          return (
+            <ThreadNavigationGroupHeader
+              groupKey={item.key}
+              label={item.label}
+              count={item.count}
+              running={item.running}
+              expanded={item.expanded}
+            />
+          );
         case "v2-snoozed-shelf":
           return (
             <ThreadListV2SnoozedShelfHeader
@@ -969,6 +1004,7 @@ function ThreadNavigationSidebarPane(
                 itemsAreEqual={sidebarItemsAreEqual}
                 keyExtractor={(item) => item.key}
                 renderItem={renderListItem}
+                ListHeaderComponent={ThreadNavigationControls}
                 automaticallyAdjustsScrollIndicatorInsets={NATIVE_LIQUID_GLASS_SUPPORTED}
                 contentInsetAdjustmentBehavior={
                   NATIVE_LIQUID_GLASS_SUPPORTED ? "automatic" : "never"
@@ -1035,6 +1071,7 @@ function ThreadNavigationSidebarPane(
                 itemsAreEqual={sidebarItemsAreEqual}
                 keyExtractor={(item) => item.key}
                 renderItem={renderListItem}
+                ListHeaderComponent={ThreadNavigationControls}
                 contentContainerStyle={[
                   styles.threadListContent,
                   Platform.OS === "android" ? { paddingHorizontal: 0 } : null,

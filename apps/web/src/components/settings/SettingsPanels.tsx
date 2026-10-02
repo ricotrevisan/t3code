@@ -2123,7 +2123,7 @@ function LegacyFeaturesSection() {
             />
             <SettingsRow
               {...searchableSetting("legacy-sidebar")}
-              description="Restore per-project thread trees instead of the default flat sidebar."
+              description="Restore the original per-project tree instead of the switchable thread views."
               control={
                 <Switch
                   checked={settings.legacySidebarEnabled}
@@ -2233,6 +2233,34 @@ export function GeneralSettingsPanel() {
     <SettingsPageContainer>
       <ProjectDefaultsSettings category="general" />
       <SettingsSection id="organization" title="Organization">
+        <SettingsRow
+          {...searchableSetting("thread-view")}
+          description="Use your saved priority order, or group active threads by project or machine. Pinning stays separate."
+          control={
+            <Select
+              value={settings.sidebarThreadView}
+              onValueChange={(value) => {
+                if (value === "priority" || value === "project" || value === "machine")
+                  updateSettings({ sidebarThreadView: value, legacySidebarEnabled: false });
+              }}
+            >
+              <SelectTrigger size="sm" aria-label="Thread view">
+                <SelectValue>
+                  {settings.sidebarThreadView === "priority"
+                    ? "My priority"
+                    : settings.sidebarThreadView === "project"
+                      ? "By project"
+                      : "By machine"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value="priority">My priority</SelectItem>
+                <SelectItem value="project">By project</SelectItem>
+                <SelectItem value="machine">By machine</SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
         <SettingsRow
           {...searchableSetting("project-grouping")}
           description="Combine matching repositories across environments."

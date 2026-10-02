@@ -19,6 +19,10 @@ import {
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 
 import type { ThreadMoveAvailability } from "./threadOrder";
+import {
+  groupNavigationThreads,
+  type ThreadNavigationView,
+} from "@t3tools/client-runtime/state/thread-navigation";
 
 import { relativeTime } from "../../lib/time";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
@@ -285,7 +289,17 @@ export interface ThreadListV2SettledShelfListItem {
   readonly disabled: boolean;
 }
 
+export interface ThreadNavigationGroupListItem {
+  readonly type: "v2-navigation-group";
+  readonly key: string;
+  readonly label: string;
+  readonly count: number;
+  readonly running: number;
+  readonly expanded: boolean;
+}
+
 export type ThreadListV2ListItem =
+  | ThreadNavigationGroupListItem
   | ThreadListV2ThreadListItem
   | ThreadListV2PendingListItem
   | ThreadListV2SnoozedShelfListItem
@@ -297,6 +311,7 @@ export function isThreadListV2ListItem(value: {
   readonly type: string;
 }): value is ThreadListV2ListItem {
   return (
+    value.type === "v2-navigation-group" ||
     value.type === "v2-thread" ||
     value.type === "v2-pending" ||
     value.type === "v2-snoozed-shelf" ||
@@ -316,6 +331,15 @@ export function threadListV2ListItemsAreEqual(
   item: ThreadListV2ListItem,
 ): boolean {
   switch (item.type) {
+    case "v2-navigation-group":
+      return (
+        previous.type === item.type &&
+        previous.key === item.key &&
+        previous.label === item.label &&
+        previous.count === item.count &&
+        previous.running === item.running &&
+        previous.expanded === item.expanded
+      );
     case "v2-thread":
       return (
         previous.type === "v2-thread" &&
@@ -406,6 +430,15 @@ export function buildThreadListV2ListItems(input: {
   /** True while the shelf expansion preferences are still loading; stamped
       onto both shelf headers so the disabled state reaches recycled cells. */
   readonly shelfPreferencesLoading?: boolean;
+  readonly navigation?: {
+    readonly view: ThreadNavigationView;
+    readonly collapsedGroups: ReadonlySet<string>;
+    readonly describe: (thread: EnvironmentThreadShell) => {
+      readonly key: string;
+      readonly label: string;
+    };
+    readonly selectedThreadKey?: string | null;
+  };
 }): ThreadListV2ListItem[] {
   const threadItems = input.items.map((item): ThreadListV2ListItem => {
     const snoozeWakeLabelText =
@@ -479,6 +512,41 @@ export function buildThreadListV2ListItems(input: {
   }
   // Hairlines depend on the final neighbour, so they are stamped after the
   // splice: a recycled cell only re-renders when its divider actually flips.
+  const navigation = input.navigation;
+  if (navigation && navigation.view !== "priority") {
+    const cards = result.filter(
+      (entry): entry is ThreadListV2ThreadListItem =>
+        entry.type === "v2-thread" && entry.item.variant === "card",
+    );
+    const remainder = result.filter(
+      (entry) => entry.type !== "v2-thread" || entry.item.variant !== "card",
+    );
+    const grouped: ThreadListV2ListItem[] = [];
+    for (const group of groupNavigationThreads(
+      cards,
+      (entry) => navigation.describe(entry.item.thread),
+      (entry) => resolveThreadListV2Status(entry.item.thread) === "working",
+    )) {
+      const expanded = !navigation.collapsedGroups.has(group.key);
+      grouped.push({
+        type: "v2-navigation-group",
+        key: group.key,
+        label: group.label,
+        count: group.threads.length,
+        running: group.running,
+        expanded,
+      });
+      grouped.push(
+        ...group.threads.filter(
+          (entry) =>
+            expanded ||
+            `${entry.item.thread.environmentId}:${entry.item.thread.id}` ===
+              navigation.selectedThreadKey,
+        ),
+      );
+    }
+    result.splice(0, result.length, ...grouped, ...remainder);
+  }
   return result.map((entry, index) => {
     if (entry.type !== "v2-thread" && entry.type !== "v2-pending") return entry;
     const next = result[index + 1];
