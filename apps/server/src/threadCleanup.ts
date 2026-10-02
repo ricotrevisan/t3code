@@ -460,7 +460,7 @@ export const makeWith = (dependencies: {
     );
     return { review, run };
   });
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   return yield* makeWith({
     config: yield* ServerConfig,
     git: yield* GitVcsDriver,
