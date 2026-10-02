@@ -284,7 +284,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                     {triggerTitle}
                   </span>
                   {triggerRoute ? (
-                    <span className="truncate font-normal text-[10px] leading-3 text-muted-foreground/70">
+                    <span className="truncate font-normal text-3xs leading-3 text-muted-foreground/70">
                       {triggerRoute}
                     </span>
                   ) : null}
