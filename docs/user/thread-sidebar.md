@@ -174,15 +174,18 @@ several selected threads together. Choose **Wake thread** to bring a thread back
 
 Choose **Review cleanup…** from a settled thread's menu. Settling a thread manually
 also opens the review. Choose whether to archive its conversation, remove its
-worktree, or keep both. Automatic settlement leaves the review available without
-opening a dialog.
+worktree, delete its merged remote branch, or keep them. Archiving starts unchecked. Automatic settlement leaves the review available without
+opening a dialog. If you leave the review untouched for 15 seconds or dismiss it,
+T3 does nothing and keeps the thread settled. Interacting with the review stops the
+countdown.
 
 Worktree removal requires a clean, unlocked checkout whose entire branch is
 integrated into the remote default branch. T3 keeps worktrees used by another
-thread, agent, terminal, or running process. Ignored files are backed up and
-verified before removal, except rebuildable `node_modules` directories. The result
-shows the backup location. Branches and conversation history are preserved; an
-archived thread can be reopened from the archive.
+thread, agent, terminal, or running process. Generated dependencies and Vite hook
+helpers are discarded. Other ignored files block removal so you can preserve them
+first. Remote branch deletion is a separate choice and requires an unchanged branch
+fully integrated into origin’s default branch. The local branch and conversation
+history are preserved; an archived thread can be reopened from the archive.
 
 Checks run again when you confirm. If the thread resumes or its files change,
 review it again after the work finishes. An environment unable to verify running

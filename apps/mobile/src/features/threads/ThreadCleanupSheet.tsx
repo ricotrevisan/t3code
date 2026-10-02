@@ -41,11 +41,11 @@ function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onCl
     () =>
       createThreadCleanupReview(
         { environmentId: target.environmentId, threadId: target.threadId },
-        { inspect, run },
+        { inspect, run, dismiss: onClose },
       ),
-    [inspect, run, target.environmentId, target.threadId],
+    [inspect, run, onClose, target.environmentId, target.threadId],
   );
-  const { review, result, selected, busy, error } = useSyncExternalStore(
+  const { review, result, selected, busy, error, remainingSeconds } = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
   );
@@ -54,18 +54,19 @@ function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onCl
     return controller.dispose;
   }, [controller]);
   return (
-    <Modal
-      visible
-      transparent
-      animationType="fade"
-      onRequestClose={() => {
-        if (!busy) onClose();
-      }}
-    >
+    <Modal visible transparent animationType="fade" onRequestClose={controller.dismiss}>
       <View className="flex-1 items-center justify-center bg-backdrop px-6">
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Do nothing and close cleanup"
+          disabled={busy}
+          onPress={controller.dismiss}
+          className="absolute inset-0"
+        />
         <ScrollView
           className="max-h-[85%] w-full max-w-md grow-0 rounded-3xl bg-screen"
           contentContainerStyle={{ padding: 24, gap: 20 }}
+          onTouchStart={controller.interact}
         >
           <AppText accessibilityRole="header" className="text-xl font-t3-semibold">
             {result ? "Cleanup results" : "Finish tidying up?"}
@@ -112,7 +113,10 @@ function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onCl
             <Pressable
               accessibilityRole="button"
               className="min-h-12 justify-center"
-              onPress={() => void controller.reviewAgain()}
+              onPress={() => {
+                controller.interact();
+                void controller.reviewAgain();
+              }}
             >
               <AppText>Review again</AppText>
             </Pressable>
@@ -121,9 +125,15 @@ function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onCl
             accessibilityRole="button"
             disabled={busy}
             className="min-h-12 justify-center"
-            onPress={onClose}
+            onPress={controller.dismiss}
           >
-            <AppText>{result ? "Done" : "Do nothing"}</AppText>
+            <AppText>
+              {result
+                ? "Done"
+                : remainingSeconds !== null
+                  ? `Do nothing (${remainingSeconds}s)`
+                  : "Do nothing"}
+            </AppText>
           </Pressable>
           {!result && (
             <Pressable

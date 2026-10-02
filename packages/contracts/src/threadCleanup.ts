@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 import { IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-export const ThreadCleanupActionKind = Schema.Literals(["worktree", "archive"]);
+export const ThreadCleanupActionKind = Schema.Literals(["worktree", "remote-branch", "archive"]);
 export const ThreadCleanupAction = Schema.Struct({
   id: ThreadCleanupActionKind,
   title: Schema.String,
@@ -20,7 +20,7 @@ export type ThreadCleanupReview = typeof ThreadCleanupReview.Type;
 export const ThreadCleanupRunInput = Schema.Struct({
   threadId: ThreadId,
   reviewId: TrimmedNonEmptyString,
-  selected: Schema.Array(ThreadCleanupActionKind).check(Schema.isMaxLength(2)),
+  selected: Schema.Array(ThreadCleanupActionKind).check(Schema.isMaxLength(3)),
 });
 export type ThreadCleanupRunInput = typeof ThreadCleanupRunInput.Type;
 export const ThreadCleanupResult = Schema.Struct({

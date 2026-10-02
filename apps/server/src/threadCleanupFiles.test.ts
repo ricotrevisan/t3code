@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
-import { backupCleanupFiles, inspectCleanupFiles } from "./threadCleanupFiles.ts";
+import { inspectCleanupFiles } from "./threadCleanupFiles.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -16,39 +16,31 @@ async function fixture() {
 }
 
 describe("cleanup file preservation", () => {
-  it("backs up ignored notes and symlinks, excluding only dependency installations", async () => {
+  it("deduplicates overlapping ignored paths and flags notes and symlinks", async () => {
     const root = await fixture();
-    const checkout = NodePath.join(root, "checkout");
-    const backup = NodePath.join(root, "backup", "files");
-    await NodeFSP.mkdir(NodePath.join(checkout, "notes"), { recursive: true });
-    await NodeFSP.mkdir(NodePath.join(checkout, "node_modules"));
-    await NodeFSP.writeFile(NodePath.join(checkout, "notes", "review.md"), "Keep this evidence");
-    await NodeFSP.chmod(NodePath.join(checkout, "notes", "review.md"), 0o700);
-    await NodeFSP.writeFile(NodePath.join(checkout, "node_modules", "cache"), "rebuildable");
-    await NodeFSP.symlink("../local.env", NodePath.join(checkout, ".env"));
-    const files = await inspectCleanupFiles(checkout, ["notes/", "node_modules/", ".env"]);
-    expect(files.map((file) => file.path)).toEqual([".env", "notes/review.md"]);
-    await backupCleanupFiles(checkout, backup, files);
-    expect(await NodeFSP.readFile(NodePath.join(backup, "notes", "review.md"), "utf8")).toBe(
+    await NodeFSP.mkdir(NodePath.join(root, "notes"));
+    await NodeFSP.writeFile(NodePath.join(root, "notes", "review.md"), "Keep this evidence");
+    await NodeFSP.symlink("../local.env", NodePath.join(root, ".env"));
+    const files = await inspectCleanupFiles(root, ["notes/", "notes/review.md", "notes", ".env"]);
+    expect(files).toEqual([".env", "notes/review.md"]);
+    expect(await NodeFSP.readlink(NodePath.join(root, ".env"))).toBe("../local.env");
+    expect(await NodeFSP.readFile(NodePath.join(root, "notes", "review.md"), "utf8")).toBe(
       "Keep this evidence",
     );
-    expect(await NodeFSP.readlink(NodePath.join(backup, ".env"))).toBe("../local.env");
-    expect((await NodeFSP.stat(NodePath.join(backup, "notes", "review.md"))).mode & 0o100).toBe(
-      0o100,
-    );
-    expect(await NodeFSP.stat(NodePath.join(checkout, "notes", "review.md"))).toBeDefined();
   });
-  it("refuses a stale file manifest without removing the source", async () => {
+  it("discards generated dependencies and Vite helpers but flags custom hooks", async () => {
     const root = await fixture();
-    const checkout = NodePath.join(root, "checkout");
-    await NodeFSP.mkdir(checkout);
-    await NodeFSP.writeFile(NodePath.join(checkout, "note"), "before");
-    const files = await inspectCleanupFiles(checkout, ["note"]);
-    await NodeFSP.writeFile(NodePath.join(checkout, "note"), "after");
-    await expect(
-      backupCleanupFiles(checkout, NodePath.join(root, "backup", "files"), files),
-    ).rejects.toThrow("Files changed");
-    expect(await NodeFSP.readFile(NodePath.join(checkout, "note"), "utf8")).toBe("after");
+    await NodeFSP.mkdir(NodePath.join(root, ".vite-hooks", "_"), { recursive: true });
+    await NodeFSP.mkdir(NodePath.join(root, "node_modules"));
+    await NodeFSP.writeFile(NodePath.join(root, "node_modules", "cache"), "generated");
+    await NodeFSP.writeFile(NodePath.join(root, ".vite-hooks", "_", "pre-commit"), "generated");
+    await NodeFSP.writeFile(NodePath.join(root, ".vite-hooks", "pre-commit"), "custom");
+    const files = await inspectCleanupFiles(root, [
+      "node_modules/",
+      ".vite-hooks/",
+      ".vite-hooks/_/pre-commit",
+    ]);
+    expect(files).toEqual([".vite-hooks/pre-commit"]);
   });
   it("rejects paths escaping the checkout", async () => {
     const root = await fixture();

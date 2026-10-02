@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off globalDate:off - UI dismissal timing outside an Effect runtime; disposed with the review.
 import type {
   ScopedThreadRef,
   ThreadCleanupReview,
@@ -12,12 +13,14 @@ type CleanupState = {
   readonly selected: readonly ThreadCleanupRunInput["selected"][number][];
   readonly busy: boolean;
   readonly error: string | null;
+  readonly remainingSeconds: number | null;
 };
 
 /** Shared review lifecycle; each client supplies RPC commands and its own rendering. */
 export function createThreadCleanupReview(
   target: ScopedThreadRef,
   commands: {
+    dismiss?: () => void;
     inspect: (input: {
       environmentId: ScopedThreadRef["environmentId"];
       input: { threadId: ScopedThreadRef["threadId"] };
@@ -28,14 +31,53 @@ export function createThreadCleanupReview(
     }) => Promise<AtomCommandResult<ThreadCleanupResult, unknown>>;
   },
 ) {
-  let state: CleanupState = { review: null, result: null, selected: [], busy: false, error: null };
+  let state: CleanupState = {
+    review: null,
+    result: null,
+    selected: [],
+    busy: false,
+    error: null,
+    remainingSeconds: null,
+  };
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let interacted = false;
+  let dismissed = false;
   let generation = 0;
   const listeners = new Set<() => void>();
   const update = (patch: Partial<CleanupState>) => {
     state = { ...state, ...patch };
     for (const listener of listeners) listener();
   };
+  const stopCountdown = () => {
+    clearInterval(timer);
+    timer = undefined;
+    if (state.remainingSeconds !== null) update({ remainingSeconds: null });
+  };
+  const interact = () => {
+    interacted = true;
+    stopCountdown();
+  };
+  const dismiss = () => {
+    if (state.busy || dismissed) return;
+    dismissed = true;
+    generation++;
+    stopCountdown();
+    commands.dismiss?.();
+  };
+  const startCountdown = () => {
+    stopCountdown();
+    if (interacted || !commands.dismiss) return;
+    const deadline = Date.now() + 15_000;
+    update({ remainingSeconds: 15 });
+    timer = setInterval(() => {
+      const remainingSeconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      if (remainingSeconds === 0) dismiss();
+      else update({ remainingSeconds });
+    }, 1000);
+  };
   return {
+    interact,
+    dismiss,
     getSnapshot: () => state,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
@@ -44,10 +86,14 @@ export function createThreadCleanupReview(
       };
     },
     dispose: () => {
+      dismissed = true;
+      stopCountdown();
       generation++;
     },
     reviewAgain: async () => {
       if (state.busy) return;
+      dismissed = false;
+      startCountdown();
       const current = ++generation;
       update({ review: null, result: null, selected: [], error: null });
       try {
@@ -59,7 +105,9 @@ export function createThreadCleanupReview(
         if (response._tag === "Success")
           update({
             review: response.value,
-            selected: response.value.actions.filter((a) => !a.blockedReason).map((a) => a.id),
+            selected: response.value.actions
+              .filter((a) => a.id !== "archive" && !a.blockedReason)
+              .map((a) => a.id),
           });
         else update({ error: String(squashAtomCommandFailure(response)) });
       } catch (error) {
@@ -67,7 +115,9 @@ export function createThreadCleanupReview(
       }
     },
     toggle: (id: ThreadCleanupRunInput["selected"][number], checked: boolean) => {
+      interact();
       if (
+        dismissed ||
         state.busy ||
         state.result ||
         !state.review?.actions.some((a) => a.id === id && !a.blockedReason)
@@ -80,8 +130,9 @@ export function createThreadCleanupReview(
       });
     },
     execute: async () => {
+      interact();
       const review = state.review;
-      if (!review || state.busy || state.result || !state.selected.length) return;
+      if (dismissed || !review || state.busy || state.result || !state.selected.length) return;
       const current = generation;
       const selected = review.actions
         .filter((a) => state.selected.includes(a.id) && !a.blockedReason)

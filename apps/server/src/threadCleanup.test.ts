@@ -39,7 +39,10 @@ const fixture = Effect.gen(function* () {
   yield* run(main, ["init", "--initial-branch=main"]);
   yield* run(main, ["config", "user.name", "Test"]);
   yield* run(main, ["config", "user.email", "test@example.com"]);
-  yield* fs.writeFileString(path.join(main, ".gitignore"), "notes/\nnode_modules/\n");
+  yield* fs.writeFileString(
+    path.join(main, ".gitignore"),
+    "notes/\nnode_modules/\n.vite-hooks/_/\n",
+  );
   yield* run(main, ["add", "."]);
   yield* run(main, ["commit", "-m", "Initial"]);
   yield* run(main, ["clone", "--bare", main, remote]);
@@ -47,6 +50,7 @@ const fixture = Effect.gen(function* () {
   yield* run(main, ["fetch", "origin"]);
   yield* run(main, ["remote", "set-head", "origin", "main"]);
   yield* run(main, ["worktree", "add", "-b", "task", worktree]);
+  yield* run(main, ["push", "origin", "task"]);
   let thread: OrchestrationThreadShell = {
     id: ThreadId.make("cleanup-thread"),
     projectId: ProjectId.make("cleanup-project"),
@@ -136,6 +140,7 @@ const fixture = Effect.gen(function* () {
     main,
     worktree,
     home,
+    remote,
     run,
     service,
     review: () => service.review({ threadId: thread.id }),
@@ -156,35 +161,117 @@ const fixture = Effect.gen(function* () {
 
 it.layer(live)("reviewed thread cleanup", (it) => {
   it.effect(
-    "backs up ignored evidence, removes an integrated worktree, keeps its branch, and archives once",
+    "removes generated files and the merged remote branch while keeping local history",
     () =>
       Effect.gen(function* () {
         const f = yield* fixture;
-        yield* f.fs.makeDirectory(f.path.join(f.worktree, "notes"));
+        yield* f.fs.makeDirectory(f.path.join(f.worktree, ".vite-hooks", "_"), { recursive: true });
         yield* f.fs.writeFileString(
-          f.path.join(f.worktree, "notes", "evidence.md"),
-          "Important evidence",
+          f.path.join(f.worktree, ".vite-hooks", "_", "pre-commit"),
+          "generated",
         );
         const review = yield* f.review();
-        expect(review.actions.map((a) => a.blockedReason)).toEqual([null, null]);
-        const result = yield* f.execute(review.reviewId);
+        expect(review.actions.map((a) => a.blockedReason)).toEqual([null, null, null]);
+        const input = {
+          threadId: f.thread().id,
+          reviewId: review.reviewId,
+          selected: ["worktree", "remote-branch"] as const,
+        };
+        const result = yield* f.service.run(input);
         expect(result.actions.map((a) => a.status)).toEqual(["completed", "completed"]);
         expect(yield* f.fs.exists(f.worktree)).toBe(false);
-        expect(
-          yield* f.fs.readFileString(
-            f.path.join(
-              f.home,
-              "cleanup-backups",
-              review.reviewId,
-              "files",
-              "notes",
-              "evidence.md",
-            ),
-          ),
-        ).toBe("Important evidence");
+        expect(yield* f.fs.exists(f.path.join(f.home, "cleanup-backups"))).toBe(false);
+        expect((yield* f.run(f.main, ["ls-remote", "origin", "refs/heads/task"])).stdout).toBe("");
         yield* f.run(f.main, ["show-ref", "--verify", "refs/heads/task"]);
-        expect(yield* f.execute(review.reviewId)).toEqual(result);
+        expect(f.thread().archivedAt).toBeNull();
+        expect(yield* f.service.run(input)).toEqual(result);
       }),
+  );
+  it.effect("blocks removal for unexpected ignored files without backing them up", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.fs.makeDirectory(f.path.join(f.worktree, "notes"));
+      const note = f.path.join(f.worktree, "notes", "evidence.md");
+      yield* f.fs.writeFileString(note, "Important evidence");
+      const review = yield* f.review();
+      expect(review.actions[0]?.blockedReason).toContain("notes/evidence.md");
+      const result = yield* f.execute(review.reviewId);
+      expect(result.actions.map((a) => a.status)).toEqual(["deferred", "completed"]);
+      expect(yield* f.fs.readFileString(note)).toBe("Important evidence");
+      expect(yield* f.fs.exists(f.home)).toBe(false);
+    }),
+  );
+  it.effect("keeps a remote branch that changed after review", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const review = yield* f.review();
+      yield* f.fs.writeFileString(f.path.join(f.worktree, "later.txt"), "Later work");
+      yield* f.run(f.worktree, ["add", "."]);
+      yield* f.run(f.worktree, ["commit", "-m", "Later work"]);
+      yield* f.run(f.worktree, ["push", "origin", "task"]);
+      const result = yield* f.service.run({
+        threadId: f.thread().id,
+        reviewId: review.reviewId,
+        selected: ["remote-branch"],
+      });
+      expect(result.actions[0]?.status).toBe("failed");
+      expect((yield* f.run(f.main, ["ls-remote", "origin", "refs/heads/task"])).stdout).toContain(
+        "refs/heads/task",
+      );
+    }),
+  );
+  it.effect("rejects deletion when a push races the final check", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const review = yield* f.review();
+      // Create a different commit without changing the reviewed branch.
+      yield* f.run(f.main, ["commit", "--allow-empty", "-m", "Concurrent work"]);
+      const changed = (yield* f.run(f.main, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* f.run(f.main, ["push", "origin", "HEAD:refs/heads/concurrent"]);
+      const hooks = f.path.join(f.root, "hooks");
+      yield* f.fs.makeDirectory(hooks);
+      const hook = f.path.join(hooks, "pre-push");
+      yield* f.fs.writeFileString(
+        hook,
+        `#!/bin/sh\ngit --git-dir="$2" update-ref refs/heads/task ${changed}\n`,
+      );
+      yield* f.fs.chmod(hook, 0o700);
+      yield* f.run(f.main, ["config", "core.hooksPath", hooks]);
+      const result = yield* f.service.run({
+        threadId: f.thread().id,
+        reviewId: review.reviewId,
+        selected: ["remote-branch"],
+      });
+      expect(result.actions[0]?.status).toBe("failed");
+      expect((yield* f.run(f.main, ["ls-remote", "origin", "refs/heads/task"])).stdout).toContain(
+        changed,
+      );
+    }),
+  );
+  it.effect("protects the current remote default even when the local remote HEAD is stale", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.run(f.remote, ["symbolic-ref", "HEAD", "refs/heads/task"]);
+      expect((yield* f.review()).actions[1]?.blockedReason).toContain("cannot be deleted");
+    }),
+  );
+  it.effect("blocks absent, primary, mismatched, and upstream push targets", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.update({ branch: "main" });
+      expect((yield* f.review()).actions[1]?.blockedReason).toContain("cannot be deleted");
+      f.update({ branch: "task" });
+      yield* f.run(f.main, ["push", "origin", ":refs/heads/task"]);
+      expect((yield* f.review()).actions[1]?.blockedReason).toContain("already been deleted");
+      yield* f.run(f.main, [
+        "remote",
+        "set-url",
+        "--push",
+        "origin",
+        "https://github.com/pingdotgg/t3code.git",
+      ]);
+      expect((yield* f.review()).actions[1]?.blockedReason).toContain("push target");
+    }),
   );
   it.effect("defers selected actions when a thread resumes after review", () =>
     Effect.gen(function* () {
