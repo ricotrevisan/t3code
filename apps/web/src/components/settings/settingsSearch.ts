@@ -268,6 +268,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["long lines code blocks tables diffs file previews"],
   },
   {
+    id: "thread-view",
+    title: "Thread view",
+    to: "/settings/general",
+    searchTerms: ["priority project machine grouping sidebar ordering"],
+  },
+  {
     id: "project-grouping",
     title: "Project grouping",
     to: "/settings/general",

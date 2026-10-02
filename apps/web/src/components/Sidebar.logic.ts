@@ -9,7 +9,7 @@ import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-searc
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { planPinnedMove, planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -410,6 +410,46 @@ type LogicalSidebarProject = SidebarProject & {
 };
 
 export type ThreadTraversalDirection = "previous" | "next";
+
+/** Bulk actions and retained selection must only include rendered rows. */
+export function getVisibleSelectedThreadKeys(
+  selectedThreadKeys: Iterable<string>,
+  renderedThreadKeys: Iterable<string>,
+) {
+  const rendered = new Set(renderedThreadKeys);
+  return [...selectedThreadKeys].filter((key) => rendered.has(key));
+}
+
+type PriorityMoveSection = Pick<Parameters<typeof planPinnedMove>[0], "orderedIds" | "keysById"> & {
+  readonly reorderableKeys: ReadonlySet<string>;
+};
+
+/** Resolve the current section and order when a delayed menu action executes. */
+export function planSidebarPriorityMove(input: {
+  readonly threadKey: string;
+  readonly direction: "up" | "down";
+  readonly sectionByThreadKey: ReadonlyMap<string, SidebarSection>;
+  readonly pinned: PriorityMoveSection;
+  readonly active: PriorityMoveSection;
+}) {
+  const section = input.sectionByThreadKey.get(input.threadKey);
+  if (section !== "pinned" && section !== "active") return null;
+  const state = input[section];
+  if (!state.reorderableKeys.has(input.threadKey)) return null;
+  const assignments = planPinnedMove({
+    orderedIds: state.orderedIds,
+    keysById: state.keysById,
+    movedId: input.threadKey,
+    direction: input.direction,
+  });
+  if (assignments === null || assignments.some(({ id }) => !state.reorderableKeys.has(id)))
+    return null;
+  const order = [...state.orderedIds];
+  const index = order.indexOf(input.threadKey);
+  order.splice(index, 1);
+  order.splice(index + (input.direction === "up" ? -1 : 1), 0, input.threadKey);
+  return { section, assignments, order };
+}
 
 /**
  * Shared-worktree checks must exclude only successful deletions, never the

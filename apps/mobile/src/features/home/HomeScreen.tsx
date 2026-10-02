@@ -2,6 +2,11 @@ import { useAndroidControlSizing } from "../../components/useAndroidControlSizin
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import { computeThreadMoveAvailability } from "../threads/threadOrder";
 import { LegendList, type LegendListRef } from "@legendapp/list/react-native";
+import { useThreadNavigationOptions } from "./home-list-options";
+import {
+  ThreadNavigationControls,
+  ThreadNavigationGroupHeader,
+} from "../threads/ThreadNavigationControls";
 import {
   type EnvironmentProject,
   type EnvironmentThreadShell,
@@ -63,6 +68,7 @@ import { useThreadListV2ShelfPreferences } from "../threads/use-thread-list-v2-s
 import type { HomeListFilterMenuEnvironment } from "./home-list-filter-menu";
 import {
   buildHomeProjectScopes,
+  buildHomeProjectNavigationByProjectKey,
   sortHomeProjectScopes,
   type HomeProjectSortOrder,
 } from "./homeThreadList";
@@ -224,6 +230,7 @@ function HomeTopContentSpacer() {
 /* ─── Main screen ────────────────────────────────────────────────────── */
 
 export function HomeScreen(props: HomeScreenProps) {
+  const navigation = useThreadNavigationOptions();
   const queuedThreadKeys = useQueuedThreadKeys();
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
   const insets = useSafeAreaInsets();
@@ -370,6 +377,10 @@ export function HomeScreen(props: HomeScreenProps) {
               ),
           ) ?? null),
     [v2ProjectScopeKey, v2ScopeProjects],
+  );
+  const v2ProjectNavigationByProjectKey = useMemo(
+    () => buildHomeProjectNavigationByProjectKey(v2ScopeProjects),
+    [v2ScopeProjects],
   );
   const v2ProjectTitleByProjectKey = useMemo(
     () =>
@@ -691,9 +702,29 @@ export function HomeScreen(props: HomeScreenProps) {
         queuedThreadKeys,
         moveAvailability: threadMoveAvailability,
         shelfPreferencesLoading: !shelfPreferencesLoaded,
+        navigation: {
+          ...navigation,
+          describe: (thread) =>
+            navigation.view === "machine"
+              ? {
+                  key: `machine:${thread.environmentId}`,
+                  label:
+                    props.savedConnectionsById[thread.environmentId]?.environmentLabel ??
+                    thread.environmentId,
+                }
+              : (v2ProjectNavigationByProjectKey.get(
+                  scopedProjectKey(thread.environmentId, thread.projectId),
+                ) ?? {
+                  key: `project:${thread.environmentId}:${thread.projectId}`,
+                  label: "Unknown project",
+                }),
+        },
       }),
     [
       nowMinute,
+      navigation,
+      props.savedConnectionsById,
+      v2ProjectNavigationByProjectKey,
       queuedThreadKeys,
       threadMoveAvailability,
       settledShelfExpanded,
@@ -712,6 +743,16 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const renderV2Item = useCallback(
     ({ item }: { readonly item: ThreadListV2ListItem }) => {
+      if (item.type === "v2-navigation-group")
+        return (
+          <ThreadNavigationGroupHeader
+            groupKey={item.key}
+            label={item.label}
+            count={item.count}
+            running={item.running}
+            expanded={item.expanded}
+          />
+        );
       if (item.type === "v2-pending") {
         const pendingScopeKey = scopedProjectKey(
           item.pendingTask.environmentId,
@@ -949,7 +990,12 @@ export function HomeScreen(props: HomeScreenProps) {
 
   // Project scoping lives in the header filter menu (no inline chip row on
   // mobile — the menu is the one filter surface).
-  const v2ListHeader = listHeader;
+  const v2ListHeader = (
+    <View>
+      <ThreadNavigationControls />
+      {listHeader}
+    </View>
+  );
 
   // Use the v2 project scope for its empty state. Snoozed threads need no
   // special empty state: their shelf header is a list row even while collapsed.

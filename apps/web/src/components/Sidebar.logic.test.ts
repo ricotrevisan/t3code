@@ -11,6 +11,8 @@ import {
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   deleteSelectedThreadEntries,
+  getVisibleSelectedThreadKeys,
+  planSidebarPriorityMove,
   filterSidebarProjectScopeItems,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
@@ -122,6 +124,180 @@ describe("animateSidebarLayoutChanges", () => {
 
   it("keeps layout movement while the user is sorting", () => {
     expect(animateSidebarLayoutChanges({ ...baseArgs, isSorting: true })).toBe(true);
+  });
+});
+
+describe("visible bulk selection", () => {
+  it("never deletes a selected thread hidden by a collapsed group", async () => {
+    const selected = new Set(["visible", "collapsed", "current-in-collapsed-group"]);
+    const rendered = ["visible", "current-in-collapsed-group"];
+    const deleted: string[] = [];
+    const outcome = await deleteSelectedThreadEntries({
+      entries: getVisibleSelectedThreadKeys(selected, rendered).map((threadKey) => ({ threadKey })),
+      delete: async ({ threadKey }) => {
+        deleted.push(threadKey);
+        return AsyncResult.success(undefined);
+      },
+    });
+    expect(deleted).toEqual(["visible", "current-in-collapsed-group"]);
+    expect(outcome.deletedThreadKeys.has("collapsed")).toBe(false);
+  });
+
+  it("drops rows that became hidden while a bulk menu was open", () => {
+    const atMenuOpen = getVisibleSelectedThreadKeys(["one", "two"], ["one", "two"]);
+    expect(getVisibleSelectedThreadKeys(atMenuOpen, ["one"])).toEqual(["one"]);
+    expect(getVisibleSelectedThreadKeys(atMenuOpen, [])).toEqual([]);
+  });
+});
+
+describe("current priority move planning", () => {
+  function currentOrder() {
+    return {
+      sectionByThreadKey: new Map<string, SidebarSection>([
+        ["a", "active"],
+        ["b", "active"],
+        ["c", "active"],
+      ]),
+      pinned: {
+        orderedIds: ["p"],
+        keysById: new Map([["p", "g"]]),
+        reorderableKeys: new Set(["p"]),
+      },
+      active: {
+        orderedIds: ["a", "c", "b"],
+        keysById: new Map([
+          ["a", "g"],
+          ["b", "t"],
+          ["c", "n"],
+        ]),
+        reorderableKeys: new Set(["a", "b", "c"]),
+      },
+    };
+  }
+
+  it("moves one position in the order received from another device", () => {
+    const state = currentOrder();
+    const plan = planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" });
+    expect(plan?.section).toBe("active");
+    expect(plan?.order).toEqual(["a", "b", "c"]);
+    const keys = new Map(state.active.keysById);
+    for (const assignment of plan?.assignments ?? []) keys.set(assignment.id, assignment.orderKey);
+    expect(
+      [...keys].sort(([, left], [, right]) => left.localeCompare(right)).map(([id]) => id),
+    ).toEqual(["a", "b", "c"]);
+    expect(state.pinned.keysById).toEqual(new Map([["p", "g"]]));
+  });
+
+  it("uses pin ordering if the thread was pinned while its menu was open", () => {
+    const state = currentOrder();
+    state.sectionByThreadKey.set("b", "pinned");
+    state.pinned.orderedIds.push("b");
+    state.pinned.keysById.set("b", "n");
+    state.pinned.reorderableKeys.add("b");
+    const plan = planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" });
+    expect(plan?.section).toBe("pinned");
+    const keys = new Map(state.pinned.keysById);
+    for (const assignment of plan?.assignments ?? []) keys.set(assignment.id, assignment.orderKey);
+    expect(
+      [...keys].sort(([, left], [, right]) => left.localeCompare(right)).map(([id]) => id),
+    ).toEqual(["b", "p"]);
+    expect(state.active.keysById.get("b")).toBe("t");
+  });
+
+  it.each(["snoozed", "settled"] as const)(
+    "does not reorder a thread that became %s",
+    (section) => {
+      const state = currentOrder();
+      state.sectionByThreadKey.set("b", section);
+      expect(planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" })).toBeNull();
+    },
+  );
+
+  it("rejects moves that would need to arrange a keyless unsupported neighbor", () => {
+    const active = {
+      orderedIds: ["a", "x", "b"],
+      keysById: new Map<string, string | null>([
+        ["a", null],
+        ["x", null],
+        ["b", null],
+      ]),
+      reorderableKeys: new Set(["a", "b"]),
+    };
+    expect(
+      planSidebarPriorityMove({
+        ...currentOrder(),
+        active,
+        sectionByThreadKey: new Map(active.orderedIds.map((id) => [id, "active" as const])),
+        threadKey: "b",
+        direction: "up",
+      }),
+    ).toBeNull();
+    expect([...active.keysById.values()]).toEqual([null, null, null]);
+  });
+
+  it("keeps a keyed unsupported neighbor as a read-only ordering anchor", () => {
+    const active = {
+      orderedIds: ["a", "x", "b"],
+      keysById: new Map([
+        ["a", "g"],
+        ["x", "n"],
+        ["b", "t"],
+      ]),
+      reorderableKeys: new Set(["a", "b"]),
+    };
+    const plan = planSidebarPriorityMove({
+      ...currentOrder(),
+      active,
+      sectionByThreadKey: new Map(active.orderedIds.map((id) => [id, "active" as const])),
+      threadKey: "b",
+      direction: "up",
+    });
+    expect(plan?.order).toEqual(["a", "b", "x"]);
+    expect(plan?.assignments.map(({ id }) => id)).toEqual(["b"]);
+    expect(active.keysById.get("x")).toBe("n");
+  });
+
+  it("holds the complete intended order throughout keyless batch materialization", () => {
+    let shells: Array<{ id: string; createdAt: string; activeOrderKey: string | null }> = [
+      "a",
+      "b",
+      "c",
+    ].map((id, index) => ({
+      id,
+      createdAt: `2026-06-0${index + 1}T00:00:00.000Z`,
+      activeOrderKey: null,
+    }));
+    const active = {
+      orderedIds: shells.map(({ id }) => id),
+      keysById: new Map(shells.map(({ id, activeOrderKey }) => [id, activeOrderKey])),
+      reorderableKeys: new Set(shells.map(({ id }) => id)),
+    };
+    const plan = planSidebarPriorityMove({
+      ...currentOrder(),
+      active,
+      sectionByThreadKey: new Map(active.orderedIds.map((id) => [id, "active" as const])),
+      threadKey: "c",
+      direction: "up",
+    });
+    expect(plan?.order).toEqual(["a", "c", "b"]);
+    for (const assignment of plan?.assignments ?? []) {
+      shells = shells.map((shell) =>
+        shell.id === assignment.id ? { ...shell, activeOrderKey: assignment.orderKey } : shell,
+      );
+      const displayed = orderItemsByPreferredIds({
+        items: sortThreadsForSidebar(shells),
+        preferredIds: plan?.order ?? [],
+        getId: (shell) => shell.id,
+      });
+      expect(displayed.map(({ id }) => id)).toEqual(["a", "c", "b"]);
+    }
+    expect(sortThreadsForSidebar(shells).map(({ id }) => id)).toEqual(["a", "c", "b"]);
+  });
+
+  it("does not write a thread whose environment stopped supporting reorder", () => {
+    const state = currentOrder();
+    state.active.reorderableKeys.delete("b");
+    expect(planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" })).toBeNull();
   });
 });
 

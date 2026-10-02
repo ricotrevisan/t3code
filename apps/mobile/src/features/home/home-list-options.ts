@@ -13,10 +13,12 @@ import {
 } from "react";
 
 import type { HomeProjectSortOrder } from "./homeThreadList";
+import type { ThreadNavigationView } from "@t3tools/client-runtime/state/thread-navigation";
 
 export interface HomeListOptions {
   readonly selectedEnvironmentId: EnvironmentId | null;
   readonly projectSortOrder: HomeProjectSortOrder;
+  readonly threadView: ThreadNavigationView;
 }
 
 export interface ResolvedHomeListOptions extends HomeListOptions {
@@ -26,6 +28,7 @@ export interface ResolvedHomeListOptions extends HomeListOptions {
 function defaultHomeListOptions(): HomeListOptions {
   return {
     selectedEnvironmentId: null,
+    threadView: "priority",
     projectSortOrder:
       DEFAULT_SIDEBAR_PROJECT_SORT_ORDER === "manual"
         ? "updated_at"
@@ -37,6 +40,8 @@ interface HomeListOptionsContextValue {
   readonly options: HomeListOptions;
   readonly setOptions: Dispatch<SetStateAction<HomeListOptions>>;
   readonly projectGroupingMode: SidebarProjectGroupingMode;
+  readonly collapsedGroups: ReadonlySet<string>;
+  readonly setCollapsedGroups: Dispatch<SetStateAction<ReadonlySet<string>>>;
 }
 
 const HomeListOptionsContext = createContext<HomeListOptionsContextValue | null>(null);
@@ -49,11 +54,36 @@ export function HomeListOptionsProvider({
   readonly projectGroupingMode: SidebarProjectGroupingMode;
 }>) {
   const [options, setOptions] = useState<HomeListOptions>(defaultHomeListOptions);
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(new Set());
   const value = useMemo(
-    () => ({ options, setOptions, projectGroupingMode }),
-    [options, projectGroupingMode],
+    () => ({ options, setOptions, projectGroupingMode, collapsedGroups, setCollapsedGroups }),
+    [options, projectGroupingMode, collapsedGroups],
   );
   return createElement(HomeListOptionsContext, { value }, children);
+}
+
+export function useThreadNavigationOptions() {
+  const shared = useContext(HomeListOptionsContext);
+  if (!shared) throw new Error("Thread navigation requires HomeListOptionsProvider");
+  const { setOptions, setCollapsedGroups, collapsedGroups, options } = shared;
+  const setView = useCallback(
+    (threadView: ThreadNavigationView) => setOptions((current) => ({ ...current, threadView })),
+    [setOptions],
+  );
+  const toggleGroup = useCallback(
+    (key: string) =>
+      setCollapsedGroups((current) => {
+        const next = new Set(current);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      }),
+    [setCollapsedGroups],
+  );
+  return useMemo(
+    () => ({ view: options.threadView, setView, collapsedGroups, toggleGroup }),
+    [options.threadView, setView, collapsedGroups, toggleGroup],
+  );
 }
 
 export function useHomeListOptions(availableEnvironmentIds: ReadonlySet<EnvironmentId>) {
@@ -75,12 +105,18 @@ export function useHomeListOptions(availableEnvironmentIds: ReadonlySet<Environm
     projectGroupingMode: shared?.projectGroupingMode ?? "repository",
   };
 
-  const setSelectedEnvironmentId = useCallback((value: EnvironmentId | null) => {
-    setOptions((current) => ({ ...current, selectedEnvironmentId: value }));
-  }, []);
-  const setProjectSortOrder = useCallback((value: HomeProjectSortOrder) => {
-    setOptions((current) => ({ ...current, projectSortOrder: value }));
-  }, []);
+  const setSelectedEnvironmentId = useCallback(
+    (value: EnvironmentId | null) => {
+      setOptions((current) => ({ ...current, selectedEnvironmentId: value }));
+    },
+    [setOptions],
+  );
+  const setProjectSortOrder = useCallback(
+    (value: HomeProjectSortOrder) => {
+      setOptions((current) => ({ ...current, projectSortOrder: value }));
+    },
+    [setOptions],
+  );
   return {
     options: resolvedOptions,
     setSelectedEnvironmentId,

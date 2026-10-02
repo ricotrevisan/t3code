@@ -5,7 +5,13 @@ import type {
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildHomeProjectScopes, sortHomeProjectScopes } from "./homeThreadList";
+import {
+  buildHomeProjectScopes,
+  buildHomeProjectNavigationByProjectKey,
+  sortHomeProjectScopes,
+} from "./homeThreadList";
+import { groupNavigationThreads } from "@t3tools/client-runtime/state/thread-navigation";
+import { scopedProjectKey } from "../../lib/scopedEntities";
 
 function makeProject(
   input: Partial<EnvironmentProject> & Pick<EnvironmentProject, "environmentId" | "id" | "title">,
@@ -83,12 +89,50 @@ describe("home project scopes", () => {
     expect(scopes).toHaveLength(1);
     expect(scopes[0]?.title).toBe("t3code");
     expect(scopes[0]?.projects).toEqual(projects);
+    const navigation = buildHomeProjectNavigationByProjectKey(scopes);
+    const groups = groupNavigationThreads(
+      projects.map((project) => ({ environmentId: project.environmentId, projectId: project.id })),
+      (thread) =>
+        navigation.get(scopedProjectKey(thread.environmentId, thread.projectId)) ?? {
+          key: "missing",
+          label: "Missing",
+        },
+      () => false,
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.threads).toHaveLength(2);
+    expect(groups[0]?.key).toBe(`project:${scopes[0]?.key}`);
     expect(scopes[0]?.projectRefs).toEqual(
       projects.map((project) => ({
         environmentId: project.environmentId,
         projectId: project.id,
       })),
     );
+  });
+
+  it("keeps project navigation separate when repository grouping is disabled", () => {
+    const environmentId = EnvironmentId.make("local");
+    const projects = [
+      makeProject({ environmentId, id: ProjectId.make("one"), title: "Same title" }),
+      makeProject({ environmentId, id: ProjectId.make("two"), title: "Same title" }),
+    ];
+    const scopes = buildHomeProjectScopes({
+      projects,
+      environmentId: null,
+      projectGroupingMode: "separate",
+    });
+    const navigation = buildHomeProjectNavigationByProjectKey(scopes);
+    const groups = groupNavigationThreads(
+      projects.map((project) => ({ environmentId: project.environmentId, projectId: project.id })),
+      (thread) =>
+        navigation.get(scopedProjectKey(thread.environmentId, thread.projectId)) ?? {
+          key: "missing",
+          label: "Missing",
+        },
+      () => false,
+    );
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.threads.length)).toEqual([1, 1]);
   });
 
   it("keeps repository identity from an older duplicate when the freshness winner lacks it", () => {

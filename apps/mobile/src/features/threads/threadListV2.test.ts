@@ -75,6 +75,57 @@ const linkedPullRequest = {
   url: "https://github.com/pingdotgg/t3code/pull/42",
 };
 
+describe("grouped navigation", () => {
+  it("keeps the selected thread visible inside a collapsed group and preserves shelves", () => {
+    const selected = makeThread({ id: ThreadId.make("selected"), title: "Selected" });
+    const other = makeThread({ id: ThreadId.make("other"), title: "Other" });
+    const parked = makeThread({
+      id: ThreadId.make("parked"),
+      title: "Parked",
+      settledOverride: "settled",
+    });
+    const layout = buildThreadListV2Items({
+      threads: [selected, other, parked],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+    const items = buildThreadListV2ListItems({
+      items: layout.items,
+      pendingTasks: [],
+      settledCount: layout.settledCount,
+      settledShelfHeaderIndex: layout.settledShelfHeaderIndex,
+      navigation: {
+        view: "machine",
+        collapsedGroups: new Set(["machine"]),
+        selectedThreadKey: `${environmentId}:${selected.id}`,
+        describe: () => ({ key: "machine", label: "Lab" }),
+      },
+    });
+    expect(items.map((item) => item.type)).toEqual([
+      "v2-navigation-group",
+      "v2-thread",
+      "v2-settled-shelf",
+      "v2-thread",
+    ]);
+    expect(items[0]).toMatchObject({ count: 2, expanded: false });
+    expect(items[1]?.key).toContain("selected");
+  });
+  it("recycles group headers only when their observable state is unchanged", () => {
+    const group = {
+      type: "v2-navigation-group" as const,
+      key: "lab",
+      label: "Lab",
+      count: 2,
+      running: 1,
+      expanded: true,
+    };
+    expect(threadListV2ListItemsAreEqual(group, { ...group })).toBe(true);
+    expect(threadListV2ListItemsAreEqual(group, { ...group, running: 0 })).toBe(false);
+    expect(threadListV2ListItemsAreEqual(group, { ...group, expanded: false })).toBe(false);
+  });
+});
+
 describe("resolveThreadListV2SnoozeMenuSelection", () => {
   it("accepts a displayed evening preset while its wake time is still future", () => {
     const menuOpenedAt = new Date(2026, 4, 8, 16, 59, 30);

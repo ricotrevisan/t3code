@@ -21,6 +21,21 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
+describe("thread navigation settings", () => {
+  it("preserves the priority view for existing installations", () => {
+    expect(decodeClientSettings({}).sidebarThreadView).toBe("priority");
+  });
+  it("persists each view without changing unrelated preferences", () => {
+    for (const sidebarThreadView of ["priority", "project", "machine"]) {
+      expect(decodeClientSettingsPatch({ sidebarThreadView })).toEqual({ sidebarThreadView });
+      expect(
+        encodeClientSettings(decodeClientSettings({ sidebarThreadView })).sidebarThreadView,
+      ).toBe(sidebarThreadView);
+    }
+    expect(() => decodeClientSettingsPatch({ sidebarThreadView: "unknown" })).toThrow();
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
