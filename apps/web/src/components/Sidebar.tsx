@@ -2571,6 +2571,10 @@ export default function Sidebar() {
         override holds until all of them appear in canonical state. */
     readonly assignedKeys: ReadonlyMap<string, string>;
   } | null>(null);
+  const optimisticDropRef = useRef(optimisticDrop);
+  optimisticDropRef.current = optimisticDrop;
+  const [threadOrderPending, setThreadOrderPending] = useState(false);
+  const threadOrderPendingRef = useRef(false);
   const {
     pinnedThreads,
     draggableThreadKeys,
@@ -3675,6 +3679,7 @@ export default function Sidebar() {
   ]);
   const handleThreadDragEnd = useCallback(
     (event: DragEndEvent) => {
+      if (threadOrderPendingRef.current || optimisticDropRef.current !== null) return;
       const activeKey = String(event.active.id);
       const activeSection = sectionByThreadKey.get(activeKey);
       const target =
@@ -3724,7 +3729,10 @@ export default function Sidebar() {
         keysAtDrop: target.section === "active" ? activeKeysById : pinnedKeysById,
         assignedKeys: new Map(assignments.map(({ id, orderKey }) => [id, orderKey])),
       };
+      optimisticDropRef.current = drop;
       setOptimisticDrop(drop);
+      threadOrderPendingRef.current = true;
+      setThreadOrderPending(true);
       void (async () => {
         const run = async (
           operation: Promise<AtomCommandResult<unknown, unknown>>,
@@ -3811,7 +3819,10 @@ export default function Sidebar() {
           )
             return;
         }
-      })();
+      })().finally(() => {
+        threadOrderPendingRef.current = false;
+        setThreadOrderPending(false);
+      });
     },
     [
       activeKeysById,
@@ -4195,13 +4206,22 @@ export default function Sidebar() {
             [
               ...(!isSettled &&
               !isSnoozed &&
-              priorityOrderingRef.current[isPinned ? "pinned" : "active"].reorderableKeys.has(
-                threadKey,
-              )
-                ? [
-                    { id: "priority:up", label: "Move up" },
-                    { id: "priority:down", label: "Move down" },
-                  ]
+              !threadOrderPendingRef.current &&
+              optimisticDropRef.current === null
+                ? (["up", "down"] as const).flatMap((direction) =>
+                    planSidebarPriorityMove({
+                      ...priorityOrderingRef.current,
+                      threadKey,
+                      direction,
+                    }) === null
+                      ? []
+                      : [
+                          {
+                            id: `priority:${direction}`,
+                            label: direction === "up" ? "Move up" : "Move down",
+                          },
+                        ],
+                  )
                 : []),
               ...buildThreadActionMenuItems({
                 branch: thread.branch ?? null,
@@ -4245,22 +4265,53 @@ export default function Sidebar() {
         switch (clicked.value) {
           case "priority:up":
           case "priority:down": {
+            if (threadOrderPendingRef.current || optimisticDropRef.current !== null) return;
             const plan = planSidebarPriorityMove({
               ...priorityOrderingRef.current,
               threadKey,
               direction: clicked.value === "priority:up" ? "up" : "down",
             });
             if (plan === null) return;
-            for (const assignment of plan.assignments) {
-              const ref = parseScopedThreadKey(assignment.id);
-              if (!ref) continue;
-              const result = await (
-                plan.section === "pinned" ? reorderPinnedThread : reorderActiveThread
-              )(ref, assignment.orderKey);
-              if (result._tag === "Failure") {
-                toastManager.add({ type: "error", title: "Failed to reorder thread" });
-                break;
+            const drop = {
+              key: threadKey,
+              sourceSection: plan.section,
+              section: plan.section,
+              occurredAt: new Date().toISOString(),
+              clearsSnooze: false,
+              order: plan.order,
+              keysAtDrop: priorityOrderingRef.current[plan.section].keysById,
+              assignedKeys: new Map(plan.assignments.map(({ id, orderKey }) => [id, orderKey])),
+            };
+            optimisticDropRef.current = drop;
+            setOptimisticDrop(drop);
+            threadOrderPendingRef.current = true;
+            setThreadOrderPending(true);
+            const releaseDrop = () =>
+              setOptimisticDrop((current) => (current === drop ? null : current));
+            try {
+              for (const assignment of plan.assignments) {
+                const ref = parseScopedThreadKey(assignment.id);
+                if (!ref) throw new Error("Invalid thread reference");
+                const result = await (
+                  plan.section === "pinned" ? reorderPinnedThread : reorderActiveThread
+                )(ref, assignment.orderKey);
+                if (result._tag === "Failure") {
+                  releaseDrop();
+                  if (!isAtomCommandInterrupted(result))
+                    toastManager.add({ type: "error", title: "Failed to reorder thread" });
+                  return;
+                }
               }
+            } catch (error) {
+              releaseDrop();
+              toastManager.add({
+                type: "error",
+                title: "Failed to reorder thread",
+                description: error instanceof Error ? error.message : "An error occurred.",
+              });
+            } finally {
+              threadOrderPendingRef.current = false;
+              setThreadOrderPending(false);
             }
             return;
           }
@@ -4994,7 +5045,8 @@ export default function Sidebar() {
                             disabled={
                               renamingThreadKey === threadKey ||
                               !draggableThreadKeys.has(threadKey) ||
-                              optimisticDrop !== null
+                              optimisticDrop !== null ||
+                              threadOrderPending
                             }
                           >
                             {(bag) => renderThreadRowInner(thread, section, bag)}
