@@ -195,6 +195,7 @@ function SettingsIndexSections() {
       </SettingsSection>
 
       <SettingsSection title="App">
+        <SettingsRow icon="desktopcomputer" label="Machines" target="SettingsMachines" />
         <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
         <SettingsRow icon="info.circle" label="About T3 Code" target="SettingsAbout" />
       </SettingsSection>

@@ -82,7 +82,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { Link, useParams, useRouter } from "@tanstack/react-router";
 
 import { useRightPanelStore } from "../rightPanelStore";
 import {
@@ -4738,6 +4738,12 @@ export default function Sidebar() {
               <option value="project">By project</option>
               <option value="machine">By machine</option>
             </select>
+            <Link
+              to="/machines"
+              className="text-xs text-sidebar-muted-foreground hover:text-sidebar-foreground"
+            >
+              Dashboard
+            </Link>
           </div>
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (

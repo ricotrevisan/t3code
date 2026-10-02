@@ -89,6 +89,7 @@ import { SettingsProjectGroupingRouteScreen } from "./features/settings/Settings
 import { SettingsProjectOverviewRouteScreen } from "./features/settings/SettingsProjectOverviewRouteScreen";
 import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
+import { MachinesRouteScreen } from "./features/threads/MachinesRouteScreen";
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
 import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
@@ -321,6 +322,11 @@ const SettingsContentStack = createNativeStackNavigator({
       options: {
         title: "License notice",
       },
+    }),
+    SettingsMachines: createNativeStackScreen({
+      screen: MachinesRouteScreen,
+      linking: "machines",
+      options: { title: "Machines" },
     }),
     SettingsUsage: createNativeStackScreen({
       screen: UsageRouteScreen,

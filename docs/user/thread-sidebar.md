@@ -38,6 +38,12 @@ use **Move up** or **Move down** in a thread's menu. Ordering is saved by the
 thread's environment and appears on your other connected devices. View selection
 and collapsed groups are local to the client.
 
+Open **Dashboard** from the web or desktop thread list, or **Settings → Machines**
+on mobile, to inspect connected environments, running threads, CPU and RAM, and
+reported token usage over a rolling hour. Token usage includes provider sessions
+outside T3. Missing provider data is shown as unavailable or partial, not zero.
+Disconnected environments do not show cached measurements as live activity.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.
