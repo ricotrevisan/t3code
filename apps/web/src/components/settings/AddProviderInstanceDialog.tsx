@@ -367,14 +367,14 @@ export function AddProviderInstanceDialog({
                   <RadioPrimitive.Root
                     key={value}
                     value={value}
-                    className="relative flex cursor-pointer items-center gap-3 rounded-lg bg-card px-3 py-3 text-left text-muted-foreground outline-none ring-1 ring-black/5 hover:bg-zinc-50 focus-visible:ring-2 focus-visible:ring-ring data-checked:bg-primary/8 data-checked:text-foreground data-checked:ring-2 data-checked:ring-primary data-checked:hover:bg-primary/8 dark:bg-white/3 dark:ring-white/5 dark:hover:bg-white/5 dark:data-checked:bg-primary/15 dark:data-checked:ring-primary dark:data-checked:hover:bg-primary/15"
+                    className="relative flex cursor-pointer items-center gap-3 rounded-lg bg-card px-3 py-3 text-left text-muted-foreground outline-none ring-1 ring-black/5 hover:bg-zinc-25 focus-visible:ring-2 focus-visible:ring-ring data-checked:bg-primary/8 data-checked:text-foreground data-checked:ring-2 data-checked:ring-primary data-checked:hover:bg-primary/8 dark:bg-white/3 dark:ring-white/5 dark:hover:bg-white/5 dark:data-checked:bg-primary/15 dark:data-checked:ring-primary dark:data-checked:hover:bg-primary/15"
                   >
                     <IconComponent className="size-4 shrink-0" aria-hidden />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-foreground">
                         {manifest.displayName}
                       </span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
+                      <span className="block truncate text-3xs text-muted-foreground">
                         {manifest.driver} · {manifest.id}@{manifest.version}
                       </span>
                     </span>
@@ -426,7 +426,6 @@ export function AddProviderInstanceDialog({
           <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
             <span className="text-xs font-medium text-foreground">Instance ID</span>
             <Input
-              className="bg-background"
               placeholder={`${driver ?? "adapter"}_work`}
               value={instanceId}
               onChange={(event) => {
