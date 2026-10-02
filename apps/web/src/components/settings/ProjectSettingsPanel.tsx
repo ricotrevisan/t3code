@@ -43,6 +43,7 @@ import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { projectGroupTitleNeedsUpdate } from "./ProjectSettingsPanel.logic";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
+import { UnavailableSettingsScope } from "./UnavailableSettingsScope";
 
 const ProjectIconPickerDialog = lazy(() =>
   import("./ProjectIconPickerDialog").then((module) => ({
@@ -129,18 +130,18 @@ export function ProjectSettingsPanel({
 
   if (!selected) {
     return (
-      <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-        {groups.length === 0
-          ? "Add a project from the sidebar to configure it here."
-          : "This project is no longer available."}
-      </div>
+      <UnavailableSettingsScope
+        message={
+          groups.length === 0
+            ? "Add a project from the sidebar to configure it here."
+            : "This project is no longer available."
+        }
+      />
     );
   }
   if (members.length === 0)
     return (
-      <p className="p-8 text-sm text-muted-foreground">
-        This checkout is no longer available in the selected project and environment.
-      </p>
+      <UnavailableSettingsScope message="This checkout is no longer available in the selected project and environment." />
     );
   const scopedGroup = {
     ...selected,
