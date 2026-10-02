@@ -1,3 +1,5 @@
+import { requestThreadCleanup } from "../components/ThreadCleanupDialog";
+import { readEnvironmentSupportsCleanupReview } from "../state/entities";
 import {
   parseScopedThreadKey,
   scopeProjectRef,
@@ -700,6 +702,7 @@ export function useThreadActions() {
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(target), wokeAt);
       }
+      if (readEnvironmentSupportsCleanupReview(target.environmentId)) requestThreadCleanup(target);
       showThreadUndoNotice({
         action: "Settled",
         claim: action,

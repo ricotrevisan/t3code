@@ -1,3 +1,4 @@
+import { ThreadCleanup } from "./threadCleanup.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -555,6 +556,7 @@ const makeWsRpcLayer = (
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+      const threadCleanup = yield* ThreadCleanup;
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
@@ -3394,6 +3396,8 @@ const makeWsRpcLayer = (
             gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
             { "rpc.aggregate": "vcs" },
           ),
+        [WS_METHODS.threadCleanupReview]: (input) => threadCleanup.review(input),
+        [WS_METHODS.threadCleanupRun]: (input) => threadCleanup.run(input),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsRemoveWorktree,
@@ -3830,6 +3834,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           ),
         ),
     });
+    const cleanup = yield* ThreadCleanup;
     const pullRequests = yield* PullRequestService.PullRequestService;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
@@ -3879,6 +3884,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               // One server-lifetime service means clients share the same PR caches, and a WS
               // mutation invalidates the HTTP diff cache that every client reads from.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
+              Layer.provide(Layer.succeed(ThreadCleanup, cleanup)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

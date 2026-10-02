@@ -150,3 +150,21 @@ Choose **Snooze → Custom…** from a thread's menu to pick a date and time in 
 local time zone, or a duration in minutes, hours, or days. Durations start when
 you confirm; one day means 24 hours. On web and desktop, you can also snooze
 several selected threads together. Choose **Wake thread** to bring a thread back early.
+
+## Clean up finished work
+
+Choose **Review cleanup…** from a settled thread's menu. Settling a thread manually
+also opens the review. Choose whether to archive its conversation, remove its
+worktree, or keep both. Automatic settlement leaves the review available without
+opening a dialog.
+
+Worktree removal requires a clean, unlocked checkout whose entire branch is
+integrated into the remote default branch. T3 keeps worktrees used by another
+thread, agent, terminal, or running process. Ignored files are backed up and
+verified before removal, except rebuildable `node_modules` directories. The result
+shows the backup location. Branches and conversation history are preserved; an
+archived thread can be reopened from the archive.
+
+Checks run again when you confirm. If the thread resumes or its files change,
+review it again after the work finishes. An environment unable to verify running
+processes keeps the worktree for manual cleanup.

@@ -262,3 +262,10 @@ export function readEnvironmentThreadRefs(
 export function readThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
 }
+
+export function readEnvironmentSupportsCleanupReview(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadCleanupReview === true
+  );
+}

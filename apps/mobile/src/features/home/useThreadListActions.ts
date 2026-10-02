@@ -1,3 +1,4 @@
+import { requestThreadCleanup } from "../threads/ThreadCleanupSheet";
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
@@ -185,6 +186,8 @@ function useThreadActionExecutor(
           refreshArchivedThreadsForEnvironment(thread.environmentId);
         }
         onCompleted?.(action, thread);
+        if (action === "settle")
+          requestThreadCleanup({ environmentId: thread.environmentId, threadId: thread.id });
         return true;
       } finally {
         inFlightThreadKeys.current.delete(key);

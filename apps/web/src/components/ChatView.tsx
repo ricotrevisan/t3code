@@ -1,3 +1,5 @@
+import { requestThreadCleanup } from "./ThreadCleanupDialog";
+import { readEnvironmentSupportsCleanupReview } from "../state/entities";
 import { isChatGptUsageLimitError } from "@t3tools/shared/usageLimits";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -6358,25 +6360,39 @@ export default function ChatView(props: ChatViewProps) {
       title: `This thread is ${isSnoozed ? "snoozed" : "settled"}`,
       description: `Send a message to ${isSnoozed ? "wake" : "unsettle"}`,
       actions: (
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={isSnoozed ? isUnsnoozing : isUnsettling}
-          onClick={() =>
-            void (isSnoozed ? handleUnsnoozeActiveThread() : handleUnsettleActiveThread())
-          }
-        >
-          {isSnoozed
-            ? isUnsnoozing
-              ? "Waking..."
-              : "Wake now"
-            : isUnsettling
-              ? "Un-settling..."
-              : "Un-settle"}
-        </Button>
+        <>
+          {!isSnoozed &&
+            activeThreadRef &&
+            readEnvironmentSupportsCleanupReview(activeThreadRef.environmentId) && (
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => requestThreadCleanup(activeThreadRef)}
+              >
+                Review cleanup
+              </Button>
+            )}
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={isSnoozed ? isUnsnoozing : isUnsettling}
+            onClick={() =>
+              void (isSnoozed ? handleUnsnoozeActiveThread() : handleUnsettleActiveThread())
+            }
+          >
+            {isSnoozed
+              ? isUnsnoozing
+                ? "Waking..."
+                : "Wake now"
+              : isUnsettling
+                ? "Un-settling..."
+                : "Un-settle"}
+          </Button>
+        </>
       ),
     };
   }, [
+    activeThreadRef,
     activeThread?.id,
     activeThreadSettled,
     activeThreadSnoozed,
