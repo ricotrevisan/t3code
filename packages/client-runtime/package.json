@@ -175,6 +175,10 @@
       "types": "./src/state/pullRequests.ts",
       "default": "./src/state/pullRequests.ts"
     },
+    "./state/machine-overview": {
+      "types": "./src/state/machineOverview.ts",
+      "default": "./src/state/machineOverview.ts"
+    },
     "./state/thread-navigation": {
       "types": "./src/state/threadNavigation.ts",
       "default": "./src/state/threadNavigation.ts"

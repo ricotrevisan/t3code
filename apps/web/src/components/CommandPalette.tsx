@@ -2028,6 +2028,16 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
+  actionItems.push({
+    kind: "action",
+    value: "action:machines",
+    searchTerms: ["open machines dashboard", "environments", "cpu", "ram", "running"],
+    title: "Open machines dashboard",
+    icon: <ChartNoAxesColumnIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/machines" });
+    },
+  });
   for (const view of ["priority", "project", "machine"] as const) {
     const title = `Thread view: ${view === "priority" ? "My priority" : view === "project" ? "By project" : "By machine"}`;
     actionItems.push({
