@@ -5,6 +5,7 @@ import {
   machineHourlyUsage,
 } from "@t3tools/client-runtime/state/machine-overview";
 import type { UsageSummaryInput } from "@t3tools/contracts";
+import { isThreadActivelyRunning } from "@t3tools/client-runtime/state/thread-navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -43,9 +44,7 @@ function MachineCard({
   const live = threads.filter(
     (thread) => thread.environmentId === environment.environmentId && thread.archivedAt === null,
   );
-  const running = live.filter(
-    (thread) => thread.session?.status === "running" || thread.session?.status === "starting",
-  );
+  const running = live.filter(isThreadActivelyRunning);
   const refreshResources = resources.refresh;
   useEffect(() => {
     if (!connected || !focused) return;

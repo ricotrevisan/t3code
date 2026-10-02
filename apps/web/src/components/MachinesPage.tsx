@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { type UsageSummaryInput } from "@t3tools/contracts";
+import { isThreadActivelyRunning } from "@t3tools/client-runtime/state/thread-navigation";
 import {
   rollingHourWindow,
   machineResourceValues,
@@ -40,9 +41,7 @@ function MachineCard({
   const liveThreads = threads.filter(
     (thread) => thread.environmentId === environment.environmentId && thread.archivedAt === null,
   );
-  const running = liveThreads.filter(
-    (thread) => thread.session?.status === "running" || thread.session?.status === "starting",
-  );
+  const running = liveThreads.filter(isThreadActivelyRunning);
   const refreshResources = resources.refresh;
   useEffect(() => {
     if (!connected) return;
