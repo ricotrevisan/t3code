@@ -7,6 +7,8 @@ import {
 import type { UsageSummaryInput } from "@t3tools/contracts";
 import { useCallback, useEffect, useState } from "react";
 import { Pressable, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { ScreenScrollView } from "../../components/ScreenScrollView";
 import { AppText as Text } from "../../components/AppText";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { useThreadShells } from "../../state/entities";
@@ -122,6 +124,7 @@ function MachineCard({
 }
 
 export function MachinesRouteScreen() {
+  const insets = useSafeAreaInsets();
   const { environments } = useEnvironments();
   const focused = useIsFocused();
   const [window, setWindow] = useState(() => rollingHourWindow(Date.now()));
@@ -134,22 +137,29 @@ export function MachinesRouteScreen() {
   );
   return (
     <SettingsScreen title="Machines">
-      <Text className="mb-4 text-sm text-muted-foreground">
-        Activity and host resources across your environments. Resources refresh every 15 seconds.
-      </Text>
-      {environments.map((environment) => (
-        <MachineCard
-          key={environment.environmentId}
-          environment={environment}
-          window={window}
-          focused={focused}
-        />
-      ))}
-      {environments.length === 0 ? (
-        <Text className="text-sm text-muted-foreground">
-          Connect an environment to see its activity.
+      <ScreenScrollView
+        className="flex-1"
+        contentInsetAdjustmentBehavior="automatic"
+        contentContainerClassName="px-5 pt-4"
+        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
+      >
+        <Text className="mb-4 text-sm text-muted-foreground">
+          Activity and host resources across your environments. Resources refresh every 15 seconds.
         </Text>
-      ) : null}
+        {environments.map((environment) => (
+          <MachineCard
+            key={environment.environmentId}
+            environment={environment}
+            window={window}
+            focused={focused}
+          />
+        ))}
+        {environments.length === 0 ? (
+          <Text className="text-sm text-muted-foreground">
+            Connect an environment to see its activity.
+          </Text>
+        ) : null}
+      </ScreenScrollView>
     </SettingsScreen>
   );
 }
