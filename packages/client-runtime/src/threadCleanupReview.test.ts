@@ -1,3 +1,4 @@
+import { AsyncResult } from "effect/unstable/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 import {
   EnvironmentId,
@@ -25,7 +26,7 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
-const success = <T>(value: T) => ({ _tag: "Success" as const, value });
+const success = <T>(value: T) => AsyncResult.success(value);
 describe("shared cleanup review", () => {
   it("executes only selected eligible actions and prevents a duplicate confirmation", async () => {
     const pending = deferred<ReturnType<typeof success<ThreadCleanupResult>>>();
