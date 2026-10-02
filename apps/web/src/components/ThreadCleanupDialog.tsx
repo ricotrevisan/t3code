@@ -35,11 +35,11 @@ function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
     () =>
       createThreadCleanupReview(
         { environmentId: target.environmentId, threadId: target.threadId },
-        { inspect, run },
+        { inspect, run, dismiss: () => useCleanupRequest.setState({ target: null }) },
       ),
     [inspect, run, target.environmentId, target.threadId],
   );
-  const { review, result, selected, busy, error } = useSyncExternalStore(
+  const { review, result, selected, busy, error, remainingSeconds } = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
   );
@@ -47,9 +47,7 @@ function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
     void controller.reviewAgain();
     return controller.dispose;
   }, [controller]);
-  const close = () => {
-    if (!busy) useCleanupRequest.setState({ target: null });
-  };
+  const close = controller.dismiss;
   return (
     <Dialog
       open
@@ -57,7 +55,11 @@ function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
         if (!open) close();
       }}
     >
-      <DialogPopup showCloseButton={!busy}>
+      <DialogPopup
+        showCloseButton={!busy}
+        onPointerDownCapture={controller.interact}
+        onKeyDownCapture={controller.interact}
+      >
         <DialogHeader>
           <DialogTitle>{result ? "Cleanup results" : "Finish tidying up?"}</DialogTitle>
           <DialogDescription>{review?.title ?? "Checking this thread…"}</DialogDescription>
@@ -122,7 +124,11 @@ function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
             </Button>
           )}
           <Button variant="outline" disabled={busy} onClick={close}>
-            {result ? "Done" : "Do nothing"}
+            {result
+              ? "Done"
+              : remainingSeconds !== null
+                ? `Do nothing (${remainingSeconds}s)`
+                : "Do nothing"}
           </Button>
           {!result && (
             <Button

@@ -28,12 +28,7 @@ import { TerminalManager } from "./terminal/Manager.ts";
 import { ProcessRunner } from "./processRunner.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import { cleanupReviewStillCurrent, threadCleanupBlockReason } from "./threadCleanupPolicy.ts";
-import {
-  backupCleanupFiles,
-  inspectCleanupFiles,
-  sameCleanupFiles,
-  type CleanupFile,
-} from "./threadCleanupFiles.ts";
+import { inspectCleanupFiles } from "./threadCleanupFiles.ts";
 
 export class ThreadCleanup extends Context.Service<
   ThreadCleanup,
@@ -78,7 +73,7 @@ export const makeWith = (dependencies: {
         review: ThreadCleanupReview;
         thread: OrchestrationThreadShell;
         head: string | null;
-        files: readonly CleanupFile[];
+        remoteBranch: { cwd: string; url: string; branch: string; head: string } | null;
         result?: ThreadCleanupResult;
       }
     >();
@@ -110,6 +105,96 @@ export const makeWith = (dependencies: {
         try: () => inspectCleanupFiles(cwd, result.stdout.split("\0").filter(Boolean)),
         catch: failure,
       });
+    });
+    const verifyIntegrated = Effect.fn("ThreadCleanup.verifyIntegrated")(function* (
+      cwd: string,
+      head: string,
+      base: string,
+    ) {
+      const ancestor = yield* git.execute({
+        operation: "ThreadCleanup.integrated",
+        cwd,
+        args: ["merge-base", "--is-ancestor", head, base],
+        allowNonZeroExit: true,
+      });
+      if (ancestor.exitCode !== 0) {
+        // A squash merge need not retain ancestry. Merging the branch into the current
+        // base must produce exactly the base tree, without conflicts or extra changes.
+        const merge = yield* git.execute({
+          operation: "ThreadCleanup.squashIntegrated",
+          cwd,
+          args: ["merge-tree", "--write-tree", base, head],
+          allowNonZeroExit: true,
+        });
+        const baseTree = yield* git.execute({
+          operation: "ThreadCleanup.baseTree",
+          cwd,
+          args: ["rev-parse", `${base}^{tree}`],
+        });
+        if (merge.exitCode !== 0 || merge.stdout.trim() !== baseTree.stdout.trim())
+          return yield* new ThreadCleanupError({
+            message:
+              "The entire branch is not integrated into the base branch, including commits added after a merge.",
+          });
+      }
+    });
+    const inspectRemoteBranch = Effect.fn("ThreadCleanup.inspectRemoteBranch")(function* (
+      thread: OrchestrationThreadShell,
+    ) {
+      const project = (yield* snapshots.getShellSnapshot()).projects.find(
+        (p) => p.id === thread.projectId,
+      );
+      if (!project || !thread.branch)
+        return yield* new ThreadCleanupError({ message: "The project or branch is unavailable." });
+      const cwd = project.workspaceRoot;
+      const branch = thread.branch;
+      const fetchUrl = yield* git.execute({
+        operation: "ThreadCleanup.remoteUrl",
+        cwd,
+        args: ["remote", "get-url", "--all", "origin"],
+      });
+      const pushUrl = yield* git.execute({
+        operation: "ThreadCleanup.pushUrl",
+        cwd,
+        args: ["remote", "get-url", "--push", "--all", "origin"],
+      });
+      const url = pushUrl.stdout.trim();
+      if (
+        !url ||
+        url.includes("\n") ||
+        url !== fetchUrl.stdout.trim() ||
+        /github\.com[:/]pingdotgg\/t3code(?:\.git)?\/?$/i.test(url)
+      )
+        return yield* new ThreadCleanupError({
+          message: "The origin push target needs manual review.",
+        });
+      const remoteHead = yield* git.execute({
+        operation: "ThreadCleanup.remoteHead",
+        cwd,
+        args: ["ls-remote", "--symref", "--", url, "HEAD", `refs/heads/${branch}`],
+      });
+      const refs = remoteHead.stdout.trim().split("\n");
+      const baseBranch = refs
+        .find((line) => line.startsWith("ref: refs/heads/") && line.endsWith("\tHEAD"))
+        ?.slice("ref: refs/heads/".length, -"\tHEAD".length);
+      if (!baseBranch || branch === baseBranch || branch === "main" || branch === "master")
+        return yield* new ThreadCleanupError({
+          message: "The default or primary branch cannot be deleted.",
+        });
+      const head = refs.find((line) => line.endsWith(`\trefs/heads/${branch}`))?.split("\t")[0];
+      if (!head)
+        return yield* new ThreadCleanupError({
+          message: "The remote branch has already been deleted or was never pushed.",
+        });
+      const local = yield* git.resolveCommit({ cwd, revision: `refs/heads/${branch}` });
+      if (head !== local.commitSha)
+        return yield* new ThreadCleanupError({
+          message: "The remote branch differs from the local branch. Keep it for review.",
+        });
+      yield* git.fetchRemoteTrackingBranch({ cwd, remoteName: "origin", remoteBranch: baseBranch });
+      const base = yield* git.resolveCommit({ cwd, revision: `refs/remotes/origin/${baseBranch}` });
+      yield* verifyIntegrated(cwd, head, base.commitSha);
+      return { cwd, url, branch, head };
     });
     const inspectWorktree = Effect.fn("ThreadCleanup.inspectWorktree")(function* (
       thread: OrchestrationThreadShell,
@@ -269,32 +354,7 @@ export const makeWith = (dependencies: {
       });
       const base = (yield* git.resolveCommit({ cwd, revision: `refs/remotes/${remote}/${branch}` }))
         .commitSha;
-      const ancestor = yield* git.execute({
-        operation: "ThreadCleanup.integrated",
-        cwd,
-        args: ["merge-base", "--is-ancestor", head, base],
-        allowNonZeroExit: true,
-      });
-      if (ancestor.exitCode !== 0) {
-        // A squash merge need not retain ancestry. Merging the branch into the current
-        // base must produce exactly the base tree, without conflicts or extra changes.
-        const merge = yield* git.execute({
-          operation: "ThreadCleanup.squashIntegrated",
-          cwd,
-          args: ["merge-tree", "--write-tree", base, head],
-          allowNonZeroExit: true,
-        });
-        const baseTree = yield* git.execute({
-          operation: "ThreadCleanup.baseTree",
-          cwd,
-          args: ["rev-parse", `${base}^{tree}`],
-        });
-        if (merge.exitCode !== 0 || merge.stdout.trim() !== baseTree.stdout.trim())
-          return yield* new ThreadCleanupError({
-            message:
-              "The entire branch is not integrated into the base branch, including commits added after a merge.",
-          });
-      }
+      yield* verifyIntegrated(cwd, head, base);
       const files = yield* ignoredFiles(cwd);
       return { cwd, projectRoot: project.workspaceRoot, head, files };
     });
@@ -310,6 +370,16 @@ export const makeWith = (dependencies: {
       const worktree = inspected?._tag === "Success" ? inspected.success : null;
       const worktreeBlocked =
         blocked ?? (inspected?._tag === "Failure" ? failure(inspected.failure).message : null);
+      const remoteInspection = blocked
+        ? null
+        : yield* inspectRemoteBranch(thread).pipe(Effect.result);
+      const remoteBranch = remoteInspection?._tag === "Success" ? remoteInspection.success : null;
+      const remoteBlocked =
+        blocked ??
+        (remoteInspection?._tag === "Failure" ? failure(remoteInspection.failure).message : null);
+      const unexpectedFiles = worktree?.files.length
+        ? `Preserve these local files before removal: ${worktree.files.slice(0, 5).join(", ")}${worktree.files.length > 5 ? ` (and ${worktree.files.length - 5} more)` : ""}.`
+        : null;
       const result: ThreadCleanupReview = {
         reviewId: NodeCrypto.randomUUID(),
         threadId,
@@ -318,11 +388,17 @@ export const makeWith = (dependencies: {
         actions: [
           {
             id: "worktree",
-            title: "Back up local files and remove the worktree",
+            title: "Remove worktree",
             detail: worktree
-              ? `${worktree.cwd}. ${worktree.files.length} ignored ${worktree.files.length === 1 ? "file" : "files"} will be backed up and verified. Branches and conversation are kept.`
+              ? `${worktree.cwd}. Generated files are discarded. The local branch and conversation are kept.`
               : (thread.worktreePath ?? "This thread uses the project's local checkout."),
-            blockedReason: worktreeBlocked,
+            blockedReason: worktreeBlocked ?? unexpectedFiles,
+          },
+          {
+            id: "remote-branch",
+            title: "Delete remote branch",
+            detail: `origin/${thread.branch ?? "unknown"}. Delete only if fully merged and unchanged. Keep the local branch.`,
+            blockedReason: remoteBlocked,
           },
           {
             id: "archive",
@@ -340,7 +416,7 @@ export const makeWith = (dependencies: {
         review: result,
         thread,
         head: worktree?.head ?? null,
-        files: worktree?.files ?? [],
+        remoteBranch,
       });
       return result;
     }, Effect.mapError(failure));
@@ -395,19 +471,52 @@ export const makeWith = (dependencies: {
                   : "The thread resumed before it could be archived.",
               };
             }
+            if (action.id === "remote-branch") {
+              const checked = yield* inspectRemoteBranch(current);
+              const expected = entry.remoteBranch;
+              if (
+                !expected ||
+                checked.cwd !== expected.cwd ||
+                checked.url !== expected.url ||
+                checked.branch !== expected.branch ||
+                checked.head !== expected.head ||
+                !cleanupReviewStillCurrent(
+                  entry.thread,
+                  yield* readThread(input.threadId),
+                  DateTime.formatIso(yield* DateTime.now),
+                )
+              )
+                return {
+                  id: action.id,
+                  status: "deferred" as const,
+                  detail: "The remote branch or push target changed. Review cleanup again.",
+                };
+              // The server enforces this comparison atomically, even if a push races our checks.
+              yield* git.execute({
+                operation: "ThreadCleanup.deleteRemoteBranch",
+                cwd: checked.cwd,
+                args: [
+                  "push",
+                  `--force-with-lease=refs/heads/${checked.branch}:${checked.head}`,
+                  "--",
+                  checked.url,
+                  `:refs/heads/${checked.branch}`,
+                ],
+              });
+              yield* gitManager.invalidateStatus(checked.cwd);
+              return {
+                id: action.id,
+                status: "completed" as const,
+                detail: `Deleted origin/${checked.branch}. Local branch kept.`,
+              };
+            }
             const checked = yield* inspectWorktree(current);
-            if (checked.head !== entry.head || !sameCleanupFiles(checked.files, entry.files))
+            if (checked.head !== entry.head || checked.files.length > 0)
               return {
                 id: action.id,
                 status: "deferred" as const,
                 detail: "The worktree or ignored files changed. Review cleanup again.",
               };
-            const backup = path.join(config.baseDir, "cleanup-backups", input.reviewId, "files");
-            if (checked.files.length)
-              yield* Effect.tryPromise({
-                try: () => backupCleanupFiles(checked.cwd, backup, checked.files),
-                catch: failure,
-              });
             const final = yield* inspectWorktree(yield* readThread(input.threadId));
             if (
               !cleanupReviewStillCurrent(
@@ -416,12 +525,12 @@ export const makeWith = (dependencies: {
                 DateTime.formatIso(yield* DateTime.now),
               ) ||
               final.head !== entry.head ||
-              !sameCleanupFiles(final.files, entry.files)
+              final.files.length > 0
             )
               return {
                 id: action.id,
                 status: "deferred" as const,
-                detail: `The checkout changed during backup. Worktree kept.${checked.files.length ? ` Backup: ${backup}` : ""}`,
+                detail: "The checkout changed during cleanup checks. Worktree kept.",
               };
             yield* git.removeWorktree({
               cwd: checked.projectRoot,
@@ -432,7 +541,7 @@ export const makeWith = (dependencies: {
             return {
               id: action.id,
               status: "completed" as const,
-              detail: `Worktree removed; branches kept.${checked.files.length ? ` Verified backup: ${backup}` : ""}`,
+              detail: "Worktree removed. Local branch and conversation kept.",
             };
           });
           const result = yield* (
