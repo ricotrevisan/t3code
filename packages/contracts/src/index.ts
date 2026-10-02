@@ -47,3 +47,5 @@ export * from "./rpc.ts";
 export * from "./worktreeSetup.ts";
 
 export * from "./runtimeModes.ts";
+
+export * from "./threadCleanup.ts";

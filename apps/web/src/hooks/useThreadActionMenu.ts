@@ -1,3 +1,5 @@
+import { requestThreadCleanup } from "../components/ThreadCleanupDialog";
+import { readEnvironmentSupportsCleanupReview } from "../state/entities";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import { scopeProjectRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -133,6 +135,7 @@ export function useThreadActionMenu(input: {
         if (!thread) return;
         const now = new Date();
         const supports = {
+          cleanupReview: readEnvironmentSupportsCleanupReview(threadRef.environmentId),
           settlement: readEnvironmentSupportsSettlement(threadRef.environmentId),
           autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
@@ -213,6 +216,9 @@ export function useThreadActionMenu(input: {
             }
             return;
           }
+          case "review-cleanup":
+            requestThreadCleanup(threadRef);
+            return;
           case "settle":
             await reportFailure("Failed to settle thread", () => settleThread(threadRef));
             return;

@@ -1,4 +1,11 @@
 import {
+  ThreadCleanupReviewInput,
+  ThreadCleanupReview,
+  ThreadCleanupRunInput,
+  ThreadCleanupResult,
+  ThreadCleanupError,
+} from "./threadCleanup.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -329,6 +336,8 @@ export const WS_METHODS = {
   vcsListRefs: "vcs.listRefs",
   vcsCreateWorktree: "vcs.createWorktree",
   vcsRemoveWorktree: "vcs.removeWorktree",
+  threadCleanupReview: "thread.cleanupReview",
+  threadCleanupRun: "thread.cleanupRun",
   vcsCreateRef: "vcs.createRef",
   vcsSwitchRef: "vcs.switchRef",
   vcsInit: "vcs.init",
@@ -1105,6 +1114,17 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 });
 
+const WsThreadCleanupReviewRpc = Rpc.make(WS_METHODS.threadCleanupReview, {
+  payload: ThreadCleanupReviewInput,
+  success: ThreadCleanupReview,
+  error: Schema.Union([ThreadCleanupError, EnvironmentAuthorizationError]),
+});
+const WsThreadCleanupRunRpc = Rpc.make(WS_METHODS.threadCleanupRun, {
+  payload: ThreadCleanupRunInput,
+  success: ThreadCleanupResult,
+  error: Schema.Union([ThreadCleanupError, EnvironmentAuthorizationError]),
+});
+
 const WsVcsRemoveWorktreeRpc = Rpc.make(WS_METHODS.vcsRemoveWorktree, {
   payload: VcsRemoveWorktreeInput,
   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
@@ -1528,6 +1548,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsListRefsRpc,
   WsVcsCreateWorktreeRpc,
   WsVcsRemoveWorktreeRpc,
+  WsThreadCleanupReviewRpc,
+  WsThreadCleanupRunRpc,
   WsVcsCreateRefRpc,
   WsVcsSwitchRefRpc,
   WsVcsInitRpc,

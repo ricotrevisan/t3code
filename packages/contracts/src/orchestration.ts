@@ -1139,6 +1139,7 @@ const ThreadArchiveCommand = Schema.Struct({
   type: Schema.Literal("thread.archive"),
   commandId: CommandId,
   threadId: ThreadId,
+  onlyIfSettledAt: Schema.optional(IsoDateTime),
 });
 
 const ThreadUnarchiveCommand = Schema.Struct({

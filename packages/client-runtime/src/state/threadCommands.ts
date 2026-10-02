@@ -107,6 +107,16 @@ export function createThreadEnvironmentAtoms<R, E>(
       JSON.stringify([environmentId, input.threadId]),
   };
   const commands = {
+    reviewCleanup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:review-cleanup",
+      tag: WS_METHODS.threadCleanupReview,
+    }),
+    runCleanup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:run-cleanup",
+      tag: WS_METHODS.threadCleanupRun,
+      scheduler,
+      concurrency,
+    }),
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:create",
       execute: (input: CreateThreadInput) => createThread(input),

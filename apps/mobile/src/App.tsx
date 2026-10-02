@@ -1,3 +1,4 @@
+import { ThreadCleanupHost } from "./features/threads/ThreadCleanupSheet";
 import * as Linking from "expo-linking";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
@@ -90,6 +91,7 @@ function AppContent() {
                 <Navigation linking={appLinking} theme={navigationTheme} />
               </IncomingShareProvider>
               <ConfirmDialogHost />
+              <ThreadCleanupHost />
               <ThreadArrangementHost />
             </View>
             {/* Anchored-menu overlays render here — in-window, so the

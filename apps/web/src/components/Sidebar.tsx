@@ -1,3 +1,5 @@
+import { requestThreadCleanup } from "./ThreadCleanupDialog";
+import { readEnvironmentSupportsCleanupReview } from "../state/entities";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
@@ -4100,6 +4102,7 @@ export default function Sidebar() {
               isRunning:
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
               supports: {
+                cleanupReview: readEnvironmentSupportsCleanupReview(threadRef.environmentId),
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,
                 snooze: supportsSnooze,
@@ -4158,6 +4161,9 @@ export default function Sidebar() {
             }
             return;
           }
+          case "review-cleanup":
+            requestThreadCleanup(threadRef);
+            return;
           case "settle":
             attemptSettle(threadRef);
             return;

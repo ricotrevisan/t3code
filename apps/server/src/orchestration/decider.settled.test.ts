@@ -851,3 +851,31 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
     }),
   );
 });
+
+it.layer(NodeServices.layer)("cleanup archive race", (it) => {
+  it.effect("archives only the settlement that the user reviewed", () =>
+    Effect.gen(function* () {
+      const command = {
+        type: "thread.archive" as const,
+        commandId: CommandId.make("cleanup-archive"),
+        threadId: ThreadId.make("thread-1"),
+        onlyIfSettledAt: SETTLED_AT,
+      };
+      const accepted = yield* decideOrchestrationCommand({
+        command,
+        readModel: makeReadModel("settled"),
+      });
+      expect(accepted).toMatchObject({ type: "thread.archived" });
+      const resumed = yield* decideOrchestrationCommand({
+        command,
+        readModel: makeReadModel("active"),
+      }).pipe(Effect.flip);
+      expect(resumed._tag).toBe("OrchestrationCommandInvariantError");
+      const stale = yield* decideOrchestrationCommand({
+        command: { ...command, onlyIfSettledAt: NOW },
+        readModel: makeReadModel("settled"),
+      }).pipe(Effect.flip);
+      expect(stale._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+});

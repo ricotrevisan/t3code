@@ -12,6 +12,7 @@ export type ThreadActionMenuId =
   | "project-settings"
   | "pin"
   | "unpin"
+  | "review-cleanup"
   | "settle"
   | "unsettle"
   | "auto-settle"
@@ -51,6 +52,7 @@ export interface ThreadActionMenuState {
   /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
   readonly supports: {
+    readonly cleanupReview?: boolean;
     readonly settlement: boolean;
     /** Server understands thread.auto-settle.set. */
     readonly autoSettleOptOut: boolean;
@@ -95,6 +97,9 @@ export function buildThreadActionMenuItems(
             ? { id: "unsettle" as const, label: "Un-settle thread", icon: "circle-check" }
             : { id: "settle" as const, label: "Settle thread", icon: "circle-check" },
         ]
+      : []),
+    ...(state.supports.cleanupReview && state.isSettled
+      ? [{ id: "review-cleanup" as const, label: "Review cleanup…", icon: "list-checks" }]
       : []),
     ...(state.supports.snooze
       ? [

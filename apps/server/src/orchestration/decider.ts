@@ -433,11 +433,24 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.archive": {
-      yield* requireThreadNotArchived({
+      const thread = yield* requireThreadNotArchived({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (
+        command.onlyIfSettledAt !== undefined &&
+        (thread.settledOverride !== "settled" ||
+          thread.settledAt !== command.onlyIfSettledAt ||
+          (thread.session !== null && thread.session.status !== "stopped") ||
+          thread.latestTurn?.state === "running" ||
+          openRequests(thread).size > 0 ||
+          hasQueuedTurnStartForThread(thread, yield* nowIso))
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The thread resumed after cleanup was reviewed; keeping it unarchived.",
+        });
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
