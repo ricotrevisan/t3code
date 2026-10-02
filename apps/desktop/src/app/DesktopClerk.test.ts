@@ -42,6 +42,7 @@ const makeDesktopClerkLayer = (
   shell: ElectronShell.ElectronShell["Service"] = {
     openExternal: () => Effect.succeed(true),
     openSystemSettings: () => Effect.succeed(false),
+    hasProtocolHandler: () => Effect.succeed(false),
     copyText: () => Effect.void,
   },
 ) => {
@@ -307,6 +308,7 @@ for (const entry of ["startup", "open-url"] as const) {
             return true;
           }),
         openSystemSettings: () => Effect.succeed(false),
+        hasProtocolHandler: () => Effect.succeed(false),
         copyText: () => Effect.void,
       });
       const listeners = new Map<string, (...args: unknown[]) => void>();

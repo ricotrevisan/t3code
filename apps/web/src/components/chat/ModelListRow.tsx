@@ -74,7 +74,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
                 )}
           </div>
           {props.disambiguator ? (
-            <span className="min-w-0 truncate text-[10px] font-normal leading-snug text-muted-foreground/70">
+            <span className="min-w-0 truncate text-3xs font-normal leading-snug text-muted-foreground/70">
               {props.disambiguator}
             </span>
           ) : null}
