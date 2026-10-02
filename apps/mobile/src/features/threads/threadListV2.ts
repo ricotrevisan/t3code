@@ -21,6 +21,7 @@ import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import type { ThreadMoveAvailability } from "./threadOrder";
 import {
   groupNavigationThreads,
+  isThreadActivelyRunning,
   type ThreadNavigationView,
 } from "@t3tools/client-runtime/state/thread-navigation";
 
@@ -525,7 +526,7 @@ export function buildThreadListV2ListItems(input: {
     for (const group of groupNavigationThreads(
       cards,
       (entry) => navigation.describe(entry.item.thread),
-      (entry) => resolveThreadListV2Status(entry.item.thread) === "working",
+      (entry) => isThreadActivelyRunning(entry.item.thread),
     )) {
       const expanded = !navigation.collapsedGroups.has(group.key);
       grouped.push({

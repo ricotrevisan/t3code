@@ -129,7 +129,10 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings, useUpdateClientSettings } from "../hooks/useSettings";
-import { groupNavigationThreads } from "@t3tools/client-runtime/state/thread-navigation";
+import {
+  groupNavigationThreads,
+  isThreadActivelyRunning,
+} from "@t3tools/client-runtime/state/thread-navigation";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
@@ -2863,8 +2866,7 @@ export default function Sidebar() {
                 }
               );
             },
-            (thread) =>
-              thread.session?.status === "running" || thread.session?.status === "starting",
+            isThreadActivelyRunning,
           ),
     [threadView, pinnedThreads, activeThreads, environmentLabelById, navigationProjectByKey],
   );
