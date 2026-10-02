@@ -65,6 +65,20 @@ export function buildHomeProjectScopes(input: {
   });
 }
 
+export function buildHomeProjectNavigationByProjectKey(scopes: ReadonlyArray<HomeProjectScope>) {
+  return new Map(
+    scopes.flatMap((scope) =>
+      scope.projectRefs.map(
+        (ref) =>
+          [
+            scopedProjectKey(ref.environmentId, ref.projectId),
+            { key: `project:${scope.key}`, label: scope.title },
+          ] as const,
+      ),
+    ),
+  );
+}
+
 export function sortHomeProjectScopes(input: {
   readonly scopes: ReadonlyArray<HomeProjectScope>;
   readonly threads: ReadonlyArray<EnvironmentThreadShell>;

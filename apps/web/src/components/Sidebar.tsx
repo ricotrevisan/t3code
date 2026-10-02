@@ -130,7 +130,6 @@ import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings, useUpdateClientSettings } from "../hooks/useSettings";
 import { groupNavigationThreads } from "@t3tools/client-runtime/state/thread-navigation";
-import { planPinnedMove } from "@t3tools/client-runtime/state/thread-sort";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
@@ -165,6 +164,8 @@ import {
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
   deleteSelectedThreadEntries,
+  getVisibleSelectedThreadKeys,
+  planSidebarPriorityMove,
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
@@ -2891,6 +2892,16 @@ export default function Sidebar() {
   // rendered at click time.
   const orderedThreadKeysRef = useRef(orderedThreadKeys);
   orderedThreadKeysRef.current = orderedThreadKeys;
+  useEffect(() => {
+    const selection = useThreadSelectionStore.getState();
+    if (!selection.hasSelection()) return;
+    const visible = new Set(
+      getVisibleSelectedThreadKeys(selection.selectedThreadKeys, orderedThreadKeys),
+    );
+    selection.removeFromSelection(
+      [...selection.selectedThreadKeys].filter((key) => !visible.has(key)),
+    );
+  }, [orderedThreadKeys]);
   const threadByKey = useMemo(
     () =>
       new Map(
@@ -3597,6 +3608,21 @@ export default function Sidebar() {
     }),
     [threads],
   );
+  const priorityOrdering = {
+    sectionByThreadKey,
+    pinned: {
+      orderedIds: pinnedKeys,
+      keysById: pinnedKeysById,
+      reorderableKeys: draggableThreadKeys,
+    },
+    active: {
+      orderedIds: activeKeys,
+      keysById: activeKeysById,
+      reorderableKeys: activeReorderableThreadKeys,
+    },
+  };
+  const priorityOrderingRef = useRef(priorityOrdering);
+  priorityOrderingRef.current = priorityOrdering;
   const draggedThreadKey = dragState?.activeKey;
   const draggedFromSection = dragState?.activeSection;
   const dragActivationY = dragState?.activationY;
@@ -3886,15 +3912,16 @@ export default function Sidebar() {
       // thread deletion elsewhere) and the menu labels must count only what
       // the actions will touch.
       const selectedThreadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
-      const threadKeys = selectedThreadKeys.filter((threadKey) =>
-        threadByKeyRef.current.has(threadKey),
+      let threadKeys = getVisibleSelectedThreadKeys(
+        selectedThreadKeys,
+        orderedThreadKeysRef.current,
       );
       if (threadKeys.length === 0) return;
       const count = threadKeys.length;
       // Snooze (N) is offered when every selected thread can actually take
       // it — a mixed selection with blocked-on-you work would half-apply.
       const selectionNow = new Date();
-      const selectedThreads = threadKeys.flatMap((threadKey) => {
+      let selectedThreads = threadKeys.flatMap((threadKey) => {
         const thread = threadByKeyRef.current.get(threadKey);
         return thread ? [thread] : [];
       });
@@ -3955,6 +3982,13 @@ export default function Sidebar() {
         ),
       );
       if (clicked._tag === "Failure") return;
+      threadKeys = getVisibleSelectedThreadKeys(threadKeys, orderedThreadKeysRef.current);
+      if (threadKeys.length === 0) return;
+      const actionableKeys = new Set(threadKeys);
+      selectedThreads = threadKeys.flatMap((key) => {
+        const thread = threadByKeyRef.current.get(key);
+        return thread ? [thread] : [];
+      });
       if (clicked.value?.startsWith("snooze:")) {
         const preset =
           clicked.value === "snooze:custom"
@@ -3998,14 +4032,18 @@ export default function Sidebar() {
       }
       if (clicked.value === "unpin") {
         // Each unpin reports its own failure, like the single-row action.
-        for (const thread of pinnedSelectedThreads) {
+        for (const thread of pinnedSelectedThreads.filter((thread) =>
+          actionableKeys.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+        )) {
           attemptUnpin(scopeThreadRef(thread.environmentId, thread.id));
         }
         clearSelection();
         return;
       }
       if (clicked.value === "regenerate-title") {
-        for (const thread of regeneratableTitleThreads) {
+        for (const thread of regeneratableTitleThreads.filter((thread) =>
+          actionableKeys.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+        )) {
           const result = await updateThreadMetadata({
             environmentId: thread.environmentId,
             input: { threadId: thread.id, regenerateTitle: true },
@@ -4062,11 +4100,12 @@ export default function Sidebar() {
         );
         if (confirmed._tag === "Failure" || !confirmed.value) return;
       }
+      threadKeys = getVisibleSelectedThreadKeys(threadKeys, orderedThreadKeysRef.current);
       const { deletedThreadKeys, firstFailure } = await deleteSelectedThreadEntries({
         entries: threadKeys.map((threadKey) => ({ threadKey })),
         delete: async ({ threadKey }, deletedThreadKeys) => {
           const thread = threadByKeyRef.current.get(threadKey);
-          if (!thread) return null;
+          if (!thread || !orderedThreadKeysRef.current.includes(threadKey)) return null;
           return deleteThread(scopeThreadRef(thread.environmentId, thread.id), {
             deletedThreadKeys,
           });
@@ -4156,7 +4195,9 @@ export default function Sidebar() {
             [
               ...(!isSettled &&
               !isSnoozed &&
-              (isPinned ? draggableThreadKeys : activeReorderableThreadKeys).has(threadKey)
+              priorityOrderingRef.current[isPinned ? "pinned" : "active"].reorderableKeys.has(
+                threadKey,
+              )
                 ? [
                     { id: "priority:up", label: "Move up" },
                     { id: "priority:down", label: "Move down" },
@@ -4204,21 +4245,18 @@ export default function Sidebar() {
         switch (clicked.value) {
           case "priority:up":
           case "priority:down": {
-            const assignments = planPinnedMove({
-              orderedIds: (isPinned ? pinnedKeys : activeKeys).filter((key) =>
-                (isPinned ? draggableThreadKeys : activeReorderableThreadKeys).has(key),
-              ),
-              keysById: isPinned ? pinnedKeysById : activeKeysById,
-              movedId: threadKey,
+            const plan = planSidebarPriorityMove({
+              ...priorityOrderingRef.current,
+              threadKey,
               direction: clicked.value === "priority:up" ? "up" : "down",
             });
-            for (const assignment of assignments ?? []) {
+            if (plan === null) return;
+            for (const assignment of plan.assignments) {
               const ref = parseScopedThreadKey(assignment.id);
               if (!ref) continue;
-              const result = await (isPinned ? reorderPinnedThread : reorderActiveThread)(
-                ref,
-                assignment.orderKey,
-              );
+              const result = await (
+                plan.section === "pinned" ? reorderPinnedThread : reorderActiveThread
+              )(ref, assignment.orderKey);
               if (result._tag === "Failure") {
                 toastManager.add({ type: "error", title: "Failed to reorder thread" });
                 break;
@@ -4419,12 +4457,6 @@ export default function Sidebar() {
       copyThreadIdToClipboard,
       deleteThread,
       handleMultiSelectContextMenu,
-      activeKeys,
-      activeKeysById,
-      activeReorderableThreadKeys,
-      draggableThreadKeys,
-      pinnedKeys,
-      pinnedKeysById,
       reorderActiveThread,
       reorderPinnedThread,
       markThreadUnread,

@@ -42,7 +42,10 @@ import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
 import { useHomeListOptions, useThreadNavigationOptions } from "../home/home-list-options";
 import { ThreadNavigationControls, ThreadNavigationGroupHeader } from "./ThreadNavigationControls";
 import { buildHomeListFilterMenu } from "../home/home-list-filter-menu";
-import { buildHomeProjectScopes } from "../home/homeThreadList";
+import {
+  buildHomeProjectScopes,
+  buildHomeProjectNavigationByProjectKey,
+} from "../home/homeThreadList";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "../home/thread-swipe-actions";
 import { usePendingTaskListActions } from "../home/usePendingTaskListActions";
 import { useThreadListActions } from "../home/useThreadListActions";
@@ -222,6 +225,10 @@ function ThreadNavigationSidebarPane(
         key: scope.key,
         label: scope.title,
       })),
+    [projectScopes],
+  );
+  const projectNavigationByProjectKey = useMemo(
+    () => buildHomeProjectNavigationByProjectKey(projectScopes),
     [projectScopes],
   );
   const projectTitleByProjectKey = useMemo(
@@ -519,13 +526,12 @@ function ThreadNavigationSidebarPane(
                   savedConnectionsById[thread.environmentId]?.environmentLabel ??
                   thread.environmentId,
               }
-            : {
+            : (projectNavigationByProjectKey.get(
+                scopedProjectKey(thread.environmentId, thread.projectId),
+              ) ?? {
                 key: `project:${thread.environmentId}:${thread.projectId}`,
-                label:
-                  projectTitleByProjectKey.get(
-                    scopedProjectKey(thread.environmentId, thread.projectId),
-                  ) ?? "Unknown project",
-              },
+                label: "Unknown project",
+              }),
       },
     });
     if (settledShelfExpanded && threadListV2Layout.hiddenSettledCount > 0) {
@@ -540,7 +546,7 @@ function ThreadNavigationSidebarPane(
     nowMinute,
     navigation,
     props.selectedThreadKey,
-    projectTitleByProjectKey,
+    projectNavigationByProjectKey,
     savedConnectionsById,
     options.selectedEnvironmentId,
     pendingTasks,

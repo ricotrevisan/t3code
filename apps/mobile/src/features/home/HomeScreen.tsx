@@ -68,6 +68,7 @@ import { useThreadListV2ShelfPreferences } from "../threads/use-thread-list-v2-s
 import type { HomeListFilterMenuEnvironment } from "./home-list-filter-menu";
 import {
   buildHomeProjectScopes,
+  buildHomeProjectNavigationByProjectKey,
   sortHomeProjectScopes,
   type HomeProjectSortOrder,
 } from "./homeThreadList";
@@ -376,6 +377,10 @@ export function HomeScreen(props: HomeScreenProps) {
               ),
           ) ?? null),
     [v2ProjectScopeKey, v2ScopeProjects],
+  );
+  const v2ProjectNavigationByProjectKey = useMemo(
+    () => buildHomeProjectNavigationByProjectKey(v2ScopeProjects),
+    [v2ScopeProjects],
   );
   const v2ProjectTitleByProjectKey = useMemo(
     () =>
@@ -707,20 +712,19 @@ export function HomeScreen(props: HomeScreenProps) {
                     props.savedConnectionsById[thread.environmentId]?.environmentLabel ??
                     thread.environmentId,
                 }
-              : {
+              : (v2ProjectNavigationByProjectKey.get(
+                  scopedProjectKey(thread.environmentId, thread.projectId),
+                ) ?? {
                   key: `project:${thread.environmentId}:${thread.projectId}`,
-                  label:
-                    v2ProjectTitleByProjectKey.get(
-                      scopedProjectKey(thread.environmentId, thread.projectId),
-                    ) ?? "Unknown project",
-                },
+                  label: "Unknown project",
+                }),
         },
       }),
     [
       nowMinute,
       navigation,
       props.savedConnectionsById,
-      v2ProjectTitleByProjectKey,
+      v2ProjectNavigationByProjectKey,
       queuedThreadKeys,
       threadMoveAvailability,
       settledShelfExpanded,
