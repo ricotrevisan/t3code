@@ -1,6 +1,19 @@
-import type { SidebarThreadView } from "@t3tools/contracts";
+import type { OrchestrationThreadShell, SidebarThreadView } from "@t3tools/contracts";
 
 export type ThreadNavigationView = SidebarThreadView;
+
+/** Shared running-count semantics for grouped lists and machine overviews. */
+export function isThreadActivelyRunning(
+  thread: Pick<OrchestrationThreadShell, "hasPendingApprovals" | "hasPendingUserInput"> & {
+    readonly session: Pick<NonNullable<OrchestrationThreadShell["session"]>, "status"> | null;
+  },
+) {
+  return (
+    !thread.hasPendingApprovals &&
+    !thread.hasPendingUserInput &&
+    (thread.session?.status === "running" || thread.session?.status === "starting")
+  );
+}
 
 /** Group an already ordered list without disturbing its saved priority. */
 export function groupNavigationThreads<T>(
