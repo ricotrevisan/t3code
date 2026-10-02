@@ -9,7 +9,7 @@ import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-searc
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { planPinnedMove, planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -410,6 +410,39 @@ type LogicalSidebarProject = SidebarProject & {
 };
 
 export type ThreadTraversalDirection = "previous" | "next";
+
+/** Bulk actions and retained selection must only include rendered rows. */
+export function getVisibleSelectedThreadKeys(
+  selectedThreadKeys: Iterable<string>,
+  renderedThreadKeys: Iterable<string>,
+) {
+  const rendered = new Set(renderedThreadKeys);
+  return [...selectedThreadKeys].filter((key) => rendered.has(key));
+}
+
+type PriorityMoveSection = Pick<Parameters<typeof planPinnedMove>[0], "orderedIds" | "keysById"> & {
+  readonly reorderableKeys: ReadonlySet<string>;
+};
+
+/** Resolve the current section and order when a delayed menu action executes. */
+export function planSidebarPriorityMove(input: {
+  readonly threadKey: string;
+  readonly direction: "up" | "down";
+  readonly sectionByThreadKey: ReadonlyMap<string, SidebarSection>;
+  readonly pinned: PriorityMoveSection;
+  readonly active: PriorityMoveSection;
+}) {
+  const section = input.sectionByThreadKey.get(input.threadKey);
+  if (section !== "pinned" && section !== "active") return null;
+  const state = input[section];
+  const assignments = planPinnedMove({
+    orderedIds: state.orderedIds.filter((key) => state.reorderableKeys.has(key)),
+    keysById: state.keysById,
+    movedId: input.threadKey,
+    direction: input.direction,
+  });
+  return assignments === null ? null : { section, assignments };
+}
 
 /**
  * Shared-worktree checks must exclude only successful deletions, never the

@@ -11,6 +11,8 @@ import {
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   deleteSelectedThreadEntries,
+  getVisibleSelectedThreadKeys,
+  planSidebarPriorityMove,
   filterSidebarProjectScopeItems,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
@@ -122,6 +124,98 @@ describe("animateSidebarLayoutChanges", () => {
 
   it("keeps layout movement while the user is sorting", () => {
     expect(animateSidebarLayoutChanges({ ...baseArgs, isSorting: true })).toBe(true);
+  });
+});
+
+describe("visible bulk selection", () => {
+  it("never deletes a selected thread hidden by a collapsed group", async () => {
+    const selected = new Set(["visible", "collapsed", "current-in-collapsed-group"]);
+    const rendered = ["visible", "current-in-collapsed-group"];
+    const deleted: string[] = [];
+    const outcome = await deleteSelectedThreadEntries({
+      entries: getVisibleSelectedThreadKeys(selected, rendered).map((threadKey) => ({ threadKey })),
+      delete: async ({ threadKey }) => {
+        deleted.push(threadKey);
+        return AsyncResult.success(undefined);
+      },
+    });
+    expect(deleted).toEqual(["visible", "current-in-collapsed-group"]);
+    expect(outcome.deletedThreadKeys.has("collapsed")).toBe(false);
+  });
+
+  it("drops rows that became hidden while a bulk menu was open", () => {
+    const atMenuOpen = getVisibleSelectedThreadKeys(["one", "two"], ["one", "two"]);
+    expect(getVisibleSelectedThreadKeys(atMenuOpen, ["one"])).toEqual(["one"]);
+    expect(getVisibleSelectedThreadKeys(atMenuOpen, [])).toEqual([]);
+  });
+});
+
+describe("current priority move planning", () => {
+  function currentOrder() {
+    return {
+      sectionByThreadKey: new Map<string, SidebarSection>([
+        ["a", "active"],
+        ["b", "active"],
+        ["c", "active"],
+      ]),
+      pinned: {
+        orderedIds: ["p"],
+        keysById: new Map([["p", "a0"]]),
+        reorderableKeys: new Set(["p"]),
+      },
+      active: {
+        orderedIds: ["a", "c", "b"],
+        keysById: new Map([
+          ["a", "a0"],
+          ["b", "a2"],
+          ["c", "a1"],
+        ]),
+        reorderableKeys: new Set(["a", "b", "c"]),
+      },
+    };
+  }
+
+  it("moves one position in the order received from another device", () => {
+    const state = currentOrder();
+    const plan = planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" });
+    expect(plan?.section).toBe("active");
+    const keys = new Map(state.active.keysById);
+    for (const assignment of plan?.assignments ?? []) keys.set(assignment.id, assignment.orderKey);
+    expect(
+      [...keys].sort(([, left], [, right]) => left.localeCompare(right)).map(([id]) => id),
+    ).toEqual(["a", "b", "c"]);
+    expect(state.pinned.keysById).toEqual(new Map([["p", "a0"]]));
+  });
+
+  it("uses pin ordering if the thread was pinned while its menu was open", () => {
+    const state = currentOrder();
+    state.sectionByThreadKey.set("b", "pinned");
+    state.pinned.orderedIds.push("b");
+    state.pinned.keysById.set("b", "a1");
+    state.pinned.reorderableKeys.add("b");
+    const plan = planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" });
+    expect(plan?.section).toBe("pinned");
+    const keys = new Map(state.pinned.keysById);
+    for (const assignment of plan?.assignments ?? []) keys.set(assignment.id, assignment.orderKey);
+    expect(
+      [...keys].sort(([, left], [, right]) => left.localeCompare(right)).map(([id]) => id),
+    ).toEqual(["b", "p"]);
+    expect(state.active.keysById.get("b")).toBe("a2");
+  });
+
+  it.each(["snoozed", "settled"] as const)(
+    "does not reorder a thread that became %s",
+    (section) => {
+      const state = currentOrder();
+      state.sectionByThreadKey.set("b", section);
+      expect(planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" })).toBeNull();
+    },
+  );
+
+  it("does not write a thread whose environment stopped supporting reorder", () => {
+    const state = currentOrder();
+    state.active.reorderableKeys.delete("b");
+    expect(planSidebarPriorityMove({ ...state, threadKey: "b", direction: "up" })).toBeNull();
   });
 });
 

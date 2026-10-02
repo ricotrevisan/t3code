@@ -5,7 +5,7 @@ import { useThreadNavigationOptions } from "../home/home-list-options";
 export function ThreadNavigationControls() {
   const { view, setView } = useThreadNavigationOptions();
   return (
-    <View className="flex-row gap-2 px-3 py-2">
+    <View className="flex-row flex-wrap gap-2 px-3 py-2">
       {(
         [
           { value: "priority", label: "My priority" },
@@ -18,7 +18,11 @@ export function ThreadNavigationControls() {
           accessibilityRole="button"
           accessibilityState={{ selected: view === value }}
           onPress={() => setView(value)}
-          className={view === value ? "rounded-lg bg-muted px-3 py-2" : "rounded-lg px-3 py-2"}
+          className={
+            view === value
+              ? "max-w-full rounded-lg bg-muted px-3 py-2"
+              : "max-w-full rounded-lg px-3 py-2"
+          }
         >
           <Text className="text-xs text-foreground">{label}</Text>
         </Pressable>
