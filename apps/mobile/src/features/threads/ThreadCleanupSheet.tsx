@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Modal, Pressable, ScrollView, View } from "react-native";
-import type { ScopedThreadRef, ThreadCleanupReview, ThreadCleanupResult } from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import { createThreadCleanupReview } from "@t3tools/client-runtime/thread-cleanup-review";
 import { AppText } from "../../components/AppText";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -37,46 +37,22 @@ export function ThreadCleanupHost() {
 function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onClose: () => void }) {
   const inspect = useAtomCommand(threadEnvironment.reviewCleanup, { reportFailure: false });
   const run = useAtomCommand(threadEnvironment.runCleanup, { reportFailure: false });
-  const [review, setReview] = useState<ThreadCleanupReview | null>(null);
-  const [result, setResult] = useState<ThreadCleanupResult | null>(null);
-  const [selected, setSelected] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [revision, setRevision] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const controller = useMemo(
+    () =>
+      createThreadCleanupReview(
+        { environmentId: target.environmentId, threadId: target.threadId },
+        { inspect, run },
+      ),
+    [inspect, run, target.environmentId, target.threadId],
+  );
+  const { review, result, selected, busy, error } = useSyncExternalStore(
+    controller.subscribe,
+    controller.getSnapshot,
+  );
   useEffect(() => {
-    let cancelled = false;
-    void inspect({
-      environmentId: target.environmentId,
-      input: { threadId: target.threadId },
-    }).then((response) => {
-      if (cancelled) return;
-      if (response._tag === "Success") {
-        setReview(response.value);
-        setSelected(response.value.actions.filter((a) => !a.blockedReason).map((a) => a.id));
-      } else setError(String(squashAtomCommandFailure(response)));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [inspect, target.environmentId, target.threadId, revision]);
-  async function execute() {
-    if (!review || busy) return;
-    setBusy(true);
-    setError(null);
-    const response = await run({
-      environmentId: target.environmentId,
-      input: {
-        threadId: target.threadId,
-        reviewId: review.reviewId,
-        selected: review.actions
-          .filter((a) => selected.includes(a.id) && !a.blockedReason)
-          .map((a) => a.id),
-      },
-    });
-    if (response._tag === "Success") setResult(response.value);
-    else setError(String(squashAtomCommandFailure(response)));
-    setBusy(false);
-  }
+    void controller.reviewAgain();
+    return controller.dispose;
+  }, [controller]);
   return (
     <Modal
       visible
@@ -108,13 +84,7 @@ function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onCl
                 }}
                 disabled={busy || !!result || !!action.blockedReason}
                 className="gap-2 rounded-xl bg-subtle p-4"
-                onPress={() =>
-                  setSelected((current) =>
-                    current.includes(action.id)
-                      ? current.filter((id) => id !== action.id)
-                      : [...current, action.id],
-                  )
-                }
+                onPress={() => controller.toggle(action.id, !selected.includes(action.id))}
               >
                 <AppText className="font-t3-semibold">
                   {!result && (selected.includes(action.id) ? "☑ " : "☐ ")}
@@ -142,12 +112,7 @@ function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onCl
             <Pressable
               accessibilityRole="button"
               className="min-h-12 justify-center"
-              onPress={() => {
-                setReview(null);
-                setResult(null);
-                setError(null);
-                setRevision((n) => n + 1);
-              }}
+              onPress={() => void controller.reviewAgain()}
             >
               <AppText>Review again</AppText>
             </Pressable>
@@ -165,7 +130,7 @@ function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onCl
               accessibilityRole="button"
               disabled={busy || !review || !selected.length}
               className="min-h-12 justify-center rounded-xl bg-subtle px-4"
-              onPress={() => void execute()}
+              onPress={() => void controller.execute()}
             >
               <AppText>{busy ? "Cleaning up…" : `Run ${selected.length} selected`}</AppText>
             </Pressable>

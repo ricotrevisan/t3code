@@ -302,6 +302,10 @@
     "./device/duo-control": {
       "types": "./src/device/duoControl.ts",
       "default": "./src/device/duoControl.ts"
+    },
+    "./thread-cleanup-review": {
+      "types": "./src/threadCleanupReview.ts",
+      "default": "./src/threadCleanupReview.ts"
     }
   },
   "scripts": {

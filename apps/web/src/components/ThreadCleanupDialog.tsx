@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { create } from "zustand";
-import type { ScopedThreadRef, ThreadCleanupReview, ThreadCleanupResult } from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import { createThreadCleanupReview } from "@t3tools/client-runtime/thread-cleanup-review";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";
@@ -31,49 +31,25 @@ export function ThreadCleanupDialogHost() {
 function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
   const inspect = useAtomCommand(threadEnvironment.reviewCleanup, { reportFailure: false });
   const run = useAtomCommand(threadEnvironment.runCleanup, { reportFailure: false });
-  const [review, setReview] = useState<ThreadCleanupReview | null>(null);
-  const [result, setResult] = useState<ThreadCleanupResult | null>(null);
-  const [selected, setSelected] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [revision, setRevision] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const controller = useMemo(
+    () =>
+      createThreadCleanupReview(
+        { environmentId: target.environmentId, threadId: target.threadId },
+        { inspect, run },
+      ),
+    [inspect, run, target.environmentId, target.threadId],
+  );
+  const { review, result, selected, busy, error } = useSyncExternalStore(
+    controller.subscribe,
+    controller.getSnapshot,
+  );
   useEffect(() => {
-    let cancelled = false;
-    void inspect({
-      environmentId: target.environmentId,
-      input: { threadId: target.threadId },
-    }).then((response) => {
-      if (cancelled) return;
-      if (response._tag === "Success") {
-        setReview(response.value);
-        setSelected(response.value.actions.filter((a) => !a.blockedReason).map((a) => a.id));
-      } else setError(String(squashAtomCommandFailure(response)));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [inspect, target.environmentId, target.threadId, revision]);
+    void controller.reviewAgain();
+    return controller.dispose;
+  }, [controller]);
   const close = () => {
     if (!busy) useCleanupRequest.setState({ target: null });
   };
-  async function execute() {
-    if (!review || busy) return;
-    setBusy(true);
-    setError(null);
-    const response = await run({
-      environmentId: target.environmentId,
-      input: {
-        threadId: target.threadId,
-        reviewId: review.reviewId,
-        selected: review.actions
-          .filter((a) => selected.includes(a.id) && !a.blockedReason)
-          .map((a) => a.id),
-      },
-    });
-    if (response._tag === "Success") setResult(response.value);
-    else setError(String(squashAtomCommandFailure(response)));
-    setBusy(false);
-  }
   return (
     <Dialog
       open
@@ -105,11 +81,7 @@ function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
                         disabled={busy || !!action.blockedReason}
                         checked={selected.includes(action.id)}
                         onCheckedChange={(checked) =>
-                          setSelected((current) =>
-                            checked
-                              ? [...current, action.id]
-                              : current.filter((id) => id !== action.id),
-                          )
+                          controller.toggle(action.id, checked === true)
                         }
                       />
                     )}
@@ -145,15 +117,7 @@ function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
         </DialogPanel>
         <DialogFooter>
           {!busy && (
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setError(null);
-                setReview(null);
-                setResult(null);
-                setRevision((n) => n + 1);
-              }}
-            >
+            <Button variant="ghost" onClick={() => void controller.reviewAgain()}>
               Review again
             </Button>
           )}
@@ -163,7 +127,7 @@ function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
           {!result && (
             <Button
               disabled={busy || !review || selected.length === 0}
-              onClick={() => void execute()}
+              onClick={() => void controller.execute()}
             >
               {busy ? "Cleaning up…" : `Run ${selected.length} selected`}
             </Button>

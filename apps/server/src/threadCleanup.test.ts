@@ -210,6 +210,27 @@ it.layer(live)("reviewed thread cleanup", (it) => {
       expect((yield* busy.review()).actions[0]?.blockedReason).toContain("running process");
     }),
   );
+  it.effect("preserves clean worktrees with per-worktree or shared Git operation locks", () =>
+    Effect.gen(function* () {
+      for (const lock of ["index.lock", "HEAD.lock", "refs/heads/task.lock"]) {
+        const f = yield* fixture;
+        const review = yield* f.review();
+        const location = yield* f.run(f.worktree, ["rev-parse", "--git-path", lock]);
+        const absolute = f.path.resolve(f.worktree, location.stdout.trim());
+        yield* f.fs.makeDirectory(f.path.dirname(absolute), { recursive: true });
+        yield* f.fs.writeFileString(absolute, "held by another Git operation");
+        expect((yield* f.review()).actions[0]?.blockedReason).toContain("Git operation lock");
+        const result = yield* f.service.run({
+          threadId: f.thread().id,
+          reviewId: review.reviewId,
+          selected: ["worktree"],
+        });
+        expect(result.actions[0]?.status).toBe("failed");
+        expect(yield* f.fs.exists(f.worktree)).toBe(true);
+        expect(yield* f.fs.exists(absolute)).toBe(true);
+      }
+    }),
+  );
   it.effect("accepts squash integration but protects commits added after that merge", () =>
     Effect.gen(function* () {
       const f = yield* fixture;

@@ -211,6 +211,32 @@ export const makeWith = (dependencies: {
         return yield* new ThreadCleanupError({
           message: "A running process still uses this worktree. Stop it and review again.",
         });
+      // A process started with git -C can use this checkout while its cwd is elsewhere.
+      // Git resolves per-worktree and shared administration paths for us.
+      const lockPaths = yield* git.execute({
+        operation: "ThreadCleanup.operationLocks",
+        cwd,
+        args: [
+          "rev-parse",
+          ...[
+            "index.lock",
+            "HEAD.lock",
+            "ORIG_HEAD.lock",
+            "config.lock",
+            "packed-refs.lock",
+            "shallow.lock",
+            `refs/heads/${thread.branch}.lock`,
+          ].flatMap((lock) => ["--git-path", lock]),
+        ],
+      });
+      if (lockPaths.stdoutTruncated)
+        return yield* new ThreadCleanupError({ message: "Could not verify Git operation locks." });
+      for (const lock of lockPaths.stdout.trim().split("\n")) {
+        if (yield* fs.exists(path.resolve(cwd, lock)))
+          return yield* new ThreadCleanupError({
+            message: "A Git operation lock is present. Finish that operation and review again.",
+          });
+      }
       const status = yield* git.statusDetailsLocal(cwd);
       if (!status.isRepo || status.branch !== thread.branch || status.hasWorkingTreeChanges)
         return yield* new ThreadCleanupError({
