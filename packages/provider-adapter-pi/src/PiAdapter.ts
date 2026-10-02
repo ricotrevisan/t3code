@@ -45,6 +45,7 @@ import { makePiSubagents } from "./PiSubagents.ts";
 import type { PiProviderAdapterConfig } from "./index.ts";
 
 const PROVIDER = ProviderDriverKind.make("piRpc");
+const MAX_STDERR_TAIL_CHARS = 4_096;
 const PROBE_THREAD_ID = ThreadId.make("pi-provider-probe");
 // Pi echoes base64 images in user-message events, not just in command responses.
 const MAX_RPC_LINE_CHARS =
@@ -89,7 +90,6 @@ const PiModels = Schema.Struct({
   ),
 });
 const PiThinkingLevels = Schema.Struct({ levels: Schema.Array(Schema.String) });
-const PiSwitchSessionResult = Schema.Struct({ cancelled: Schema.optional(Schema.Boolean) });
 const PiEntries = Schema.Struct({
   entries: Schema.Array(
     Schema.Struct({
@@ -105,7 +105,6 @@ const PiEntries = Schema.Struct({
 const decodeState = Schema.decodeUnknownEffect(PiState);
 const decodeModels = Schema.decodeUnknownEffect(PiModels);
 const decodeThinkingLevels = Schema.decodeUnknownEffect(PiThinkingLevels);
-const decodeSwitchSession = Schema.decodeUnknownEffect(PiSwitchSessionResult);
 const decodeEntries = Schema.decodeUnknownEffect(PiEntries);
 const decodeJsonExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
@@ -261,7 +260,16 @@ export const piLaunchArgs = (
   args: ReadonlyArray<string>,
   sessionDirectory: string,
   trustedExtensionArgs: ReadonlyArray<string> = [],
-) => [...trustedExtensionArgs, ...args, "--mode", "rpc", "--session-dir", sessionDirectory];
+  sessionFile?: string,
+) => [
+  ...trustedExtensionArgs,
+  ...args,
+  "--mode",
+  "rpc",
+  "--session-dir",
+  sessionDirectory,
+  ...(sessionFile === undefined ? [] : ["--session", sessionFile]),
+];
 
 function commandAppearsMissing(cause: unknown, seen = new Set<unknown>()): boolean {
   if (seen.has(cause)) return false;
@@ -293,6 +301,14 @@ function makeConnection(input: {
   const pending = new Map<string, Deferred.Deferred<unknown, ProviderAdapterV1Error>>();
   const uiRequests = new Map<string, "select" | "confirm" | "input" | "editor">();
   let buffer = "";
+  let stderrTail = "";
+  let expectedExit = false;
+  const outputDrained = Deferred.makeUnsafe<void>();
+  const withStderr = (detail: string) =>
+    stderrTail.trim() ? `${detail}\nPi stderr (tail):\n${stderrTail.trim()}` : detail;
+  const expectExit = Effect.sync(() => {
+    expectedExit = true;
+  }).pipe(Effect.andThen(child.expectExit));
   let requestSequence = 0;
   let activeTurnId: TurnId | undefined;
   let abortRequested = false;
@@ -583,7 +599,7 @@ function makeConnection(input: {
     for (const reply of pending.values()) {
       yield* Deferred.fail(
         reply,
-        adapterError("pi-rpc", "Pi RPC output closed before the command completed."),
+        adapterError("pi-rpc", withStderr("Pi RPC output closed before the command completed.")),
       );
     }
     pending.clear();
@@ -640,13 +656,12 @@ function makeConnection(input: {
       }),
     ),
     Stream.runDrain,
-    Effect.ensuring(failPending),
   );
 
   const request = (command: Readonly<Record<string, unknown>>) =>
     Effect.gen(function* () {
       if (transportClosed) {
-        return yield* adapterError(String(command.type), "Pi RPC output is closed.");
+        return yield* adapterError(String(command.type), withStderr("Pi RPC output is closed."));
       }
       requestSequence += 1;
       const id = `t3-${requestSequence}`;
@@ -664,7 +679,7 @@ function makeConnection(input: {
         pending.delete(id);
         return yield* adapterError(
           String(command.type),
-          `Could not write to Pi process: ${result.failure.detail}`,
+          withStderr(`Could not write to Pi process: ${result.failure.detail}`),
           result.failure,
         );
       }
@@ -715,21 +730,52 @@ function makeConnection(input: {
               ? Effect.void
               : Effect.fail(adapterError("preview", "Missing bridge acknowledgement.")),
           ),
-          Effect.mapError(() =>
+          Effect.mapError((cause) =>
             adapterError(
               "startSession",
-              "T3 preview bridge did not initialize. Restart the Pi session to retry.",
+              withStderr("T3 preview bridge did not initialize. Restart the Pi session to retry."),
+              cause,
             ),
           ),
         )
       : Effect.void,
-    startPump: Effect.all([pump, child.stderr.pipe(Stream.runDrain)], {
-      concurrency: "unbounded",
-      discard: true,
-    }).pipe(Effect.forkIn(input.scope), Effect.asVoid),
-    exitCode: child.exitCode,
-    expectExit: child.expectExit,
-    close: child.close,
+    // Drain both pipes before releasing pending requests or closing the scope:
+    // stdout EOF and process exit can arrive before the final stderr chunk.
+    startPump: Effect.all(
+      [
+        pump,
+        child.stderr.pipe(
+          Stream.decodeText(),
+          Stream.runForEach((chunk) =>
+            Effect.sync(() => {
+              stderrTail = (stderrTail + chunk).slice(-MAX_STDERR_TAIL_CHARS);
+            }),
+          ),
+        ),
+      ],
+      { concurrency: "unbounded", discard: true },
+    ).pipe(
+      Effect.andThen(
+        Effect.suspend(() =>
+          input.threadId !== PROBE_THREAD_ID && !expectedExit && stderrTail.trim()
+            ? pushEvent({
+                type: "runtime.error",
+                payload: {
+                  message: withStderr("Pi RPC output closed unexpectedly."),
+                  class: "transport_error",
+                },
+              })
+            : Effect.void,
+        ),
+      ),
+      Effect.ensuring(failPending),
+      Effect.ensuring(Deferred.succeed(outputDrained, undefined)),
+      Effect.forkIn(input.scope),
+      Effect.asVoid,
+    ),
+    exitCode: child.exitCode.pipe(Effect.tap(() => Deferred.await(outputDrained))),
+    expectExit,
+    close: expectExit.pipe(Effect.andThen(child.close)),
     scope: input.scope,
     beginTurn: (turnId) => {
       resetTurn();
@@ -812,7 +858,7 @@ export function makePiAdapter(
     const sessionMutation = yield* Semaphore.make(1);
     const sessions = new Map<ThreadId, PiSessionEntry>();
 
-    const spawnConnection = (threadId: ThreadId, requestedCwd?: string) =>
+    const spawnConnection = (threadId: ThreadId, requestedCwd?: string, sessionFile?: string) =>
       Effect.gen(function* () {
         const scope = yield* Scope.make();
         return yield* Effect.gen(function* () {
@@ -828,7 +874,7 @@ export function makePiAdapter(
           const spawned = yield* host.processes
             .spawn({
               command: config.binaryPath,
-              args: piLaunchArgs(config.args, storage.sessionDirectory, preview.args),
+              args: piLaunchArgs(config.args, storage.sessionDirectory, preview.args, sessionFile),
               cwd,
               environment: input.environment,
               protectedEnvironment: preview.protectedEnvironment,
@@ -905,39 +951,29 @@ export function makePiAdapter(
           const resolvedCwd = yield* host.workspaces
             .resolveCwd(sessionInput.cwd ?? config.cwd)
             .pipe(Effect.mapError((cause) => adapterError("startSession", cause.detail, cause)));
-          const connection = yield* spawnConnection(sessionInput.threadId, resolvedCwd);
+          const requestedResume = parseResumeCursor(sessionInput.resumeCursor);
+          if (sessionInput.resumeCursor !== undefined && requestedResume === undefined) {
+            return yield* adapterError(
+              "startSession",
+              "Pi resume requires a native sessionFile and sessionId.",
+            );
+          }
+          const resumeFile =
+            requestedResume === undefined
+              ? undefined
+              : yield* host.storage
+                  .validateSessionFile({
+                    threadId: sessionInput.threadId,
+                    path: requestedResume.sessionFile,
+                    mustExist: true,
+                  })
+                  .pipe(
+                    Effect.mapError((cause) => adapterError("startSession", cause.detail, cause)),
+                  );
+          // Start extensions in the final session: switching after session_start
+          // invalidates contexts retained by asynchronous extension initialization.
+          const connection = yield* spawnConnection(sessionInput.threadId, resolvedCwd, resumeFile);
           return yield* Effect.gen(function* () {
-            const requestedResume = parseResumeCursor(sessionInput.resumeCursor);
-            if (sessionInput.resumeCursor !== undefined && requestedResume === undefined) {
-              return yield* adapterError(
-                "startSession",
-                "Pi resume requires a native sessionFile and sessionId.",
-              );
-            }
-            if (requestedResume !== undefined) {
-              const sessionFile = yield* host.storage
-                .validateSessionFile({
-                  threadId: sessionInput.threadId,
-                  path: requestedResume.sessionFile,
-                  mustExist: true,
-                })
-                .pipe(
-                  Effect.mapError((cause) => adapterError("startSession", cause.detail, cause)),
-                );
-              const switched = yield* connection.request({
-                type: "switch_session",
-                sessionPath: sessionFile,
-              });
-              const switchResult = yield* decodeSwitchSession(switched).pipe(
-                Effect.mapError((cause) =>
-                  adapterError("startSession", "Invalid Pi resume response.", cause),
-                ),
-              );
-              if (switchResult.cancelled === true) {
-                return yield* adapterError("startSession", "Pi session resume was cancelled.");
-              }
-              yield* connection.checkPreviewHealth;
-            }
             yield* applyModelSelection(
               connection,
               sessionInput.modelSelection ??
@@ -1163,9 +1199,8 @@ export function makePiAdapter(
               }),
             { concurrency: 1 },
           );
-          yield* probe.success.expectExit;
-          yield* probe.success.close;
-          yield* probe.success.exitCode.pipe(Effect.ignore);
+          yield* connection.close;
+          yield* connection.exitCode.pipe(Effect.ignore);
         }
         const checkedAt = yield* nowIso;
         return {

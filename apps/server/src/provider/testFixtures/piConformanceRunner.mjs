@@ -91,6 +91,41 @@ const program = Effect.gen(function* () {
     unsafeResults.every((result) => result._tag === "Failure"),
   );
 
+  for (const stdoutFirst of [false, true]) {
+    const crashConfig = {
+      binaryPath: process.execPath,
+      args: [
+        NodeURL.fileURLToPath(new URL("./piHarness.mjs", import.meta.url)),
+        "--test-startup-crash",
+        ...(stdoutFirst ? ["--test-close-stdout-first"] : []),
+      ],
+    };
+    const crashing = yield* makeExternalProviderDriver(pkg, crashConfig).create({
+      instanceId: stdoutFirst ? "pi_startup_stdout_first" : "pi_startup_crash",
+      displayName: "Pi",
+      accentColor: void 0,
+      environment: [],
+      enabled: true,
+      config: crashConfig,
+    });
+    const startupCrash = yield* crashing.adapter
+      .startSession({
+        threadId: "pi-startup-crash",
+        runtimeMode: "full-access",
+      })
+      .pipe(Effect.result);
+    const startupDetail = startupCrash._tag === "Failure" ? startupCrash.failure.message : "";
+    check(
+      "startup failure includes stderr tail",
+      startupDetail.includes("extension ctx is stale"),
+      startupDetail,
+    );
+    check(
+      "startup stderr is bounded",
+      !startupDetail.includes("discarded stderr prefix") && startupDetail.length < 9000,
+    );
+  }
+
   const instance = yield* driver.create({
     instanceId: "pi_ci",
     displayName: "Pi RPC",
@@ -567,7 +602,7 @@ const program = Effect.gen(function* () {
     })
     .pipe(Effect.result);
   check(
-    "resume cancellation rejected",
+    "incomplete resume cursor rejected",
     cancelledResume._tag === "Failure" && !(yield* instance.adapter.hasSession("pi-cancelled")),
   );
   const invalidModelStart = yield* instance.adapter
@@ -589,18 +624,32 @@ const program = Effect.gen(function* () {
   yield* instance.adapter.stopSession("pi-invalid-model");
   const rollback = yield* instance.adapter.rollbackThread("pi-ci-thread", 1).pipe(Effect.result);
   check("rollback not negotiated", rollback._tag === "Failure");
+  check(
+    "healthy stderr and intentional stops do not emit diagnostics",
+    !result.allEvents.some(
+      (event) =>
+        event.type === "runtime.error" && event.payload.message.includes("healthy-session warning"),
+    ),
+  );
   const crashedSession = yield* instance.adapter.startSession({
     threadId: "pi-exit",
     runtimeMode: "full-access",
   });
   const exitFiber = yield* collectUntil(
-    (event) => event.type === "runtime.error" && event.threadId === "pi-exit",
+    (event) =>
+      event.type === "runtime.error" &&
+      event.threadId === "pi-exit" &&
+      event.payload.message.includes("Pi extension crashed"),
   );
   const exited = yield* instance.adapter
     .sendTurn({ threadId: "pi-exit", input: "!exit" })
     .pipe(Effect.result);
   yield* drain(exitFiber);
-  check("EOF releases pending RPC", exited._tag === "Failure");
+  check(
+    "EOF releases pending RPC with stderr",
+    exited._tag === "Failure" &&
+      exited.failure.message.includes("Pi extension crashed during turn"),
+  );
   check("crashed sessions are removed", !(yield* instance.adapter.hasSession("pi-exit")));
   const recoveredSession = yield* instance.adapter.startSession({
     threadId: "pi-exit",
@@ -612,7 +661,11 @@ const program = Effect.gen(function* () {
     recoveredSession.resumeCursor?.sessionId === crashedSession.resumeCursor?.sessionId,
   );
   yield* instance.adapter.stopSession("pi-exit");
-  const resumeCursor = session.resumeCursor;
+  const resumeCursor = {
+    ...session.resumeCursor,
+    sessionFile: session.resumeCursor.sessionFile.replace(/demo\.jsonl$/, "resume target.jsonl"),
+  };
+  yield* fileSystem.copyFile(session.resumeCursor.sessionFile, resumeCursor.sessionFile);
   yield* instance.adapter.stopSession("pi-ci-thread");
   check("session removed after stop", !(yield* instance.adapter.hasSession("pi-ci-thread")));
   const restarted = yield* driver.create({
@@ -626,6 +679,18 @@ const program = Effect.gen(function* () {
       args: [NodeURL.fileURLToPath(new URL("./piHarness.mjs", import.meta.url))],
     },
   });
+  const mismatchedResume = yield* restarted.adapter
+    .startSession({
+      threadId: "pi-ci-thread",
+      runtimeMode: "full-access",
+      resumeCursor: { ...resumeCursor, sessionId: "wrong-session-id" },
+    })
+    .pipe(Effect.result);
+  check(
+    "resume still checks native session identity",
+    mismatchedResume._tag === "Failure" &&
+      mismatchedResume.failure.message.includes("expected 'wrong-session-id'"),
+  );
   const resumed = yield* restarted.adapter.startSession({
     threadId: "pi-ci-thread",
     providerInstanceId: "pi_ci",

@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
  * Fake Pi RPC harness used by the pi-rpc adapter conformance fixtures.
  *
  * Speaks the Pi RPC protocol subset over stdio JSONL (strict LF framing):
- * commands `switch_session`, `get_state`, `get_available_models`, `get_available_thinking_levels`,
+ * commands `get_state`, `get_available_models`, `get_available_thinking_levels`,
  * `set_model`, `set_thinking_level`, `get_session_stats`, `get_entries`,
  * `prompt`, `steer`, `follow_up`, `abort`; plus the extension-UI
  * request/response sub-protocol. See the vendored Pi RPC doc for the real
@@ -22,8 +22,22 @@ const sessionDirectory =
     ? process.argv[sessionDirectoryFlag + 1]
     : "/tmp/pi-sessions";
 NodeFS.mkdirSync(sessionDirectory, { recursive: true });
-const initialSessionFile = NodePath.join(sessionDirectory, "demo.jsonl");
+if (process.argv.includes("--test-startup-crash")) {
+  const crash = () => {
+    NodeFS.writeSync(2, "discarded stderr prefix\n" + "x".repeat(16_384));
+    NodeFS.writeSync(2, "\nError: extension ctx is stale after session replacement\n");
+    process.exit(1);
+  };
+  if (process.argv.includes("--test-close-stdout-first")) {
+    await new Promise((resolve) => process.stdout.end(() => setImmediate(resolve)));
+  }
+  crash();
+}
+const sessionFlag = process.argv.indexOf("--session");
+const resumeFile = sessionFlag < 0 ? undefined : process.argv[sessionFlag + 1];
+const initialSessionFile = resumeFile ?? NodePath.join(sessionDirectory, "demo.jsonl");
 NodeFS.closeSync(NodeFS.openSync(initialSessionFile, "a"));
+NodeFS.writeSync(2, "Pi harness healthy-session warning\n");
 
 const state = {
   sessionFile: initialSessionFile,
@@ -40,6 +54,12 @@ const state = {
   held: null,
   leafId: null,
 };
+
+if (resumeFile) {
+  const saved = NodeFS.readFileSync(resumeFile, "utf8").trim();
+  state.entries = saved ? saved.split("\n").map((line) => JSON.parse(line)) : [];
+  state.leafId = state.entries.at(-1)?.id ?? null;
+}
 
 const models = [
   state.model,
@@ -285,20 +305,15 @@ process.stdin.on("data", (chunk) => {
     }
     const { id, type } = command;
     switch (type) {
-      case "switch_session": {
-        if (command.sessionPath === "/cancelled.jsonl") {
-          respond(id, type, true, { cancelled: true });
-          break;
-        }
-        state.sessionFile = command.sessionPath;
-        NodeFS.mkdirSync(NodePath.dirname(state.sessionFile), { recursive: true });
-        NodeFS.closeSync(NodeFS.openSync(state.sessionFile, "a"));
-        const saved = NodeFS.readFileSync(state.sessionFile, "utf8").trim();
-        state.entries = saved ? saved.split("\n").map((line) => JSON.parse(line)) : [];
-        state.leafId = state.entries.at(-1)?.id ?? null;
-        respond(id, type, true, { cancelled: false });
+      case "switch_session":
+        respond(
+          id,
+          type,
+          false,
+          undefined,
+          "Resume must launch with --session, never switch_session",
+        );
         break;
-      }
       case "get_state":
         respond(id, type, true, {
           model: state.model,
@@ -367,7 +382,10 @@ process.stdin.on("data", (chunk) => {
         break;
       case "prompt": {
         const message = String(command.message ?? "");
-        if (message.startsWith("!exit")) process.exit(0);
+        if (message.startsWith("!exit")) {
+          NodeFS.writeSync(2, "Error: Pi extension crashed during turn\n");
+          process.exit(1);
+        }
         if (message.startsWith("!reject")) {
           respond(id, type, false, undefined, "Preflight rejected");
           break;
