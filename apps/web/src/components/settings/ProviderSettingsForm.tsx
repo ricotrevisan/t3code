@@ -501,7 +501,7 @@ function AdapterConfigFieldRow({
   const descriptionClassName =
     variant === "card"
       ? "mt-1 block text-xs text-muted-foreground"
-      : "text-[11px] text-muted-foreground";
+      : "text-2xs text-muted-foreground";
   const publish = (next: AdapterConfigDefault | undefined) => {
     setDraftError(undefined);
     onChange(nextAdapterConfigWithFieldValue(value, field, next));
@@ -653,7 +653,6 @@ function AdapterConfigFieldRow({
         ) : (
           <Input
             id={inputId}
-            className="bg-background"
             value={textValue}
             inputMode={field.kind === "number" || field.kind === "integer" ? "decimal" : undefined}
             aria-invalid={visibleError !== undefined}
