@@ -4,14 +4,58 @@ use crate::protocol::{self, ClientMessage, RequestId, RpcExit, ServerMessage};
 use crate::shell::ShellItem;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::json;
-use std::time::Duration;
+use serde_json::{Value, json};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
 pub enum Update {
     Status(String),
     Shell(ShellItem),
+    Thread { thread_id: String, item: Value },
+}
+
+pub enum Command {
+    SelectThread(Option<String>),
+    Call {
+        tag: String,
+        payload: Value,
+        reply: async_channel::Sender<Result<Value, String>>,
+    },
+}
+
+pub struct Session {
+    pub updates: async_channel::Receiver<Update>,
+    pub commands: async_channel::Sender<Command>,
+}
+
+impl Session {
+    pub async fn call(&self, tag: &str, payload: Value) -> Result<Value, String> {
+        call(&self.commands, tag, payload).await
+    }
+}
+
+pub async fn call(
+    commands: &async_channel::Sender<Command>,
+    tag: &str,
+    payload: Value,
+) -> Result<Value, String> {
+    let (reply, receiver) = async_channel::bounded(1);
+    commands
+        .send(Command::Call {
+            tag: tag.into(),
+            payload,
+            reply,
+        })
+        .await
+        .map_err(|_| "Not connected")?;
+    receiver
+        .recv()
+        .await
+        .map_err(|_| "Connection closed before RPC completed".to_owned())?
 }
 
 pub struct ConnectionOptions {
@@ -51,8 +95,13 @@ struct Ticket {
 }
 
 pub fn start(options: ConnectionOptions) -> async_channel::Receiver<Update> {
+    start_session(options).updates
+}
+
+pub fn start_session(options: ConnectionOptions) -> Session {
     // A bounded channel prevents a blocked UI from accumulating arbitrary history.
     let (sender, receiver) = async_channel::bounded(64);
+    let (commands, requests) = async_channel::bounded(32);
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -81,14 +130,14 @@ pub fn start(options: ConnectionOptions) -> async_channel::Receiver<Update> {
                 socket_url.query_pairs_mut().append_pair("wsTicket", &ticket.ticket).append_pair("orchestrationProtocol", "1")
                     .append_pair("clientSurface", "desktop")
                     .append_pair("clientDeviceType", "desktop")
-                    .append_pair("clientOs", "macos")
+                    .append_pair("clientOs", "macOS")
                     .append_pair("clientAppVersion", env!("CARGO_PKG_VERSION"))
                     .append_pair("connectionMethod", "direct");
                 let (socket, _) = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(socket_url.as_str()))
                     .await.map_err(|_| "WebSocket connection timed out")?
                     .map_err(|_| "WebSocket connection rejected")?;
                 let _ = sender.send(Update::Status("Loading projects and threads…".into())).await;
-                run_socket(socket, &sender).await
+                run_session(socket, &sender, &requests).await
             };
             // Dropping the UI receiver cancels both authorization and the socket worker.
             tokio::select! {
@@ -97,7 +146,10 @@ pub fn start(options: ConnectionOptions) -> async_channel::Receiver<Update> {
             }
         });
     });
-    receiver
+    Session {
+        updates: receiver,
+        commands,
+    }
 }
 
 async fn send<S>(
@@ -114,13 +166,36 @@ where
         .map_err(|_| "Connection closed while sending")
 }
 
+#[cfg(test)]
 async fn run_socket<S>(
-    mut socket: tokio_tungstenite::WebSocketStream<S>,
+    socket: tokio_tungstenite::WebSocketStream<S>,
     sender: &async_channel::Sender<Update>,
 ) -> Result<(), &'static str>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let (_commands, requests) = async_channel::bounded(1);
+    run_session(socket, sender, &requests).await
+}
+
+enum Pending {
+    Shell,
+    Thread(String),
+    Call(async_channel::Sender<Result<Value, String>>),
+}
+
+async fn run_session<S>(
+    mut socket: tokio_tungstenite::WebSocketStream<S>,
+    sender: &async_channel::Sender<Update>,
+    commands: &async_channel::Receiver<Command>,
+) -> Result<(), &'static str>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut pending = HashMap::from([(RequestId::String("1".into()), Pending::Shell)]);
+    let mut cancelled = HashSet::new();
+    let mut next_id = 2u64;
+    let mut commands_open = true;
     send(
         &mut socket,
         protocol::request(
@@ -138,6 +213,30 @@ where
     let mut pong_received = true;
     loop {
         tokio::select! {
+            command = commands.recv(), if commands_open => {
+                let command = match command { Ok(command) => command, Err(_) => { commands_open = false; continue; } };
+                let id = RequestId::String(next_id.to_string());
+                match command {
+                    Command::SelectThread(thread_id) => {
+                        let old_ids: Vec<_> = pending.iter().filter_map(|(id, kind)| if matches!(kind, Pending::Thread(_)) { Some(id.clone()) } else { None }).collect();
+                        for old in old_ids {
+                            send(&mut socket, ClientMessage::Interrupt { request_id: old.clone() }).await?;
+                            pending.remove(&old);
+                            cancelled.insert(old);
+                        }
+                        if let Some(thread_id) = thread_id {
+                            send(&mut socket, protocol::request(next_id, "orchestration.subscribeThread", json!({"threadId":thread_id,"reasoningMessages":true,"requestCompletionMarker":true}))).await?;
+                            pending.insert(id, Pending::Thread(thread_id));
+                            next_id += 1;
+                        }
+                    }
+                    Command::Call { tag, payload, reply } => {
+                        send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
+                        pending.insert(id, Pending::Call(reply));
+                        next_id += 1;
+                    }
+                }
+            }
             _ = heartbeat.tick() => {
                 if !pong_received { return Err("Server heartbeat timed out"); }
                 pong_received = false;
@@ -156,20 +255,33 @@ where
                     match message {
                         ServerMessage::Pong => pong_received = true,
                         ServerMessage::Chunk { request_id, values } => {
-                            if request_id != RequestId::String("1".into()) { return Err("Unexpected RPC request ID"); }
                             if values.is_empty() { return Err("Empty RPC stream chunk"); }
-                            for value in values {
-                                let item: ShellItem = serde_json::from_value(value).map_err(|_| "Unsupported shell stream event")?;
-                                sender.send(Update::Shell(item)).await.map_err(|_| "Client closed")?;
-                            }
+                            if let Some(kind) = pending.get(&request_id) {
+                                for value in values {
+                                    let update = match kind {
+                                        Pending::Shell => Update::Shell(serde_json::from_value(value).map_err(|_| "Unsupported shell stream event")?),
+                                        Pending::Thread(thread_id) => Update::Thread { thread_id: thread_id.clone(), item: value },
+                                        Pending::Call(_) => return Err("Unary RPC returned a stream chunk"),
+                                    };
+                                    sender.send(update).await.map_err(|_| "Client closed")?;
+                                }
+                            } else if !cancelled.contains(&request_id) { return Err("Unexpected RPC request ID"); }
                             // Acknowledge only once the bounded consumer has accepted the full chunk.
                             send(&mut socket, ClientMessage::Ack { request_id }).await?;
                         }
                         ServerMessage::Exit { request_id, exit } => {
-                            if request_id != RequestId::String("1".into()) { return Err("Unexpected RPC request ID"); }
-                            match exit {
-                                RpcExit::Success { value } => { drop(value); return Err("Shell subscription ended"); }
-                                RpcExit::Failure { cause } => { drop(cause); return Err("Shell subscription failed; check authorization and server compatibility"); }
+                            if cancelled.remove(&request_id) { continue; }
+                            let kind = pending.remove(&request_id).ok_or("Unexpected RPC request ID")?;
+                            match kind {
+                                Pending::Call(reply) => {
+                                    let result = match exit { RpcExit::Success { value } => Ok(value), RpcExit::Failure { cause } => Err(rpc_failure(&cause)) };
+                                    let _ = reply.send(result).await;
+                                }
+                                Pending::Thread(_) => {
+                                    let status = match exit { RpcExit::Success { .. } => "Thread subscription ended".to_owned(), RpcExit::Failure { cause } => rpc_failure(&cause) };
+                                    sender.send(Update::Status(status)).await.map_err(|_| "Client closed")?;
+                                }
+                                Pending::Shell => return Err("Shell subscription ended or failed; reconnect to synchronize"),
                             }
                         }
                         ServerMessage::Defect { defect } => { drop(defect); return Err("Server reported an RPC defect"); }
@@ -179,6 +291,18 @@ where
             }
         }
     }
+}
+
+fn rpc_failure(cause: &Value) -> String {
+    let name = cause
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find_map(|entry| entry["error"]["_tag"].as_str())
+        })
+        .unwrap_or("RequestFailed");
+    format!("Server rejected request ({name})")
 }
 
 #[cfg(test)]
@@ -244,7 +368,9 @@ mod tests {
                     assert!(!status.contains("private-secret"));
                     failed |= status.contains("Authorization rejected");
                 }
-                Update::Shell(_) => panic!("unauthorized connection delivered shell state"),
+                Update::Shell(_) | Update::Thread { .. } => {
+                    panic!("unauthorized connection delivered shell state")
+                }
             }
         }
         assert!(failed);
@@ -285,6 +411,7 @@ mod tests {
                     assert!(uri.contains("wsTicket=one-time-ticket"));
                     assert!(uri.contains("orchestrationProtocol=1"));
                     assert!(uri.contains("clientSurface=desktop"));
+                    assert!(uri.contains("clientOs=macOS"));
                     assert!(!uri.contains("test-secret"));
                     Ok(response)
                 },
@@ -340,6 +467,104 @@ mod tests {
             start(ConnectionOptions::new(&format!("http://{address}"), "token".into()).unwrap());
         request_started.await.unwrap();
         drop(receiver);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn switching_threads_cancels_old_stream_and_correlates_unary_receipts() {
+        async fn read(
+            socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        ) -> Value {
+            serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            assert_eq!(
+                read(&mut socket).await["tag"],
+                "orchestration.subscribeShell"
+            );
+            socket.send(Message::Text(json!({"_tag":"Chunk","requestId":"1","values":[{"kind":"snapshot","snapshot":{"snapshotSequence":0,"projects":[],"threads":[]}},{"kind":"synchronized"}]}).to_string().into())).await.unwrap();
+            assert_eq!(read(&mut socket).await["_tag"], "Ack");
+            let first = read(&mut socket).await;
+            assert_eq!(first["payload"]["threadId"], "a");
+            assert_eq!(first["id"], "2");
+            socket
+                .send(Message::Text(
+                    json!({"_tag":"Chunk","requestId":"2","values":[{"kind":"synchronized"}]})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                read(&mut socket).await,
+                json!({"_tag":"Ack","requestId":"2"})
+            );
+            assert_eq!(
+                read(&mut socket).await,
+                json!({"_tag":"Interrupt","requestId":"2"})
+            );
+            assert_eq!(read(&mut socket).await["payload"]["threadId"], "b");
+            socket
+                .send(Message::Text(
+                    json!([
+                        {"_tag":"Chunk","requestId":"2","values":[{"kind":"stale-a"}]},
+                        {"_tag":"Exit","requestId":"2","exit":{"_tag":"Failure","cause":[]}},
+                        {"_tag":"Chunk","requestId":"3","values":[{"kind":"synchronized"}]}
+                    ])
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                read(&mut socket).await,
+                json!({"_tag":"Ack","requestId":"2"})
+            );
+            assert_eq!(
+                read(&mut socket).await,
+                json!({"_tag":"Ack","requestId":"3"})
+            );
+            let unary = read(&mut socket).await;
+            assert_eq!(unary["tag"], "orchestration.dispatchCommand");
+            assert_eq!(unary["id"], "4");
+            socket.send(Message::Text(json!({"_tag":"Exit","requestId":"4","exit":{"_tag":"Success","value":{"sequence":9}}}).to_string().into())).await.unwrap();
+            socket.close(None).await.unwrap();
+        });
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let (sender, receiver) = async_channel::bounded(8);
+        let (commands, requests) = async_channel::bounded(8);
+        let driver = tokio::spawn(async move { run_session(socket, &sender, &requests).await });
+        for _ in 0..2 {
+            assert!(matches!(receiver.recv().await.unwrap(), Update::Shell(_)));
+        }
+        commands
+            .send(Command::SelectThread(Some("a".into())))
+            .await
+            .unwrap();
+        assert!(
+            matches!(receiver.recv().await.unwrap(), Update::Thread { thread_id, .. } if thread_id == "a")
+        );
+        commands
+            .send(Command::SelectThread(Some("b".into())))
+            .await
+            .unwrap();
+        assert!(
+            matches!(receiver.recv().await.unwrap(), Update::Thread { thread_id, item } if thread_id == "b" && item["kind"] == "synchronized")
+        );
+        assert_eq!(
+            call(&commands, "orchestration.dispatchCommand", json!({}))
+                .await
+                .unwrap(),
+            json!({"sequence":9})
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(driver.await.unwrap().is_err());
         server.await.unwrap();
     }
 

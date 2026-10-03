@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,25 +11,35 @@ import evaluate
 
 class ParityEvaluationTests(unittest.TestCase):
     def setUp(self):
+        case = {"id": "send-local-chat", "mode": "local", "entry_point": "chat",
+                "actions": ["type prompt", "send", "wait for turn receipt"],
+                "expected": {"visible": "reply", "durable": "reply", "turns": 1}}
         self.baseline = {
             "revision": "a" * 40,
             "items": [{"id": "source", "sha256": "abc"}],
             "coverage_review": {"source": {"scenarios": ["send"]}},
-            "scenarios": [{"id": "send", "group": "conversation"}],
+            "scenarios": [{"id": "send", "group": "conversation", "required_modes": ["local"],
+                           "evaluation_entry_points": ["chat"], "evaluation_cases": [case]}],
         }
         self.patch = patch.object(evaluate, "inventory", return_value=self.baseline["items"])
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.artifact = Path(self.directory.name) / "result.json"
-        self.artifact.write_text('{"visible": "reply", "durable": "reply"}')
-        self.evidence = {"send": {client: {
-            "result": "pass", "revision": self.baseline["revision"],
-            "artifact": str(self.artifact),
-            "sha256": hashlib.sha256(self.artifact.read_bytes()).hexdigest(),
-            "source_sha256": evaluate.native_source_digest(),
-        } for client in ("current", "native")}}
+        self.evidence = {"send": {}}
+        self.documents = {}
+        for client in ("current", "native"):
+            self.documents[client] = {"scope": "end-to-end", "scenario_id": "send", "client": client,
+                                      "cases": [{**case, "result": "pass", "observed": case["expected"]}]}
+            self.evidence["send"][client] = {"result": "pass", "revision": self.baseline["revision"],
+                                           "source_sha256": evaluate.native_source_digest()}
+            self.write_artifact(client)
+        self.artifact = Path(self.evidence["send"]["current"]["artifact"])
+
+    def write_artifact(self, client):
+        artifact = Path(self.directory.name) / f"{client}.json"
+        artifact.write_text(json.dumps(self.documents[client]))
+        self.evidence["send"][client].update(artifact=str(artifact), sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
 
     def test_no_evidence_never_passes(self):
         report = evaluate.evaluate(self.baseline, {})
@@ -70,6 +81,31 @@ class ParityEvaluationTests(unittest.TestCase):
         self.baseline["scenarios"] *= 2
         with self.assertRaises(ValueError):
             evaluate.evaluate(self.baseline, self.evidence)
+
+    def test_reducer_or_transport_evidence_cannot_count_as_ui_parity(self):
+        self.documents["native"]["scope"] = "production reducer only"
+        self.write_artifact("native")
+        self.assertEqual(evaluate.evaluate(self.baseline, self.evidence)["passed"], 0)
+
+    def test_matching_checksum_does_not_hide_incorrect_observed_behavior(self):
+        self.documents["native"]["cases"][0]["observed"] = {"visible": "reply", "durable": "lost", "turns": 2}
+        self.write_artifact("native")
+        self.assertEqual(evaluate.evaluate(self.baseline, self.evidence)["passed"], 0)
+
+    def test_omitted_modes_entry_points_and_cases_block_pass(self):
+        for key, value in [("required_modes", ["local", "relay/tunnel"]),
+                           ("evaluation_entry_points", ["chat", "command-palette"]),
+                           ("evaluation_cases", [])]:
+            baseline = copy.deepcopy(self.baseline)
+            baseline["scenarios"][0][key] = value
+            self.assertEqual(evaluate.evaluate(baseline, self.evidence)["passed"], 0)
+        self.documents["native"]["cases"] = []
+        self.write_artifact("native")
+        self.assertEqual(evaluate.evaluate(self.baseline, self.evidence)["passed"], 0)
+
+    def test_artifact_from_wrong_client_cannot_be_reused(self):
+        self.evidence["send"]["native"].update(artifact=self.evidence["send"]["current"]["artifact"], sha256=self.evidence["send"]["current"]["sha256"])
+        self.assertEqual(evaluate.evaluate(self.baseline, self.evidence)["passed"], 0)
 
 
 if __name__ == "__main__":

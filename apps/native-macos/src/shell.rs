@@ -1,15 +1,17 @@
 //! Ordered shell projection. The global sequence may skip unrelated thread events.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,
     pub title: String,
     pub workspace_root: String,
+    #[serde(default)]
+    pub default_model_selection: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub id: String,
@@ -17,9 +19,21 @@ pub struct Thread {
     pub title: String,
     #[serde(default)]
     pub archived_at: Option<String>,
+    #[serde(default)]
+    pub model_selection: serde_json::Value,
+    #[serde(default)]
+    pub runtime_mode: Option<String>,
+    #[serde(default)]
+    pub interaction_mode: Option<String>,
+    #[serde(default)]
+    pub snoozed_until: Option<String>,
+    #[serde(default)]
+    pub settled_override: Option<String>,
+    #[serde(default)]
+    pub pinned_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub snapshot_sequence: u64,
@@ -27,7 +41,7 @@ pub struct Snapshot {
     pub threads: Vec<Thread>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ShellItem {
     Snapshot {

@@ -505,6 +505,15 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
+  apps/native-macos:
+    devDependencies:
+      '@t3tools/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      effect:
+        specifier: 4.0.0-rc.115
+        version: 4.0.0-rc.115(patch_hash=0dfc4bb8ebd80fb3e06b91ef61346f5259517ab0f2437644fe95ae531084b1f5)
+
   apps/server:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':

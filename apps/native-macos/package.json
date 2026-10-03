@@ -1,0 +1,9 @@
+{
+  "name": "@t3tools/native-macos",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@t3tools/contracts": "workspace:*",
+    "effect": "catalog:"
+  }
+}

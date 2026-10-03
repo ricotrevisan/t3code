@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
     String(String),
@@ -19,6 +19,10 @@ pub enum ClientMessage {
         headers: Vec<(String, String)>,
     },
     Ack {
+        #[serde(rename = "requestId")]
+        request_id: RequestId,
+    },
+    Interrupt {
         #[serde(rename = "requestId")]
         request_id: RequestId,
     },

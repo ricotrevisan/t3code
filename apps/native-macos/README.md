@@ -1,115 +1,125 @@
 # T3 Code native macOS client
 
-Experimental Rust/GPUI client for this fork. Development stays on
+Experimental Rust/GPUI client for this maintained fork. Development stays on
 `t3code/port-t3code-to-rust-gpui`; it is not a replacement for the shipping app.
 
-## Build
+## Build and run
+
+Requires macOS and Xcode developer tools. GPUI is pinned to 0.2.2, with compatible
+GPUI Component 0.5.1 controls. Runtime Metal shader compilation avoids requiring
+Xcode's separately downloaded offline Metal toolchain.
 
 ```sh
-cargo check --manifest-path apps/native-macos/Cargo.toml
+cargo build --manifest-path apps/native-macos/Cargo.toml
 cargo run --manifest-path apps/native-macos/Cargo.toml
 ```
 
-Requires macOS and Xcode developer tools. GPUI is pinned to 0.2.2 and uses its
-supported runtime Metal shader compilation, so development does not require
-Xcode's separately downloaded offline Metal toolchain. Signing, notarization
-and release-performance validation remain tracked in the macOS workstream.
-
-The current executable implements a read-only project/thread sidebar using the
-existing server's authenticated Effect RPC shell subscription. It renders live
-project/thread metadata and supports thread selection, disconnect and manual
-retry. Conversation rendering, composer, thread actions, automatic reconnect,
-pairing, relay/DPoP credentials and Keychain persistence are not implemented yet.
-There is no embedded Electron renderer.
-
 For development, set `T3_NATIVE_SERVER` to the HTTP(S) server origin and supply an
-existing bearer **access token** through `T3_NATIVE_ACCESS_TOKEN`, then run the
-app. Do not use a pairing-link token or put credentials in command-line arguments.
-Remote origins require HTTPS; plain HTTP is accepted only for loopback. The app
-exchanges the bearer credential for a one-time WebSocket ticket and includes the
-current orchestration protocol version. It does not persist credentials.
+existing bearer **access token** through `T3_NATIVE_ACCESS_TOKEN`. Do not use a
+pairing-link token or put credentials in command-line arguments. The app exchanges
+the bearer credential for a one-time WebSocket ticket. Plain HTTP is accepted
+only for loopback; remote origins require HTTPS. Credentials are not persisted.
 
-The socket worker runs outside GPUI's UI thread with a bounded delivery channel.
-It acknowledges accepted chunks, uses Effect's JSON heartbeat protocol, reports
-subscription failures, and is cancelled when the UI task is dropped. Projection
-tests cover snapshot loading, synchronization, replay deduplication, rename,
-archive/unarchive and removal. Local fixture-server tests exercise the complete
-bearer-to-ticket-to-WebSocket flow, authorization rejection and chunk acknowledgement;
-they are not a substitute for a real-server/client parity run.
+Native drafts and stashed prompts use a separate data directory:
+`~/Library/Application Support/T3 Code Native`. `T3_NATIVE_HOME` overrides this
+for isolated testing. Corrupt or newer-version storage is preserved, not reset.
+Regular writes are debounced and run off the UI thread; normal closure flushes
+the final edit. Environment origins and thread IDs isolate drafts.
 
-## Compatibility constraint
+## Implemented slices, not certified parity
 
-The existing Node server remains the authority for orchestration, durable
-history, provider execution and checkpoints. Port the client, not those
-systems, initially. The Rust transport must implement the existing Effect RPC
-wire protocol and authorization flows; inventing a JSON-RPC lookalike would
-silently break subscriptions, cancellation and remote authentication.
+- Authenticated Effect RPC, bounded background delivery, JSON heartbeats,
+  stream acknowledgements, request correlation and subscription cancellation.
+- Live project/thread sidebar, thread detail subscriptions, manual reconnect,
+  archive retrieval and historical thread search.
+- Initial add-project/new-thread/rename/archive/unarchive/settle/snooze/pin/delete
+  controls. Deletion requires a second confirmation click.
+- Native multiline composer, send with receipt-aware clearing, interrupt/stop,
+  Markdown messages and activity/session output. Provider/model IDs are manually
+  editable; provider setup and catalog UI remain unimplemented.
+- Draft recovery and prompt stash. Sending failure and edits made while a send
+  is pending preserve the user's text.
 
-GPUI is a UI framework, not a browser engine. Browser profile import, preview,
-recording, automation and element picking require an explicit browser adapter.
-A simplified URL viewer cannot be accepted as parity with the Electron client.
+Important gaps include pairing/Keychain, automatic reconnect, relay/DPoP,
+multi-environment navigation, queue management, attachments/context, approvals,
+full Markdown equivalence, plan execution, terminal rendering, source-control
+UI, settings/palette/keybinding parity and embedded browser functionality.
+Unimplemented thread events fail closed rather than silently showing stale state.
+The existing server remains authoritative for provider execution, orchestration,
+durable history and checkpoints. This port does not embed Electron.
 
-## Evaluate
+GPUI is not a browser engine. Profiles, previews, recordings, automation and
+picking require an explicit browser adapter; a URL viewer is not an equivalent.
+
+## Verify the implementation
 
 ```sh
 cargo test --manifest-path apps/native-macos/Cargo.toml
+cargo clippy --manifest-path apps/native-macos/Cargo.toml --all-targets -- -D warnings
 python3 -m unittest discover -s apps/native-macos/parity -p 'test_*.py'
+python3 apps/native-macos/parity/differential.py --output /external/evidence/directory
+python3 apps/native-macos/parity/live_smoke.py --output /external/live-evidence --confirm-isolated-server
+```
+
+The differential runner executes the **current client's production reducer**
+and the Rust production reducer against common contract-normalized fixtures. It
+retains both observations, comparing every state frame. These are reducer cases,
+not end-to-end product scenario passes.
+
+Headless GPUI tests exercise actual input/click dispatch and asynchronous receipt
+handling. They are not a substitute for native macOS integration verification.
+Automating the visible native app requires macOS Accessibility and Screen
+Recording permissions for the execution host; the port does not grant these.
+
+`parity-session` is a real-server transport/read-model runner:
+
+```sh
+cargo run --manifest-path apps/native-macos/Cargo.toml --bin parity-session < actions.json
+```
+
+Actions are `dispatch` with a client `command`, `call` with `tag`/`payload`, or
+`select` with `thread_id`. Dispatch observations wait on shell sequence receipts;
+selection waits on snapshot/synchronization markers. It does not automate the
+GPUI window, so its results cannot certify whole UI scenarios. Use only sandbox
+servers and owned test projects: dispatch actions can mutate their environment.
+`live_smoke.py` builds this runner, creates an owned fixture workspace/project/thread,
+checks the lifecycle observations, and retains the state and external artifacts
+for inspection. It requires the same private connection environment variables.
+
+## Evaluate product parity
+
+```sh
 python3 apps/native-macos/parity/evaluate.py evaluate
 python3 apps/native-macos/parity/evaluate.py evaluate --evidence /path/to/evidence.json
 ```
 
-Evaluation exits nonzero until every scenario has paired passing evidence,
-every inventory unit has been reviewed, and the reference source has no drift.
-`verified_scenario_percent` measures only the specified scenarios, **not** the
-percentage of the entire product implemented.
+`parity/baseline.json` pins the fork revision, source/RPC discovery inventory and
+59 initial behavioral scenarios. They are workstream-level discovery scenarios,
+not yet an exhaustive specification. Review every inventory unit and map it to
+scenarios in `coverage_review`, or explain why it is non-behavioral infrastructure.
 
-`parity/baseline.json` pins the current fork revision, source/RPC discovery
-inventory and initial behavioral scenarios. These are workstream-level discovery
-scenarios, not an exhaustive test specification yet. Review every inventory unit
-and expand scenarios into repeatable fixtures and action sequences before a
-100% parity claim. Put inventory-to-scenario mappings in `coverage_review`:
+A scenario needs explicit `evaluation_entry_points` and `evaluation_cases` before
+it can pass. Each case specifies `id`, `mode`, `entry_point`, `actions`, and an
+`expected` observation object. Cases must cover all required modes and entry
+points. Specify fixtures, reverse actions, persistence, errors and meaningful
+performance checks where relevant; do not narrow the original feature to obtain
+a passing number.
 
-```json
-{
-  "apps/web/src/example.ts": {"scenarios": ["threads-01"]},
-  "apps/web/src/example.test.ts": {
-    "non_behavioral_reason": "Reference tests; their behaviors are covered by threads-01"
-  }
-}
-```
+Evidence is keyed by scenario ID, then `current`/`native`. Each run supplies a
+passing result, source `revision`, `artifact` path and artifact `sha256`. Native
+runs additionally supply `source_sha256` matching `native_source_sha256` in the
+report. Reference revisions must match the pinned fork revision.
 
-Evidence is keyed by scenario ID:
+The checksummed JSON artifact must identify `scope: "end-to-end"`, `scenario_id`
+and `client`, and contain every specified case with matching mode, entry point,
+actions, passing result and `observed` output equal to the specification. Arbitrary
+files, reducer/transport reports, incomplete cases and a self-reported “pass” do
+not qualify. Retain original UI/command/state evidence alongside these records.
+Runners and independent review must still establish that the artifacts are true.
 
-```json
-{
-  "threads-01": {
-    "current": {
-      "result": "pass",
-      "revision": "<baseline git commit>",
-      "artifact": "/absolute/path/to/current-run.json",
-      "sha256": "<artifact SHA-256>"
-    },
-    "native": {
-      "result": "pass",
-      "revision": "<native git commit>",
-      "source_sha256": "<native_source_sha256 from evaluation output>",
-      "artifact": "/absolute/path/to/native-run.json",
-      "sha256": "<artifact SHA-256>"
-    }
-  }
-}
-```
+Evaluation exits nonzero until all scenarios pass, inventory review is complete,
+and the reference has no drift. `verified_scenario_percent` measures only the
+specified scenarios—not the percentage of the entire product implemented.
 
-Artifacts must record fixtures, actions and observed results, including visible
-behavior, durable state, commands, errors and relevant performance measurements.
-Use identical inputs for both clients. Native evidence is invalidated when the
-Rust source or Cargo manifest/lockfile changes. Reference evidence must match
-the pinned fork revision.
-
-The evaluator currently checks evidence integrity and coverage gates. It does
-not execute client actions or independently judge artifact assertions; paired
-behavioral runners and human review are still required. Do not convert a source
-inventory or a successful build into a behavioral pass.
-
-Tracking: [evaluation issue #44](https://github.com/ricotrevisan/t3code/issues/44).
-Workstream issue URLs are in `parity/issues.json`.
+Tracking: [evaluation #44](https://github.com/ricotrevisan/t3code/issues/44).
+Workstream URLs are in `parity/issues.json`.
