@@ -68,6 +68,13 @@ impl NativeApp {
             }
         })];
         subscriptions.push(
+            cx.subscribe_in(&custom_snooze, window, |app, _, event, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.snooze_custom(cx);
+                }
+            }),
+        );
+        subscriptions.push(
             cx.subscribe_in(&composer, window, |app, _, event, window, cx| {
                 if matches!(event, InputEvent::Change)
                     && let Some(id) = app.selected_thread.clone()
