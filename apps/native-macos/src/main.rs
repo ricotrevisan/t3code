@@ -1,6 +1,6 @@
 use gpui::{
-    App, Application, Bounds, Context, Entity, Subscription, Task, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, Entity, FocusHandle, KeyBinding, Subscription, Task, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Root,
@@ -10,13 +10,33 @@ use gpui_component::{
 };
 use serde_json::{Value, json};
 use t3code_native_macos::{
-    auth, commands, connection, credentials, drafts, shell, sidebar, thread,
+    auth, commands, connection, credentials, drafts, palette, shell, sidebar, thread,
 };
+
+gpui::actions!(
+    native,
+    [
+        TogglePalette,
+        ClosePalette,
+        PaletteNext,
+        PalettePrevious,
+        NewThread,
+        StashPrompt,
+        ToggleSettle,
+        TogglePin,
+        QuitNative
+    ]
+);
 
 #[cfg(test)]
 mod ui_tests;
 
 struct NativeApp {
+    focus: FocusHandle,
+    palette_open: bool,
+    palette_query: Entity<InputState>,
+    palette_index: usize,
+    previous_focus: Option<FocusHandle>,
     shell: shell::Shell,
     archived_shell: shell::Shell,
     detail: thread::ThreadDetail,
@@ -72,6 +92,8 @@ impl NativeApp {
                 .masked(true)
                 .placeholder("Pairing URL or one-time token")
         });
+        let palette_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search commands…"));
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Project / thread title"));
         let workspace =
             cx.new(|cx| InputState::new(window, cx).placeholder("Absolute project directory"));
@@ -117,7 +139,37 @@ impl NativeApp {
                 }
             }),
         );
+        subscriptions.push(
+            cx.subscribe_in(
+                &palette_query,
+                window,
+                |app, _, event, window, cx| match event {
+                    InputEvent::Change => {
+                        app.palette_index = 0;
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => {
+                        if let Some(entry) = palette::matching(
+                            &app.palette_query.read(cx).value(),
+                            app.selected_thread.is_some(),
+                        )
+                        .get(app.palette_index)
+                        {
+                            let command = entry.command;
+                            app.close_palette(window, cx);
+                            app.execute_command(command, window, cx);
+                        }
+                    }
+                    _ => {}
+                },
+            ),
+        );
         let mut app = Self {
+            focus: cx.focus_handle(),
+            palette_open: false,
+            palette_query,
+            palette_index: 0,
+            previous_focus: None,
             shell: shell::Shell::default(),
             archived_shell: shell::Shell::default(),
             detail: thread::ThreadDetail::default(),
@@ -169,6 +221,132 @@ impl NativeApp {
             }
         }
         app
+    }
+
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            self.close_palette(window, cx);
+            return;
+        }
+        self.previous_focus = window.focused(cx);
+        self.palette_open = true;
+        self.palette_index = 0;
+        self.palette_query.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        if let Some(focus) = self.previous_focus.take() {
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+
+    fn move_palette(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let count = palette::matching(
+            &self.palette_query.read(cx).value(),
+            self.selected_thread.is_some(),
+        )
+        .len();
+        if count > 0 {
+            self.palette_index = if forward {
+                (self.palette_index + 1) % count
+            } else {
+                (self.palette_index + count - 1) % count
+            };
+        }
+        cx.notify();
+    }
+
+    fn execute_command(
+        &mut self,
+        command: palette::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use palette::Command;
+        match command {
+            Command::AddProject => match commands::create_project(
+                &self.title.read(cx).value(),
+                &self.workspace.read(cx).value(),
+            ) {
+                Ok(command) => self.dispatch(command, cx),
+                Err(error) => {
+                    self.status = error.into();
+                    cx.notify();
+                }
+            },
+            Command::NewThread => {
+                if let Some(project) = &self.selected_project {
+                    let selection = json!({"instanceId":self.provider.read(cx).value().as_str(),"model":self.model.read(cx).value().as_str()});
+                    match commands::create_thread(project, &self.title.read(cx).value(), selection)
+                    {
+                        Ok(command) => self.dispatch(command, cx),
+                        Err(error) => {
+                            self.status = error.into();
+                            cx.notify();
+                        }
+                    }
+                } else {
+                    self.status = "Select a project first".into();
+                    cx.notify();
+                }
+            }
+            Command::Search => self.search.update(cx, |input, cx| input.focus(window, cx)),
+            Command::CustomSnooze => self
+                .custom_snooze
+                .update(cx, |input, cx| input.focus(window, cx)),
+            Command::Stash => self.stash_prompt(false, window, cx),
+            Command::RestoreStash => self.stash_prompt(true, window, cx),
+            Command::Connect => self.connect(cx),
+            Command::Disconnect => self.disconnect(cx),
+            _ => self.lifecycle(
+                match command {
+                    Command::Rename => "thread.meta.update",
+                    Command::Archive => "thread.archive",
+                    Command::Unarchive => "thread.unarchive",
+                    Command::Settle => "thread.settle",
+                    Command::Unsettle => "thread.unsettle",
+                    Command::Snooze => "thread.snooze",
+                    Command::Unsnooze => "thread.unsnooze",
+                    Command::Pin => "thread.pin",
+                    Command::Unpin => "thread.unpin",
+                    Command::Delete => "thread.delete",
+                    Command::Interrupt => "thread.turn.interrupt",
+                    Command::Stop => "thread.session.stop",
+                    _ => unreachable!(),
+                },
+                cx,
+            ),
+        }
+    }
+
+    fn toggle_thread_property(&mut self, pin: bool, cx: &mut Context<Self>) {
+        let selected = self.selected_thread.as_ref().and_then(|id| {
+            self.shell
+                .threads
+                .iter()
+                .chain(&self.archived_shell.threads)
+                .find(|thread| &thread.id == id)
+        });
+        let kind = if pin {
+            if selected.is_some_and(|thread| thread.pinned_at.is_some()) {
+                "thread.unpin"
+            } else {
+                "thread.pin"
+            }
+        } else if selected
+            .is_some_and(|thread| thread.settled_override.as_deref() == Some("settled"))
+        {
+            "thread.unsettle"
+        } else {
+            "thread.settle"
+        };
+        self.lifecycle(kind, cx);
     }
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
@@ -886,69 +1064,363 @@ impl Render for NativeApp {
                 );
             }
         }
-        div().flex().size_full().bg(rgb(0x16181d)).text_color(rgb(0xe5e7eb))
-            .child(div().id("sidebar").flex().flex_col().w(px(280.)).h_full().overflow_y_scroll().p_3().gap_3()
-                .child("T3 Code · Native")
-                .child(Input::new(&self.server))
-                .child(Input::new(&self.pairing))
-                .child(Button::new("pair").debug_selector(||"pair".into()).label("Pair and connect").on_click(cx.listener(|app,_,window,cx|app.pair(window,cx))))
-                .child(Button::new("remember-credential").debug_selector(||"remember-credential".into()).label("Remember in Keychain").on_click(cx.listener(|app,_,_,cx|app.remember_credential(cx))))
-                .child(Button::new("load-credential").debug_selector(||"load-credential".into()).label("Connect remembered").on_click(cx.listener(|app,_,_,cx|app.credential_operation(credentials::Operation::Load,cx))))
-                .child(Button::new("forget-credential").debug_selector(||"forget-credential".into()).label("Forget credential").on_click(cx.listener(|app,_,_,cx|app.forget_credential(cx))))
-                .child(Button::new("connect").label("Connect / retry").on_click(cx.listener(|app,_,_,cx|app.connect(cx))))
-                .child(Button::new("disconnect").label("Disconnect").on_click(cx.listener(|app,_,_,cx|app.disconnect(cx))))
-                .child(Input::new(&self.search)).child(Button::new("search").label("Search history").on_click(cx.listener(|app,_,_,cx|app.search_threads(cx))))
-                .child(search_results)
-                .child(div().flex().flex_wrap().gap_2().children([
-                    ("active-view","Active",sidebar::View::Active),
-                    ("settled-view","Settled",sidebar::View::Settled),
-                    ("snoozed-view","Snoozed",sidebar::View::Snoozed),
-                    ("archived-view","Archived",sidebar::View::Archived),
-                ].into_iter().map(|(id,label,view)|Button::new(id).debug_selector(move||id.into()).label(label).on_click(cx.listener(move|app,_,_,cx| {
-                    app.sidebar_view = view;
-                    if view == sidebar::View::Archived { app.perform("orchestration.getArchivedShellSnapshot",json!({}),None,cx); }
-                    cx.notify();
-                })))))
-                .children(projects))
-            .child(div().flex().flex_col().flex_1().h_full().p_3().gap_3()
-                .child(self.status.clone())
-                .children(self.storage_error.clone().map(|error|div().text_color(rgb(0xfca5a5)).child(error)))
-                .child(div().flex().gap_2().child(Input::new(&self.title)).child(Input::new(&self.workspace)))
-                .child(div().flex().gap_2()
-                    .child(Button::new("add-project").label("Add project").on_click(cx.listener(|app,_,_,cx| {
-                        match commands::create_project(app.title.read(cx).value().as_str(), app.workspace.read(cx).value().as_str()) { Ok(command) => app.dispatch(command,cx), Err(error) => { app.status = error.into(); cx.notify(); } }
-                    })))
-                    .child(Button::new("new-thread").label("New thread").on_click(cx.listener(|app,_,_,cx| {
-                        if let Some(project) = &app.selected_project {
-                            let selection = json!({"instanceId":app.provider.read(cx).value().as_str(),"model":app.model.read(cx).value().as_str()});
-                            match commands::create_thread(project,app.title.read(cx).value().as_str(),selection) { Ok(command) => app.dispatch(command,cx), Err(error) => { app.status = error.into(); cx.notify(); } }
-                        } else { app.status = "Select a project first".into(); cx.notify(); }
-                    })))
-                    .child(Button::new("rename").debug_selector(|| "rename".into()).label("Rename thread").on_click(cx.listener(|app,_,_,cx|app.lifecycle("thread.meta.update",cx)))))
-                .child(div().flex().flex_wrap().gap_2().children([
-                    ("archive","Archive","thread.archive"),("unarchive","Unarchive","thread.unarchive"),
-                    ("settle","Settle","thread.settle"),("unsettle","Unsettle","thread.unsettle"),
-                    ("snooze","Snooze 1h","thread.snooze"),("unsnooze","Unsnooze","thread.unsnooze"),
-                    ("pin","Pin","thread.pin"),("unpin","Unpin","thread.unpin"),
-                    ("delete","Delete thread","thread.delete"),
-                ].into_iter().map(|(id,label,kind)| Button::new(id).debug_selector(move || id.into()).label(label).on_click(cx.listener(move |app,_,_,cx|app.lifecycle(kind,cx))))))
-                .child(div().flex().gap_2().child(Input::new(&self.custom_snooze)).child(Button::new("custom-snooze").label("Custom snooze").on_click(cx.listener(|app,_,_,cx|app.snooze_custom(cx)))))
-                .child(conversation)
-                .child(div().flex().gap_2().child(Input::new(&self.provider)).child(Input::new(&self.model)))
-                .child(Input::new(&self.composer))
-                .child(div().flex().gap_2()
-                    .child(Button::new("send").debug_selector(|| "send".into()).label("Send").on_click(cx.listener(|app,_,window,cx|app.send_prompt(window,cx))))
-                    .child(Button::new("stash").debug_selector(|| "stash".into()).label("Stash prompt").on_click(cx.listener(|app,_,window,cx|app.stash_prompt(false,window,cx))))
-                    .child(Button::new("restore-stash").debug_selector(|| "restore-stash".into()).label("Restore stashed").on_click(cx.listener(|app,_,window,cx|app.stash_prompt(true,window,cx))))
-                    .child(Button::new("interrupt").label("Interrupt").on_click(cx.listener(|app,_,_,cx|app.lifecycle("thread.turn.interrupt",cx))))
-                    .child(Button::new("stop").label("Stop session").on_click(cx.listener(|app,_,_,cx|app.lifecycle("thread.session.stop",cx)))))
-                .child("Experimental native slice — feature parity is still being evaluated"))
+        let palette =
+            self.palette_open.then(|| {
+                let entries = palette::matching(
+                    &self.palette_query.read(cx).value(),
+                    self.selected_thread.is_some(),
+                );
+                div()
+                    .id("command-palette")
+                    .key_context("NativePalette")
+                    .absolute()
+                    .top(px(60.))
+                    .left(px(300.))
+                    .w(px(650.))
+                    .max_h(px(600.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_4()
+                    .bg(rgb(0x242831))
+                    .border_1()
+                    .border_color(rgb(0x525866))
+                    .shadow_lg()
+                    .child(div().flex().justify_between().child("Commands").child(
+                        Button::new("close-palette").label("Close").on_click(
+                            cx.listener(|app, _, window, cx| app.close_palette(window, cx)),
+                        ),
+                    ))
+                    .child(Input::new(&self.palette_query))
+                    .when(entries.is_empty(), |view| {
+                        view.child("No matching commands")
+                    })
+                    .children(entries.into_iter().enumerate().map(|(index, entry)| {
+                        let command = entry.command;
+                        Button::new(gpui::SharedString::from(format!("palette-{index}")))
+                            .debug_selector(move || format!("palette-{index}"))
+                            .label(format!(
+                                "{}{}",
+                                if index == self.palette_index {
+                                    "› "
+                                } else {
+                                    ""
+                                },
+                                entry.label
+                            ))
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.close_palette(window, cx);
+                                app.execute_command(command, window, cx);
+                            }))
+                    }))
+            });
+        div()
+            .relative()
+            .key_context("NativeApp")
+            .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|app, _: &TogglePalette, window, cx| app.toggle_palette(window, cx)),
+            )
+            .on_action(
+                cx.listener(|app, _: &ClosePalette, window, cx| app.close_palette(window, cx)),
+            )
+            .on_action(cx.listener(|app, _: &PaletteNext, _, cx| app.move_palette(true, cx)))
+            .on_action(cx.listener(|app, _: &PalettePrevious, _, cx| app.move_palette(false, cx)))
+            .on_action(cx.listener(|app, _: &NewThread, window, cx| {
+                app.execute_command(palette::Command::NewThread, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &StashPrompt, window, cx| {
+                app.execute_command(palette::Command::Stash, window, cx)
+            }))
+            .on_action(
+                cx.listener(|app, _: &ToggleSettle, _, cx| app.toggle_thread_property(false, cx)),
+            )
+            .on_action(
+                cx.listener(|app, _: &TogglePin, _, cx| app.toggle_thread_property(true, cx)),
+            )
+            .flex()
+            .size_full()
+            .bg(rgb(0x16181d))
+            .text_color(rgb(0xe5e7eb))
+            .child(
+                div()
+                    .id("sidebar")
+                    .flex()
+                    .flex_col()
+                    .w(px(280.))
+                    .h_full()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .gap_3()
+                    .child("T3 Code · Native")
+                    .child(
+                        Button::new("commands")
+                            .debug_selector(|| "commands".into())
+                            .label("Commands ⌘K")
+                            .on_click(
+                                cx.listener(|app, _, window, cx| app.toggle_palette(window, cx)),
+                            ),
+                    )
+                    .child(Input::new(&self.server))
+                    .child(Input::new(&self.pairing))
+                    .child(
+                        Button::new("pair")
+                            .debug_selector(|| "pair".into())
+                            .label("Pair and connect")
+                            .on_click(cx.listener(|app, _, window, cx| app.pair(window, cx))),
+                    )
+                    .child(
+                        Button::new("remember-credential")
+                            .debug_selector(|| "remember-credential".into())
+                            .label("Remember in Keychain")
+                            .on_click(cx.listener(|app, _, _, cx| app.remember_credential(cx))),
+                    )
+                    .child(
+                        Button::new("load-credential")
+                            .debug_selector(|| "load-credential".into())
+                            .label("Connect remembered")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.credential_operation(credentials::Operation::Load, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("forget-credential")
+                            .debug_selector(|| "forget-credential".into())
+                            .label("Forget credential")
+                            .on_click(cx.listener(|app, _, _, cx| app.forget_credential(cx))),
+                    )
+                    .child(
+                        Button::new("connect")
+                            .label("Connect / retry")
+                            .on_click(cx.listener(|app, _, _, cx| app.connect(cx))),
+                    )
+                    .child(
+                        Button::new("disconnect")
+                            .label("Disconnect")
+                            .on_click(cx.listener(|app, _, _, cx| app.disconnect(cx))),
+                    )
+                    .child(Input::new(&self.search))
+                    .child(
+                        Button::new("search")
+                            .label("Search history")
+                            .on_click(cx.listener(|app, _, _, cx| app.search_threads(cx))),
+                    )
+                    .child(search_results)
+                    .child(
+                        div().flex().flex_wrap().gap_2().children(
+                            [
+                                ("active-view", "Active", sidebar::View::Active),
+                                ("settled-view", "Settled", sidebar::View::Settled),
+                                ("snoozed-view", "Snoozed", sidebar::View::Snoozed),
+                                ("archived-view", "Archived", sidebar::View::Archived),
+                            ]
+                            .into_iter()
+                            .map(|(id, label, view)| {
+                                Button::new(id)
+                                    .debug_selector(move || id.into())
+                                    .label(label)
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.sidebar_view = view;
+                                        if view == sidebar::View::Archived {
+                                            app.perform(
+                                                "orchestration.getArchivedShellSnapshot",
+                                                json!({}),
+                                                None,
+                                                cx,
+                                            );
+                                        }
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
+                    )
+                    .children(projects),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .h_full()
+                    .p_3()
+                    .gap_3()
+                    .child(self.status.clone())
+                    .children(
+                        self.storage_error
+                            .clone()
+                            .map(|error| div().text_color(rgb(0xfca5a5)).child(error)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Input::new(&self.title))
+                            .child(Input::new(&self.workspace)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("add-project").label("Add project").on_click(
+                                cx.listener(|app, _, window, cx| {
+                                    app.execute_command(palette::Command::AddProject, window, cx)
+                                }),
+                            ))
+                            .child(Button::new("new-thread").label("New thread").on_click(
+                                cx.listener(|app, _, window, cx| {
+                                    app.execute_command(palette::Command::NewThread, window, cx)
+                                }),
+                            ))
+                            .child(
+                                Button::new("rename")
+                                    .debug_selector(|| "rename".into())
+                                    .label("Rename thread")
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.lifecycle("thread.meta.update", cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div().flex().flex_wrap().gap_2().children(
+                            [
+                                ("archive", "Archive", "thread.archive"),
+                                ("unarchive", "Unarchive", "thread.unarchive"),
+                                ("settle", "Settle", "thread.settle"),
+                                ("unsettle", "Unsettle", "thread.unsettle"),
+                                ("snooze", "Snooze 1h", "thread.snooze"),
+                                ("unsnooze", "Unsnooze", "thread.unsnooze"),
+                                ("pin", "Pin", "thread.pin"),
+                                ("unpin", "Unpin", "thread.unpin"),
+                                ("delete", "Delete thread", "thread.delete"),
+                            ]
+                            .into_iter()
+                            .map(|(id, label, kind)| {
+                                Button::new(id)
+                                    .debug_selector(move || id.into())
+                                    .label(label)
+                                    .on_click(
+                                        cx.listener(move |app, _, _, cx| app.lifecycle(kind, cx)),
+                                    )
+                            }),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Input::new(&self.custom_snooze))
+                            .child(
+                                Button::new("custom-snooze")
+                                    .label("Custom snooze")
+                                    .on_click(cx.listener(|app, _, _, cx| app.snooze_custom(cx))),
+                            ),
+                    )
+                    .child(conversation)
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Input::new(&self.provider))
+                            .child(Input::new(&self.model)),
+                    )
+                    .child(Input::new(&self.composer))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::new("send")
+                                    .debug_selector(|| "send".into())
+                                    .label("Send")
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.send_prompt(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("stash")
+                                    .debug_selector(|| "stash".into())
+                                    .label("Stash prompt")
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.stash_prompt(false, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("restore-stash")
+                                    .debug_selector(|| "restore-stash".into())
+                                    .label("Restore stashed")
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.stash_prompt(true, window, cx)
+                                    })),
+                            )
+                            .child(Button::new("interrupt").label("Interrupt").on_click(
+                                cx.listener(|app, _, _, cx| {
+                                    app.lifecycle("thread.turn.interrupt", cx)
+                                }),
+                            ))
+                            .child(Button::new("stop").label("Stop session").on_click(
+                                cx.listener(|app, _, _, cx| {
+                                    app.lifecycle("thread.session.stop", cx)
+                                }),
+                            )),
+                    )
+                    .child("Experimental native slice — feature parity is still being evaluated"),
+            )
+            .children(palette)
     }
+}
+
+fn bind_native_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", QuitNative, None),
+        KeyBinding::new("cmd-k", TogglePalette, Some("NativeApp")),
+        KeyBinding::new("cmd-s", StashPrompt, Some("NativeApp")),
+        KeyBinding::new("cmd-n", NewThread, Some("NativeApp")),
+        KeyBinding::new("cmd-shift-o", NewThread, Some("NativeApp")),
+        KeyBinding::new("cmd-shift-s", ToggleSettle, Some("NativeApp")),
+        KeyBinding::new("cmd-shift-p", TogglePin, Some("NativeApp")),
+        KeyBinding::new(
+            "escape",
+            ClosePalette,
+            Some("NativeApp > NativePalette > Input"),
+        ),
+        KeyBinding::new(
+            "down",
+            PaletteNext,
+            Some("NativeApp > NativePalette > Input"),
+        ),
+        KeyBinding::new(
+            "up",
+            PalettePrevious,
+            Some("NativeApp > NativePalette > Input"),
+        ),
+    ]);
 }
 
 fn main() {
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
+        bind_native_keys(cx);
+        cx.on_action(|_: &QuitNative, cx| cx.quit());
+        cx.set_menus(vec![
+            gpui::Menu {
+                name: "T3 Code Native".into(),
+                items: vec![gpui::MenuItem::action("Quit", QuitNative)],
+            },
+            gpui::Menu {
+                name: "Thread".into(),
+                items: vec![
+                    gpui::MenuItem::action("New thread", NewThread),
+                    gpui::MenuItem::action("Toggle settlement", ToggleSettle),
+                    gpui::MenuItem::action("Toggle pin", TogglePin),
+                    gpui::MenuItem::action("Stash prompt", StashPrompt),
+                ],
+            },
+            gpui::Menu {
+                name: "View".into(),
+                items: vec![gpui::MenuItem::action("Commands", TogglePalette)],
+            },
+        ]);
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(900.)), cx);
         cx.open_window(

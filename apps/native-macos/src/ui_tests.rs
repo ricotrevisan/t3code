@@ -9,7 +9,10 @@ fn harness(
     &mut VisualTestContext,
     async_channel::Receiver<connection::Command>,
 ) {
-    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        bind_native_keys(cx);
+    });
     let mut app = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
         let entity = cx.new(|cx| NativeApp::new(window, cx, false));
@@ -32,6 +35,116 @@ fn harness(
     );
     cx.run_until_parked();
     (app, cx, requests)
+}
+
+#[gpui::test]
+fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("archive");
+    cx.simulate_keystrokes("enter");
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("expected archive mutation");
+    };
+    assert_eq!(tag, "orchestration.dispatchCommand");
+    assert_eq!(payload["type"], "thread.archive");
+    assert_eq!(payload["threadId"], "t");
+    reply.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    cx.run_until_parked();
+    assert!(!app.read_with(cx, |app, _| app.palette_open));
+    cx.simulate_keystrokes("cmd-k escape");
+    cx.simulate_input("still the composer");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        "still the composer"
+    );
+}
+
+#[gpui::test]
+fn palette_arrows_choose_reverse_action_and_pin_shortcut_tracks_server_state(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("archive");
+    cx.simulate_keystrokes("down enter");
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected reverse action");
+    };
+    assert_eq!(payload["type"], "thread.unarchive");
+    reply.send_blocking(Err("already active".into())).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.status.clone()),
+        "already active"
+    );
+    cx.simulate_keystrokes("cmd-shift-p");
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected pin");
+    };
+    assert_eq!(payload["type"], "thread.pin");
+    reply.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            let mut pinned = app.shell.threads[0].clone();
+            pinned.pinned_at = Some("2026-01-01T00:00:00Z".into());
+            app.shell
+                .apply(shell::ShellItem::ThreadUpserted {
+                    sequence: 1,
+                    thread: pinned,
+                })
+                .unwrap();
+            cx.notify();
+        })
+    });
+    cx.simulate_keystrokes("cmd-shift-p");
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected unpin");
+    };
+    assert_eq!(payload["type"], "thread.unpin");
+    reply.send_blocking(Ok(json!({"sequence":2}))).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn palette_deletion_still_requires_confirmation_and_shortcut_stash_preserves_text(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_input("preserve 🌍");
+    cx.simulate_keystrokes("cmd-s");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        ""
+    );
+    assert_eq!(
+        app.read_with(cx, |app, _| app.stash_memory.clone()),
+        vec!["preserve 🌍"]
+    );
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("delete");
+    cx.simulate_keystrokes("enter");
+    assert!(
+        requests.try_recv().is_err(),
+        "first activation must not delete"
+    );
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("delete");
+    cx.simulate_keystrokes("enter");
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected confirmed deletion");
+    };
+    assert_eq!(payload["type"], "thread.delete");
+    reply
+        .send_blocking(Err("owned fixture rejection".into()))
+        .unwrap();
+    cx.run_until_parked();
 }
 
 #[gpui::test]

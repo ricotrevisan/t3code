@@ -56,6 +56,11 @@ the final edit. Environment origins and thread IDs isolate drafts.
   editable; provider setup and catalog UI remain unimplemented.
 - Draft recovery and prompt stash. Sending failure and edits made while a send
   is pending preserve the user's text.
+- Searchable native command palette (`Cmd+K`) with keyboard selection, Escape
+  dismissal and focus restoration. Initial menus and fork-default shortcuts
+  expose new-thread, stash, settlement and pin actions. Palette deletion uses
+  the same confirmation as chat controls. Custom keybinding configuration and
+  the complete current-client command catalog still require parity work.
 
 Important gaps include full connection-management UI and relay/DPoP,
 multi-environment navigation, queue management, attachments/context, approvals,
