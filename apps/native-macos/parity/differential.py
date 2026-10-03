@@ -65,7 +65,9 @@ def cases():
     add("streaming-append-final-replace", "conversation-02", [message("Hello"), message(", 世界 🌍"), message("Hello, 世界 🌍", False)])
     add("empty-completion-retains-text", "conversation-02", [message("Hello"), message("", False)])
     add("reasoning-stays-separate", "conversation-02", [event("thread.message-sent", messageId="reasoning-1", role="reasoning", text="Thinking", turnId="turn-1", streaming=True, createdAt=DATE, updatedAt=LATER), message("Answer", False)])
-    add("context-and-attachments-survive-deltas", "conversation-01", [event("thread.message-sent", messageId="user-1", role="user", text="Question", turnId=None, streaming=False, createdAt=DATE, updatedAt=LATER, attachments=[]), message("Answer", False)])
+    attachment = {"type":"image","id":"image-1","name":"fixture.png","mimeType":"image/png","sizeBytes":24}
+    message_context = {"version":1,"records":[{"version":1,"contextId":"ctx-1","kind":"image","label":"Fixture image","attachmentId":"image-1","name":"fixture.png","mimeType":"image/png","sizeBytes":24}]}
+    add("context-and-attachments-survive-deltas", "conversation-01", [message("Answer",attachments=[attachment],context=message_context), message(" grows"), message("",False)])
     add("assistant-completion-does-not-settle-running-session", "conversation-02", [message("Commentary", False)], session=session())
     add("ready-session-settles-whole-turn", "conversation-02", [event("thread.session-set", session=session()), message("Commentary", False), event("thread.session-set", session=session("ready"))])
     add("error-session-settles-as-error", "conversation-02", [event("thread.session-set", session=session()), event("thread.session-set", session=session("error", lastError="Fixture failure"))])
