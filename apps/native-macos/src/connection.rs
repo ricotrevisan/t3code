@@ -1,6 +1,7 @@
 //! Bearer authorization and Effect RPC shell subscription on a dedicated runtime.
 //! Credentials stay off argv, logs and persisted app state.
 use crate::protocol::{self, ClientMessage, RequestId, RpcExit, ServerMessage};
+use crate::reconnect::{Backoff, Failure};
 use crate::shell::ShellItem;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -14,6 +15,7 @@ use url::Url;
 
 pub enum Update {
     Status(String),
+    Resynchronizing,
     Shell(ShellItem),
     Thread { thread_id: String, item: Value },
 }
@@ -55,7 +57,7 @@ pub async fn call(
     receiver
         .recv()
         .await
-        .map_err(|_| "Connection closed before RPC completed".to_owned())?
+        .map_err(|_| "Connection lost before receipt; RPC outcome is unknown".to_owned())?
 }
 
 pub struct ConnectionOptions {
@@ -64,6 +66,9 @@ pub struct ConnectionOptions {
 }
 
 impl ConnectionOptions {
+    pub fn origin(&self) -> String {
+        self.base.origin().ascii_serialization()
+    }
     pub fn new(base: &str, token: String) -> Result<Self, &'static str> {
         let base = Url::parse(base).map_err(|_| "Invalid server URL")?;
         if !matches!(base.scheme(), "http" | "https")
@@ -115,33 +120,9 @@ pub fn start_session(options: ConnectionOptions) -> Session {
             }
         };
         runtime.block_on(async move {
-            let work = async {
-                let _ = sender.send(Update::Status("Authorizing…".into())).await;
-                let client = reqwest::Client::builder().timeout(Duration::from_secs(15))
-                    .redirect(reqwest::redirect::Policy::none()).build().map_err(|_| "Could not create HTTP client")?;
-                let response = client.post(options.base.join("api/auth/websocket-ticket").map_err(|_| "Invalid ticket endpoint")?)
-                    .bearer_auth(&options.token).send().await.map_err(|_| "Could not reach authorization endpoint")?;
-                if !response.status().is_success() { return Err("Authorization rejected; check token and scopes"); }
-                let ticket: Ticket = response.json().await.map_err(|_| "Invalid authorization response")?;
-                let mut socket_url = options.base.clone();
-                let scheme = if socket_url.scheme() == "https" { "wss" } else { "ws" };
-                socket_url.set_scheme(scheme).map_err(|_| "Invalid WebSocket scheme")?;
-                socket_url.set_path("/ws");
-                socket_url.query_pairs_mut().append_pair("wsTicket", &ticket.ticket).append_pair("orchestrationProtocol", "1")
-                    .append_pair("clientSurface", "desktop")
-                    .append_pair("clientDeviceType", "desktop")
-                    .append_pair("clientOs", "macOS")
-                    .append_pair("clientAppVersion", env!("CARGO_PKG_VERSION"))
-                    .append_pair("connectionMethod", "direct");
-                let (socket, _) = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(socket_url.as_str()))
-                    .await.map_err(|_| "WebSocket connection timed out")?
-                    .map_err(|_| "WebSocket connection rejected")?;
-                let _ = sender.send(Update::Status("Loading projects and threads…".into())).await;
-                run_session(socket, &sender, &requests).await
-            };
-            // Dropping the UI receiver cancels both authorization and the socket worker.
+            // Dropping the UI receiver cancels authorization, retries and the socket worker.
             tokio::select! {
-                result = work => { if let Err(message) = result { let _ = sender.send(Update::Status(message.into())).await; } }
+                _ = supervise(options,&sender,&requests) => {}
                 _ = sender.closed() => {}
             }
         });
@@ -149,6 +130,172 @@ pub fn start_session(options: ConnectionOptions) -> Session {
     Session {
         updates: receiver,
         commands,
+    }
+}
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect(options: &ConnectionOptions) -> Result<Socket, Failure> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| Failure::blocked("Could not create HTTP client"))?;
+    let response = client
+        .post(
+            options
+                .base
+                .join("api/auth/websocket-ticket")
+                .map_err(|_| Failure::blocked("Invalid ticket endpoint"))?,
+        )
+        .bearer_auth(&options.token)
+        .send()
+        .await
+        .map_err(|_| Failure::transient("Could not reach authorization endpoint"))?;
+    if !response.status().is_success() {
+        if response.status().is_server_error() || response.status().as_u16() == 429 {
+            return Err(Failure::transient(
+                "Authorization endpoint temporarily unavailable",
+            ));
+        }
+        return Err(Failure::blocked(
+            "Authorization rejected; check token and scopes",
+        ));
+    }
+    let ticket: Ticket = response
+        .json()
+        .await
+        .map_err(|_| Failure::blocked("Invalid authorization response"))?;
+    if ticket.ticket.trim().is_empty() {
+        return Err(Failure::blocked("Invalid authorization response"));
+    }
+    let mut socket_url = options.base.clone();
+    let scheme = if socket_url.scheme() == "https" {
+        "wss"
+    } else {
+        "ws"
+    };
+    socket_url
+        .set_scheme(scheme)
+        .map_err(|_| Failure::blocked("Invalid WebSocket scheme"))?;
+    socket_url.set_path("/ws");
+    socket_url
+        .query_pairs_mut()
+        .append_pair("wsTicket", &ticket.ticket)
+        .append_pair("orchestrationProtocol", "1")
+        .append_pair("clientSurface", "desktop")
+        .append_pair("clientDeviceType", "desktop")
+        .append_pair("clientOs", "macOS")
+        .append_pair("clientAppVersion", env!("CARGO_PKG_VERSION"))
+        .append_pair("connectionMethod", "direct");
+    let (socket, _) = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio_tungstenite::connect_async(socket_url.as_str()),
+    )
+    .await
+    .map_err(|_| Failure::transient("WebSocket connection timed out"))?
+    .map_err(|error| match error {
+        tokio_tungstenite::tungstenite::Error::Http(response)
+            if response.status().is_client_error() && response.status().as_u16() != 429 =>
+        {
+            Failure::blocked("WebSocket authorization or protocol rejected")
+        }
+        _ => Failure::transient("WebSocket connection unavailable"),
+    })?;
+    Ok(socket)
+}
+
+async fn reject_disconnected(command: Command, selected: &mut Option<String>) {
+    match command {
+        Command::SelectThread(id) => *selected = id,
+        Command::Call { reply, .. } => {
+            let _ = reply
+                .send(Err(
+                    "Disconnected; request was not sent. Retry after synchronization.".into(),
+                ))
+                .await;
+        }
+    }
+}
+
+async fn supervise(
+    options: ConnectionOptions,
+    sender: &async_channel::Sender<Update>,
+    requests: &async_channel::Receiver<Command>,
+) {
+    let mut selected = None;
+    let mut backoff = Backoff::default();
+    loop {
+        let _ = sender.send(Update::Resynchronizing).await;
+        let _ = sender.send(Update::Status("Authorizing…".into())).await;
+        // Commands arriving during authorization must not wait and later execute unexpectedly.
+        let connection = connect(&options);
+        tokio::pin!(connection);
+        let result = loop {
+            tokio::select! {
+                result=&mut connection => break result,
+                command=requests.recv(), if !requests.is_closed() => { if let Ok(command)=command { reject_disconnected(command,&mut selected).await; } }
+            }
+        };
+        let failure = match result {
+            Ok(socket) => {
+                let _ = sender
+                    .send(Update::Status("Loading projects and threads…".into()))
+                    .await;
+                let mut reached_sync = false;
+                let result = run_selected_session(
+                    socket,
+                    sender,
+                    requests,
+                    &mut selected,
+                    &mut reached_sync,
+                )
+                .await;
+                if reached_sync {
+                    backoff.reset();
+                }
+                match result {
+                    Ok(()) => return,
+                    Err(message) => match message {
+                        "Unsupported or malformed RPC message"
+                        | "Unsupported shell stream event"
+                        | "Server rejected the RPC protocol"
+                        | "Server reported an RPC defect"
+                        | "Unexpected RPC request ID"
+                        | "Empty RPC stream chunk"
+                        | "Unary RPC returned a stream chunk" => Failure::blocked(message),
+                        "Client closed" => return,
+                        _ => Failure::transient(message),
+                    },
+                }
+            }
+            Err(failure) => failure,
+        };
+        // No queued mutation survives the disconnected epoch, regardless of whether it was read.
+        while let Ok(command) = requests.try_recv() {
+            reject_disconnected(command, &mut selected).await;
+        }
+        if !failure.retryable {
+            let _ = sender.send(Update::Status(failure.message.into())).await;
+            return;
+        }
+        let delay = backoff.delay();
+        let _ = sender.send(Update::Resynchronizing).await;
+        let _ = sender
+            .send(Update::Status(format!(
+                "{} · reconnecting",
+                failure.message
+            )))
+            .await;
+        let wait = tokio::time::sleep(delay);
+        tokio::pin!(wait);
+        loop {
+            tokio::select! {
+                _=&mut wait => break,
+                command=requests.recv(), if !requests.is_closed() => { if let Ok(command)=command { reject_disconnected(command,&mut selected).await; } }
+            }
+        }
     }
 }
 
@@ -184,10 +331,24 @@ enum Pending {
     Call(async_channel::Sender<Result<Value, String>>),
 }
 
+#[cfg(test)]
 async fn run_session<S>(
+    socket: tokio_tungstenite::WebSocketStream<S>,
+    sender: &async_channel::Sender<Update>,
+    commands: &async_channel::Receiver<Command>,
+) -> Result<(), &'static str>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    run_selected_session(socket, sender, commands, &mut None, &mut false).await
+}
+
+async fn run_selected_session<S>(
     mut socket: tokio_tungstenite::WebSocketStream<S>,
     sender: &async_channel::Sender<Update>,
     commands: &async_channel::Receiver<Command>,
+    selected: &mut Option<String>,
+    reached_sync: &mut bool,
 ) -> Result<(), &'static str>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -196,6 +357,7 @@ where
     let mut cancelled = HashSet::new();
     let mut next_id = 2u64;
     let mut commands_open = true;
+    let mut synchronized = false;
     send(
         &mut socket,
         protocol::request(
@@ -205,6 +367,14 @@ where
         ),
     )
     .await?;
+    if let Some(thread_id) = selected.as_ref() {
+        send(&mut socket,protocol::request(next_id,"orchestration.subscribeThread",json!({"threadId":thread_id,"reasoningMessages":true,"requestCompletionMarker":true}))).await?;
+        pending.insert(
+            RequestId::String(next_id.to_string()),
+            Pending::Thread(thread_id.clone()),
+        );
+        next_id += 1;
+    }
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(5),
         Duration::from_secs(5),
@@ -218,6 +388,7 @@ where
                 let id = RequestId::String(next_id.to_string());
                 match command {
                     Command::SelectThread(thread_id) => {
+                        *selected=thread_id.clone();
                         let old_ids: Vec<_> = pending.iter().filter_map(|(id, kind)| if matches!(kind, Pending::Thread(_)) { Some(id.clone()) } else { None }).collect();
                         for old in old_ids {
                             send(&mut socket, ClientMessage::Interrupt { request_id: old.clone() }).await?;
@@ -231,6 +402,10 @@ where
                         }
                     }
                     Command::Call { tag, payload, reply } => {
+                        if !synchronized {
+                            let _=reply.send(Err("History is not synchronized; request was not sent".into())).await;
+                            continue;
+                        }
                         send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
                         pending.insert(id, Pending::Call(reply));
                         next_id += 1;
@@ -259,7 +434,11 @@ where
                             if let Some(kind) = pending.get(&request_id) {
                                 for value in values {
                                     let update = match kind {
-                                        Pending::Shell => Update::Shell(serde_json::from_value(value).map_err(|_| "Unsupported shell stream event")?),
+                                        Pending::Shell => {
+                                            let item:ShellItem=serde_json::from_value(value).map_err(|_| "Unsupported shell stream event")?;
+                                            if matches!(item,ShellItem::Synchronized) { synchronized=true; *reached_sync=true; }
+                                            Update::Shell(item)
+                                        },
                                         Pending::Thread(thread_id) => Update::Thread { thread_id: thread_id.clone(), item: value },
                                         Pending::Call(_) => return Err("Unary RPC returned a stream chunk"),
                                     };
@@ -304,6 +483,10 @@ fn rpc_failure(cause: &Value) -> String {
         .unwrap_or("RequestFailed");
     format!("Server rejected request ({name})")
 }
+
+#[cfg(test)]
+#[path = "reconnect_tests.rs"]
+mod reconnect_tests;
 
 #[cfg(test)]
 mod tests {
@@ -368,6 +551,7 @@ mod tests {
                     assert!(!status.contains("private-secret"));
                     failed |= status.contains("Authorization rejected");
                 }
+                Update::Resynchronizing => {}
                 Update::Shell(_) | Update::Thread { .. } => {
                     panic!("unauthorized connection delivered shell state")
                 }

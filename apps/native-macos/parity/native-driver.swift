@@ -35,12 +35,20 @@ if args.count < 3 { fail("Usage: swift native-driver.swift <owned-native-pid> <i
 guard let pid = pid_t(args[1]), let app = NSRunningApplication(processIdentifier: pid),
       app.executableURL?.lastPathComponent == "t3code-native-macos" else { fail("Target is not the experimental native T3 client") }
 guard AXIsProcessTrusted() else { fail("Grant Accessibility to the execution host in macOS settings") }
+let command = args[2]
+let screenLocked = (CGSessionCopyCurrentDictionary() as? [String:Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
+if screenLocked {
+    if command == "inspect" {
+        output(["scope":"native accessibility observation", "pid":pid, "screen_locked":true, "capture_authorized":CGPreflightScreenCaptureAccess()])
+        exit(0)
+    }
+    fail("macOS screen is locked; unlock the Mac before native verification. No input or capture was attempted.")
+}
 let ax = AXUIElementCreateApplication(pid)
 let windows = attribute(ax, kAXWindowsAttribute) as? [AXUIElement] ?? []
 guard let window = windows.first else { fail("Native window is unavailable") }
-let command = args[2]
 if command == "inspect" {
-    output(["scope": "native accessibility observation", "pid": pid, "capture_authorized": CGPreflightScreenCaptureAccess(), "tree": tree(ax)])
+    output(["scope": "native accessibility observation", "pid": pid, "capture_authorized": CGPreflightScreenCaptureAccess(), "screen_locked": false, "tree": tree(ax)])
     exit(0)
 }
 

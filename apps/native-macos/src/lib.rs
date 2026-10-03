@@ -1,7 +1,10 @@
+pub mod auth;
 pub mod commands;
 pub mod connection;
+pub mod credentials;
 pub mod drafts;
 pub mod protocol;
+pub mod reconnect;
 pub mod shell;
 pub mod sidebar;
 pub mod thread;

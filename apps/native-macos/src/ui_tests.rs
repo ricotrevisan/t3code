@@ -35,6 +35,27 @@ fn harness(
 }
 
 #[gpui::test]
+fn changing_server_cannot_reuse_another_origins_access_credential(cx: &mut TestAppContext) {
+    let (app, cx, _) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.use_dev_credential = false;
+            app.access = Some(auth::Access {
+                origin: "http://localhost:1234".into(),
+                token: "private-first-origin".into(),
+            });
+            app.server.update(cx, |input, cx| {
+                input.set_value("http://localhost:5678", window, cx)
+            });
+            app.connect(cx);
+            assert!(app.commands.is_none());
+            assert!(app.selected_thread.is_none());
+            assert_eq!(app.status, "Enter the server origin and pair to connect");
+        })
+    });
+}
+
+#[gpui::test]
 fn unicode_multiline_prompt_clears_only_after_accepted_receipt(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_input("Hello 🌍\n世界");

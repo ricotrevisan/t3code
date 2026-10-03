@@ -14,11 +14,22 @@ cargo build --manifest-path apps/native-macos/Cargo.toml
 cargo run --manifest-path apps/native-macos/Cargo.toml
 ```
 
-For development, set `T3_NATIVE_SERVER` to the HTTP(S) server origin and supply an
-existing bearer **access token** through `T3_NATIVE_ACCESS_TOKEN`. Do not use a
-pairing-link token or put credentials in command-line arguments. The app exchanges
-the bearer credential for a one-time WebSocket ticket. Plain HTTP is accepted
-only for loopback; remote origins require HTTPS. Credentials are not persisted.
+Enter the HTTP(S) server origin and a pairing URL or one-time token, then pair.
+Pairing URLs must belong to that origin. Pairing exchanges the bootstrap token for
+a bearer access credential; the input is masked and cleared after submission.
+Use **Remember in Keychain** to retain an access credential and **Connect remembered**
+to reconnect to the entered origin after relaunch. **Forget credential** disconnects
+and removes that origin's local credential; it does not revoke the server session.
+Keychain operations run on an ordered background worker, so forgetting cannot be
+undone by an earlier delayed save. Plain HTTP is accepted only for loopback;
+remote origins require HTTPS. DPoP and relay pairing are not implemented yet.
+
+For development, `T3_NATIVE_SERVER` and `T3_NATIVE_ACCESS_TOKEN` optionally supply
+an existing bearer **access token**, scoped to that server origin. Do not put
+credentials in command-line arguments or use a pairing token as an access token.
+Every WebSocket connection, including automatic recovery, acquires a fresh ticket.
+Disconnected and pre-synchronization mutations are rejected, not buffered. A lost
+receipt does not cause the mutation to be replayed.
 
 Native drafts and stashed prompts use a separate data directory:
 `~/Library/Application Support/T3 Code Native`. `T3_NATIVE_HOME` overrides this
@@ -30,6 +41,8 @@ the final edit. Environment origins and thread IDs isolate drafts.
 
 - Authenticated Effect RPC, bounded background delivery, JSON heartbeats,
   stream acknowledgements, request correlation and subscription cancellation.
+  Automatic recovery replaces stale projections and restores thread subscription;
+  authentication/protocol failures stop rather than retrying forever.
 - Live project/thread sidebar, thread detail subscriptions, manual reconnect,
   archive retrieval and historical thread search.
 - Initial add-project/new-thread/rename/archive/unarchive/settle/snooze/pin/delete
@@ -44,7 +57,7 @@ the final edit. Environment origins and thread IDs isolate drafts.
 - Draft recovery and prompt stash. Sending failure and edits made while a send
   is pending preserve the user's text.
 
-Important gaps include pairing/Keychain, automatic reconnect, relay/DPoP,
+Important gaps include full connection-management UI and relay/DPoP,
 multi-environment navigation, queue management, attachments/context, approvals,
 full Markdown equivalence, plan execution, terminal rendering, source-control
 UI, settings/palette/keybinding parity and embedded browser functionality.
@@ -74,6 +87,8 @@ Headless GPUI tests exercise actual input/click dispatch and asynchronous receip
 handling. They are not a substitute for native macOS integration verification.
 Automating the visible native app requires macOS Accessibility and Screen
 Recording permissions for the execution host; the port does not grant these.
+The Mac must also be unlocked. The driver reports a locked screen independently
+of permission status and refuses input and capture while it is locked.
 
 ```sh
 swift apps/native-macos/parity/native-driver.swift <owned-native-pid> inspect

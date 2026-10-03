@@ -5908,6 +5908,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "reqwest",
+ "security-framework",
  "serde",
  "serde_json",
  "tempfile",

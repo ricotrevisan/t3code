@@ -28,6 +28,10 @@ impl Projection {
         updates: &async_channel::Receiver<Update>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match updates.recv().await? {
+            Update::Resynchronizing => {
+                self.shell = Shell::default();
+                self.detail = ThreadDetail::default();
+            }
             Update::Shell(item) => self.shell.apply(item)?,
             Update::Thread { thread_id, item } => {
                 if self.selected.as_ref() == Some(&thread_id) {

@@ -9,7 +9,9 @@ use gpui_component::{
     text::TextView,
 };
 use serde_json::{Value, json};
-use t3code_native_macos::{commands, connection, drafts, shell, sidebar, thread};
+use t3code_native_macos::{
+    auth, commands, connection, credentials, drafts, shell, sidebar, thread,
+};
 
 #[cfg(test)]
 mod ui_tests;
@@ -29,6 +31,13 @@ struct NativeApp {
     commands: Option<async_channel::Sender<connection::Command>>,
     connection_task: Option<Task<()>>,
     generation: u64,
+    server: Entity<InputState>,
+    pairing: Entity<InputState>,
+    access: Option<auth::Access>,
+    pairing_task: Option<Task<()>>,
+    use_dev_credential: bool,
+    vault: credentials::Vault,
+    credential_task: Option<Task<()>>,
     pending_actions: usize,
     composer: Entity<InputState>,
     title: Entity<InputState>,
@@ -53,6 +62,16 @@ impl NativeApp {
                 .auto_grow(3, 10)
                 .placeholder("What should we work on?")
         });
+        let server = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Server origin (https://…)")
+                .default_value(std::env::var("T3_NATIVE_SERVER").unwrap_or_default())
+        });
+        let pairing = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("Pairing URL or one-time token")
+        });
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Project / thread title"));
         let workspace =
             cx.new(|cx| InputState::new(window, cx).placeholder("Absolute project directory"));
@@ -67,6 +86,13 @@ impl NativeApp {
                 app.search_threads(cx);
             }
         })];
+        subscriptions.push(
+            cx.subscribe_in(&pairing, window, |app, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.pair(window, cx);
+                }
+            }),
+        );
         subscriptions.push(
             cx.subscribe_in(&custom_snooze, window, |app, _, event, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -106,6 +132,13 @@ impl NativeApp {
             commands: None,
             connection_task: None,
             generation: 0,
+            server,
+            pairing,
+            access: None,
+            pairing_task: None,
+            use_dev_credential: true,
+            vault: credentials::Vault::default(),
+            credential_task: None,
             pending_actions: 0,
             composer,
             title,
@@ -140,6 +173,8 @@ impl NativeApp {
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.connection_task = None;
+        self.pairing_task = None;
+        self.credential_task = None;
         self.commands = None;
         self.shell = shell::Shell::default();
         self.archived_shell = shell::Shell::default();
@@ -153,21 +188,158 @@ impl NativeApp {
         cx.notify();
     }
 
+    fn pair(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.disconnect(cx);
+        let server = self.server.read(cx).value().to_string();
+        let credential = self.pairing.read(cx).value().to_string();
+        self.pairing
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let receiver = auth::pair(server, credential);
+        let generation = self.generation;
+        self.status = "Pairing…".into();
+        self.pairing_task = Some(cx.spawn(async move |entity, cx| {
+            if let Ok(result) = receiver.recv().await {
+                let _ = entity.update(cx, |app, cx| {
+                    if app.generation != generation {
+                        return;
+                    }
+                    match result {
+                        Ok(access)
+                            if auth::origin(&app.server.read(cx).value()).ok().as_ref()
+                                == Some(&access.origin) =>
+                        {
+                            app.access = Some(access);
+                            app.connect(cx);
+                        }
+                        Ok(_) => app.status = "Server changed while pairing; pair again".into(),
+                        Err(message) => app.status = message.into(),
+                    }
+                    cx.notify();
+                });
+            }
+        }));
+        cx.notify();
+    }
+
+    fn credential_operation(&mut self, operation: credentials::Operation, cx: &mut Context<Self>) {
+        let loading = matches!(operation, credentials::Operation::Load);
+        if loading {
+            self.disconnect(cx);
+        }
+        let server = self.server.read(cx).value().to_string();
+        let origin = match auth::origin(&server) {
+            Ok(origin) => origin,
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+                return;
+            }
+        };
+        let receiver = match self.vault.request(&server, operation) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+                return;
+            }
+        };
+        let generation = self.generation;
+        self.status = "Updating Keychain…".into();
+        self.credential_task = Some(cx.spawn(async move |entity, cx| {
+            if let Ok(result) = receiver.recv().await {
+                let _ = entity.update(cx, |app, cx| {
+                    if generation != app.generation
+                        || auth::origin(&app.server.read(cx).value()).ok().as_ref() != Some(&origin)
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(Some(token)) if loading => {
+                            app.access = Some(auth::Access { origin, token });
+                            app.connect(cx);
+                        }
+                        Ok(None) if loading => {
+                            app.status =
+                                "No remembered credential for this server. Pair to connect.".into()
+                        }
+                        Ok(_) => app.status = "Keychain updated".into(),
+                        Err(error) => app.status = error.into(),
+                    }
+                    cx.notify();
+                });
+            }
+        }));
+        cx.notify();
+    }
+
+    fn remember_credential(&mut self, cx: &mut Context<Self>) {
+        let origin = auth::origin(&self.server.read(cx).value()).ok();
+        if let Some(access) = self
+            .access
+            .as_ref()
+            .filter(|access| Some(&access.origin) == origin.as_ref())
+        {
+            self.credential_operation(credentials::Operation::Remember(access.token.clone()), cx);
+        } else {
+            self.status = "Pair with this server before remembering its credential".into();
+            cx.notify();
+        }
+    }
+
+    fn forget_credential(&mut self, cx: &mut Context<Self>) {
+        self.disconnect(cx);
+        self.access = None;
+        self.use_dev_credential = false;
+        self.credential_operation(credentials::Operation::Forget, cx);
+    }
+
     fn connect(&mut self, cx: &mut Context<Self>) {
         self.disconnect(cx);
-        self.status = "Configure T3_NATIVE_SERVER and T3_NATIVE_ACCESS_TOKEN to connect".into();
-        if let (Ok(base), Ok(token)) = (
-            std::env::var("T3_NATIVE_SERVER"),
-            std::env::var("T3_NATIVE_ACCESS_TOKEN"),
-        ) {
+        self.status = "Enter the server origin and pair to connect".into();
+        let base = self.server.read(cx).value().to_string();
+        let origin = auth::origin(&base).ok();
+        let token = self
+            .access
+            .as_ref()
+            .filter(|access| Some(&access.origin) == origin.as_ref())
+            .map(|access| access.token.clone())
+            .or_else(|| {
+                if self.use_dev_credential
+                    && std::env::var("T3_NATIVE_SERVER")
+                        .ok()
+                        .and_then(|base| auth::origin(&base).ok())
+                        == origin
+                {
+                    std::env::var("T3_NATIVE_ACCESS_TOKEN").ok()
+                } else {
+                    None
+                }
+            });
+        if let Some(token) = token {
             match connection::ConnectionOptions::new(&base, token) {
                 Ok(options) => {
+                    let scope = options.origin();
+                    if scope != self.environment_scope {
+                        self.drafts.clear();
+                        self.stash_memory.clear();
+                        self.search_results.clear();
+                    }
+                    self.environment_scope = scope;
                     let session = connection::start_session(options);
                     self.commands = Some(session.commands);
                     self.connection_task = Some(cx.spawn(async move |entity, cx| {
                         while let Ok(update) = session.updates.recv().await {
                             let keep_running = entity.update(cx, |app, cx| {
                                 let result = match update {
+                                    connection::Update::Resynchronizing => {
+                                        app.shell = shell::Shell::default();
+                                        app.archived_shell = shell::Shell::default();
+                                        app.detail = thread::ThreadDetail::default();
+                                        app.snooze_wake = None;
+                                        app.status =
+                                            "Reconnecting — history is being synchronized".into();
+                                        Ok(())
+                                    }
                                     connection::Update::Status(status) => {
                                         app.status = status;
                                         Ok(())
@@ -717,6 +889,12 @@ impl Render for NativeApp {
         div().flex().size_full().bg(rgb(0x16181d)).text_color(rgb(0xe5e7eb))
             .child(div().id("sidebar").flex().flex_col().w(px(280.)).h_full().overflow_y_scroll().p_3().gap_3()
                 .child("T3 Code · Native")
+                .child(Input::new(&self.server))
+                .child(Input::new(&self.pairing))
+                .child(Button::new("pair").debug_selector(||"pair".into()).label("Pair and connect").on_click(cx.listener(|app,_,window,cx|app.pair(window,cx))))
+                .child(Button::new("remember-credential").debug_selector(||"remember-credential".into()).label("Remember in Keychain").on_click(cx.listener(|app,_,_,cx|app.remember_credential(cx))))
+                .child(Button::new("load-credential").debug_selector(||"load-credential".into()).label("Connect remembered").on_click(cx.listener(|app,_,_,cx|app.credential_operation(credentials::Operation::Load,cx))))
+                .child(Button::new("forget-credential").debug_selector(||"forget-credential".into()).label("Forget credential").on_click(cx.listener(|app,_,_,cx|app.forget_credential(cx))))
                 .child(Button::new("connect").label("Connect / retry").on_click(cx.listener(|app,_,_,cx|app.connect(cx))))
                 .child(Button::new("disconnect").label("Disconnect").on_click(cx.listener(|app,_,_,cx|app.disconnect(cx))))
                 .child(Input::new(&self.search)).child(Button::new("search").label("Search history").on_click(cx.listener(|app,_,_,cx|app.search_threads(cx))))
