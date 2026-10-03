@@ -3,4 +3,5 @@ pub mod connection;
 pub mod drafts;
 pub mod protocol;
 pub mod shell;
+pub mod sidebar;
 pub mod thread;

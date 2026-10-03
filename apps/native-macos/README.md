@@ -33,7 +33,11 @@ the final edit. Environment origins and thread IDs isolate drafts.
 - Live project/thread sidebar, thread detail subscriptions, manual reconnect,
   archive retrieval and historical thread search.
 - Initial add-project/new-thread/rename/archive/unarchive/settle/snooze/pin/delete
-  controls. Deletion requires a second confirmation click.
+  controls. Deletion requires a second confirmation click. Separate active,
+  explicitly settled, snoozed and archived views expose the reverse actions.
+  Custom snoozes accept future ISO date/times with a timezone; one-shot timers
+  refresh membership at expiry without continuous repainting. Automatic settlement
+  policy and full sidebar ordering still need parity work.
 - Native multiline composer, send with receipt-aware clearing, interrupt/stop,
   Markdown messages and activity/session output. Provider/model IDs are manually
   editable; provider setup and catalog UI remain unimplemented.
@@ -70,6 +74,23 @@ Headless GPUI tests exercise actual input/click dispatch and asynchronous receip
 handling. They are not a substitute for native macOS integration verification.
 Automating the visible native app requires macOS Accessibility and Screen
 Recording permissions for the execution host; the port does not grant these.
+
+```sh
+swift apps/native-macos/parity/native-driver.swift <owned-native-pid> inspect
+swift apps/native-macos/parity/native-driver.swift <owned-native-pid> capture /external/new-window.png
+swift apps/native-macos/parity/native-driver.swift <owned-native-pid> click <window-x> <window-y>
+printf 'Fixture text' | swift apps/native-macos/parity/native-driver.swift <owned-native-pid> type
+```
+
+The native adapter accepts only the experimental executable, raises its owned
+window and verifies it is frontmost before sending input. Click coordinates are
+window-relative and bounded to that window. `key` accepts a small explicit set;
+`close` uses the native close button. Observations are printed as JSON, and text
+is read from stdin rather than argv. Captures are restricted to the owned window
+and refuse to overwrite existing evidence. Coordinate input does **not** establish
+accessibility parity: GPUI 0.2.2 currently lacks usable control semantics in the
+macOS accessibility tree. This is an outstanding product defect, not a permission
+problem.
 
 `parity-session` is a real-server transport/read-model runner:
 

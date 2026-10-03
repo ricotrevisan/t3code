@@ -189,6 +189,44 @@ fn stashing_and_restoring_preserves_prompt_without_overwriting_edits(cx: &mut Te
 }
 
 #[gpui::test]
+fn snoozed_and_settled_views_have_a_way_back_to_active(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    let bounds = cx.debug_bounds("snoozed-view").unwrap();
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(app.read_with(cx, |app, _| app.sidebar_view == sidebar::View::Snoozed));
+    let bounds = cx.debug_bounds("settled-view").unwrap();
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(app.read_with(cx, |app, _| app.sidebar_view == sidebar::View::Settled));
+    let bounds = cx.debug_bounds("active-view").unwrap();
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(app.read_with(cx, |app, _| app.sidebar_view == sidebar::View::Active));
+    assert!(requests.try_recv().is_err());
+}
+
+#[gpui::test]
+fn custom_snooze_rejects_invalid_times_and_normalizes_offsets(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, cx| app.snooze_custom(cx)));
+    assert!(requests.try_recv().is_err());
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.custom_snooze.update(cx, |input, cx| {
+                input.set_value("2099-04-01T15:00:00+02:00", window, cx)
+            });
+            app.snooze_custom(cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected snooze");
+    };
+    assert_eq!(payload["type"], "thread.snooze");
+    assert_eq!(payload["snoozedUntil"], "2099-04-01T13:00:00.000Z");
+    reply.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
 fn thread_selection_keeps_independent_drafts(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     cx.simulate_input("Draft for first thread");

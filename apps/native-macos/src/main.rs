@@ -9,7 +9,7 @@ use gpui_component::{
     text::TextView,
 };
 use serde_json::{Value, json};
-use t3code_native_macos::{commands, connection, drafts, shell, thread};
+use t3code_native_macos::{commands, connection, drafts, shell, sidebar, thread};
 
 #[cfg(test)]
 mod ui_tests;
@@ -22,7 +22,9 @@ struct NativeApp {
     storage_error: Option<String>,
     selected_project: Option<String>,
     selected_thread: Option<String>,
-    show_archived: bool,
+    sidebar_view: sidebar::View,
+    snooze_wake: Option<Task<()>>,
+    custom_snooze: Entity<InputState>,
     confirm_delete: Option<String>,
     commands: Option<async_channel::Sender<connection::Command>>,
     connection_task: Option<Task<()>>,
@@ -57,6 +59,9 @@ impl NativeApp {
         let provider = cx.new(|cx| InputState::new(window, cx).placeholder("Provider instance ID"));
         let model = cx.new(|cx| InputState::new(window, cx).placeholder("Model ID"));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search thread history"));
+        let custom_snooze = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Snooze until: ISO date/time with timezone")
+        });
         let mut subscriptions = vec![cx.subscribe_in(&search, window, |app, _, event, _, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 app.search_threads(cx);
@@ -87,7 +92,9 @@ impl NativeApp {
             storage_error: None,
             selected_project: None,
             selected_thread: None,
-            show_archived: false,
+            sidebar_view: sidebar::View::Active,
+            snooze_wake: None,
+            custom_snooze,
             confirm_delete: None,
             commands: None,
             connection_task: None,
@@ -133,6 +140,7 @@ impl NativeApp {
         self.selected_thread = None;
         self.selected_project = None;
         self.pending_actions = 0;
+        self.snooze_wake = None;
         self.generation += 1;
         self.status = "Disconnected".into();
         cx.notify();
@@ -159,6 +167,7 @@ impl NativeApp {
                                     }
                                     connection::Update::Shell(item) => {
                                         let result = app.shell.apply(item).map_err(str::to_owned);
+                                        app.schedule_snooze_wake(cx);
                                         if app.shell.synchronized {
                                             app.status = "Connected · synchronized".into();
                                         }
@@ -307,7 +316,9 @@ impl NativeApp {
                                 }
                             }
                         }
-                        if tag == "orchestration.dispatchCommand" && app.show_archived {
+                        if tag == "orchestration.dispatchCommand"
+                            && app.sidebar_view == sidebar::View::Archived
+                        {
                             app.perform(
                                 "orchestration.getArchivedShellSnapshot",
                                 json!({}),
@@ -384,6 +395,40 @@ impl NativeApp {
             _ => {}
         }
         self.dispatch(payload, cx);
+    }
+
+    fn schedule_snooze_wake(&mut self, cx: &mut Context<Self>) {
+        self.snooze_wake = sidebar::expiry(&self.shell.threads, chrono::Utc::now()).map(|delay| {
+            cx.spawn(async move |entity, cx| {
+                gpui::Timer::after(delay).await;
+                let _ = entity.update(cx, |app, cx| {
+                    app.schedule_snooze_wake(cx);
+                    cx.notify();
+                });
+            })
+        });
+    }
+
+    fn snooze_custom(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = &self.selected_thread else {
+            return;
+        };
+        let value = self.custom_snooze.read(cx).value();
+        let until = match chrono::DateTime::parse_from_rfc3339(value.trim()) {
+            Ok(until) if until > chrono::Utc::now() => until,
+            _ => {
+                self.status = "Choose a future ISO date/time with timezone".into();
+                cx.notify();
+                return;
+            }
+        };
+        let mut command = commands::command("thread.snooze", id);
+        command["snoozedUntil"] = json!(
+            until
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
+        self.dispatch(command, cx);
     }
 
     fn search_threads(&mut self, cx: &mut Context<Self>) {
@@ -551,13 +596,14 @@ impl Render for NativeApp {
                         cx.notify();
                     })),
             );
-            let threads = if self.show_archived {
+            let threads = if self.sidebar_view == sidebar::View::Archived {
                 &self.archived_shell.threads
             } else {
                 &self.shell.threads
             };
             for thread in threads.iter().filter(|t| {
-                t.project_id == project.id && t.archived_at.is_some() == self.show_archived
+                t.project_id == project.id
+                    && sidebar::belongs(t, self.sidebar_view, chrono::Utc::now())
             }) {
                 let id = thread.id.clone();
                 let label = format!(
@@ -568,7 +614,7 @@ impl Render for NativeApp {
                         ""
                     },
                     thread.title,
-                    if thread.snoozed_until.is_some() {
+                    if sidebar::snoozed(thread, chrono::Utc::now()) {
                         " · snoozed"
                     } else {
                         ""
@@ -668,7 +714,16 @@ impl Render for NativeApp {
                 .child(Button::new("disconnect").label("Disconnect").on_click(cx.listener(|app,_,_,cx|app.disconnect(cx))))
                 .child(Input::new(&self.search)).child(Button::new("search").label("Search history").on_click(cx.listener(|app,_,_,cx|app.search_threads(cx))))
                 .child(search_results)
-                .child(Button::new("archived").label(if self.show_archived { "Show active threads" } else { "Show archived threads" }).on_click(cx.listener(|app,_,_,cx| { app.show_archived = !app.show_archived; if app.show_archived { app.perform("orchestration.getArchivedShellSnapshot", json!({}), None, cx); } cx.notify(); })))
+                .child(div().flex().flex_wrap().gap_2().children([
+                    ("active-view","Active",sidebar::View::Active),
+                    ("settled-view","Settled",sidebar::View::Settled),
+                    ("snoozed-view","Snoozed",sidebar::View::Snoozed),
+                    ("archived-view","Archived",sidebar::View::Archived),
+                ].into_iter().map(|(id,label,view)|Button::new(id).debug_selector(move||id.into()).label(label).on_click(cx.listener(move|app,_,_,cx| {
+                    app.sidebar_view = view;
+                    if view == sidebar::View::Archived { app.perform("orchestration.getArchivedShellSnapshot",json!({}),None,cx); }
+                    cx.notify();
+                })))))
                 .children(projects))
             .child(div().flex().flex_col().flex_1().h_full().p_3().gap_3()
                 .child(self.status.clone())
@@ -692,6 +747,7 @@ impl Render for NativeApp {
                     ("pin","Pin","thread.pin"),("unpin","Unpin","thread.unpin"),
                     ("delete","Delete thread","thread.delete"),
                 ].into_iter().map(|(id,label,kind)| Button::new(id).debug_selector(move || id.into()).label(label).on_click(cx.listener(move |app,_,_,cx|app.lifecycle(kind,cx))))))
+                .child(div().flex().gap_2().child(Input::new(&self.custom_snooze)).child(Button::new("custom-snooze").label("Custom snooze").on_click(cx.listener(|app,_,_,cx|app.snooze_custom(cx)))))
                 .child(conversation)
                 .child(div().flex().gap_2().child(Input::new(&self.provider)).child(Input::new(&self.model)))
                 .child(Input::new(&self.composer))
@@ -708,6 +764,7 @@ impl Render for NativeApp {
 fn main() {
     Application::new().run(move |cx: &mut App| {
         gpui_component::init(cx);
+        gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(900.)), cx);
         cx.open_window(
             WindowOptions {
