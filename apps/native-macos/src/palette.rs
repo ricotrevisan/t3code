@@ -2,6 +2,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     AddProject,
+    RenameProject,
+    RemoveProject,
     NewThread,
     Rename,
     Archive,
@@ -32,6 +34,16 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         command: Command::AddProject,
         label: "Add project",
+        needs_thread: false,
+    },
+    Entry {
+        command: Command::RenameProject,
+        label: "Rename selected project",
+        needs_thread: false,
+    },
+    Entry {
+        command: Command::RemoveProject,
+        label: "Remove selected project (confirmation required)",
         needs_thread: false,
     },
     Entry {

@@ -10,7 +10,7 @@ use gpui_component::{
 };
 use serde_json::{Value, json};
 use t3code_native_macos::{
-    auth, commands, connection, credentials, drafts, palette, shell, sidebar, thread,
+    auth, commands, connection, credentials, drafts, files, palette, shell, sidebar, thread,
 };
 
 gpui::actions!(
@@ -48,6 +48,7 @@ struct NativeApp {
     snooze_wake: Option<Task<()>>,
     custom_snooze: Entity<InputState>,
     confirm_delete: Option<String>,
+    confirm_project_removal: Option<String>,
     commands: Option<async_channel::Sender<connection::Command>>,
     connection_task: Option<Task<()>>,
     generation: u64,
@@ -66,6 +67,13 @@ struct NativeApp {
     model: Entity<InputState>,
     search: Entity<InputState>,
     search_results: Vec<Value>,
+    files_open: bool,
+    file_path: Entity<InputState>,
+    file_contents: Entity<InputState>,
+    file_editor: files::Editor,
+    file_epoch: u64,
+    file_busy: bool,
+    file_environment: String,
     drafts: std::collections::HashMap<String, String>,
     draft_store: Option<drafts::Drafts>,
     draft_save: Option<Task<()>>,
@@ -91,6 +99,13 @@ impl NativeApp {
             InputState::new(window, cx)
                 .masked(true)
                 .placeholder("Pairing URL or one-time token")
+        });
+        let file_path =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Workspace-relative file path"));
+        let file_contents = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(8, 20)
         });
         let palette_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search commands…"));
@@ -181,6 +196,7 @@ impl NativeApp {
             snooze_wake: None,
             custom_snooze,
             confirm_delete: None,
+            confirm_project_removal: None,
             commands: None,
             connection_task: None,
             generation: 0,
@@ -199,6 +215,13 @@ impl NativeApp {
             model,
             search,
             search_results: vec![],
+            files_open: false,
+            file_path,
+            file_contents,
+            file_editor: files::Editor::default(),
+            file_epoch: 0,
+            file_busy: false,
+            file_environment: String::new(),
             drafts: Default::default(),
             draft_store: None,
             draft_save: None,
@@ -280,6 +303,8 @@ impl NativeApp {
                     cx.notify();
                 }
             },
+            Command::RenameProject => self.update_project(false, cx),
+            Command::RemoveProject => self.update_project(true, cx),
             Command::NewThread => {
                 if let Some(project) = &self.selected_project {
                     let selection = json!({"instanceId":self.provider.read(cx).value().as_str(),"model":self.model.read(cx).value().as_str()});
@@ -325,6 +350,130 @@ impl NativeApp {
         }
     }
 
+    fn file_operation(&mut self, write: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_busy {
+            self.status = "A file operation is already pending".into();
+            cx.notify();
+            return;
+        }
+        let Some(sender) = self.commands.clone() else {
+            self.status = "Not connected".into();
+            cx.notify();
+            return;
+        };
+        let text = self.file_contents.read(cx).value().to_string();
+        let target = if write {
+            if !self.file_editor.writable() {
+                self.status = "Read a complete workspace-relative text file before saving".into();
+                cx.notify();
+                return;
+            }
+            if self.file_environment != self.environment_scope
+                || self.file_editor.target.as_ref().is_none_or(|target| {
+                    !self
+                        .shell
+                        .projects
+                        .iter()
+                        .any(|project| project.workspace_root == target.cwd)
+                })
+            {
+                self.status = "The file belongs to a disconnected workspace".into();
+                cx.notify();
+                return;
+            }
+            self.file_editor.target.clone().unwrap()
+        } else {
+            if self.file_editor.dirty(&text) {
+                self.status = "Unsaved file edits: save before reading another file".into();
+                cx.notify();
+                return;
+            }
+            let Some(project) = self
+                .selected_project
+                .as_ref()
+                .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
+            else {
+                self.status = "Select a project first".into();
+                cx.notify();
+                return;
+            };
+            let path = self.file_path.read(cx).value().trim().to_owned();
+            if path.is_empty() {
+                self.status = "Enter a file path".into();
+                cx.notify();
+                return;
+            }
+            files::Target {
+                cwd: project.workspace_root.clone(),
+                path,
+            }
+        };
+        self.file_busy = true;
+        self.file_epoch += 1;
+        let epoch = self.file_epoch;
+        let generation = self.generation;
+        let handle = window.window_handle();
+        let payload = if write {
+            json!({"cwd":target.cwd,"relativePath":target.path,"contents":text})
+        } else {
+            json!({"cwd":target.cwd,"relativePath":target.path})
+        };
+        cx.spawn(async move |entity,cx| {
+            let result=connection::call(&sender,if write { "projects.writeFile" } else { "projects.readFile" },payload).await;
+            let _=handle.update(cx,|_,window,cx|entity.update(cx,|app,cx| {
+                if app.generation!=generation || app.file_epoch!=epoch { return; }
+                app.file_busy=false;
+                match result {
+                    Ok(_) if write=>{ app.file_editor.saved=text;app.status="File saved".into(); }
+                    Ok(value)=>match serde_json::from_value::<files::Read>(value) {
+                        Ok(read)=>{
+                            if app.file_contents.read(cx).value().as_str()!=text {
+                                app.status="File response arrived after an edit; edits preserved. Save or discard before retrying.".into();cx.notify();return;
+                            }
+                            app.file_contents.update(cx,|input,cx|input.set_value(read.contents.clone(),window,cx));
+                            app.status=if read.truncated { "File truncated; saving disabled" } else { "File loaded" }.into();
+                            app.file_environment=app.environment_scope.clone();
+                            app.file_editor.loaded(target.cwd,read);
+                        }
+                        Err(_)=>app.status="Invalid file response; existing edits preserved".into(),
+                    },
+                    Err(error)=>app.status=error,
+                }
+                cx.notify();
+            }));
+        }).detach();
+        cx.notify();
+    }
+
+    fn update_project(&mut self, remove: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_project.clone() else {
+            self.status = "Select a project first".into();
+            cx.notify();
+            return;
+        };
+        if remove && self.confirm_project_removal.as_ref() != Some(&id) {
+            self.confirm_project_removal = Some(id);
+            self.status="Remove project again to confirm. Project threads are removed; workspace files remain untouched.".into();
+            cx.notify();
+            return;
+        }
+        let result = if remove {
+            commands::remove_project(&id)
+        } else {
+            commands::rename_project(&id, &self.title.read(cx).value())
+        };
+        match result {
+            Ok(command) => {
+                self.confirm_project_removal = None;
+                self.dispatch(command, cx);
+            }
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+            }
+        }
+    }
+
     fn toggle_thread_property(&mut self, pin: bool, cx: &mut Context<Self>) {
         let selected = self.selected_thread.as_ref().and_then(|id| {
             self.shell
@@ -359,7 +508,13 @@ impl NativeApp {
         self.detail = thread::ThreadDetail::default();
         self.selected_thread = None;
         self.selected_project = None;
+        self.confirm_project_removal = None;
         self.pending_actions = 0;
+        self.file_epoch += 1;
+        self.file_busy = false;
+        if !self.file_editor.dirty(&self.file_contents.read(cx).value()) {
+            self.file_editor = files::Editor::default();
+        }
         self.snooze_wake = None;
         self.generation += 1;
         self.status = "Disconnected".into();
@@ -945,6 +1100,7 @@ impl Render for NativeApp {
                     .label(title.clone())
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.selected_project = Some(project_id.clone());
+                        app.confirm_project_removal = None;
                         app.title
                             .update(cx, |input, cx| input.set_value(title.clone(), window, cx));
                         app.workspace.update(cx, |input, cx| {
@@ -1267,6 +1423,22 @@ impl Render for NativeApp {
                                     app.execute_command(palette::Command::AddProject, window, cx)
                                 }),
                             ))
+                            .child(
+                                Button::new("rename-project")
+                                    .debug_selector(|| "rename-project".into())
+                                    .label("Rename project")
+                                    .on_click(
+                                        cx.listener(|app, _, _, cx| app.update_project(false, cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("remove-project")
+                                    .debug_selector(|| "remove-project".into())
+                                    .label("Remove project")
+                                    .on_click(
+                                        cx.listener(|app, _, _, cx| app.update_project(true, cx)),
+                                    ),
+                            )
                             .child(Button::new("new-thread").label("New thread").on_click(
                                 cx.listener(|app, _, window, cx| {
                                     app.execute_command(palette::Command::NewThread, window, cx)
@@ -1316,6 +1488,51 @@ impl Render for NativeApp {
                                     .on_click(cx.listener(|app, _, _, cx| app.snooze_custom(cx))),
                             ),
                     )
+                    .child(
+                        Button::new("files")
+                            .debug_selector(|| "files".into())
+                            .label("Workspace file editor")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.files_open = !app.files_open;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.files_open, |view| {
+                        view.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(Input::new(&self.file_path))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("read-file")
+                                                .debug_selector(|| "read-file".into())
+                                                .label("Read file")
+                                                .on_click(cx.listener(|app, _, window, cx| {
+                                                    app.file_operation(false, window, cx)
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("save-file")
+                                                .debug_selector(|| "save-file".into())
+                                                .label("Save file")
+                                                .on_click(cx.listener(|app, _, window, cx| {
+                                                    app.file_operation(true, window, cx)
+                                                })),
+                                        ),
+                                )
+                                .children(self.file_editor.target.as_ref().map(|target|format!("Loaded: {} / {}{}",target.cwd,target.path,if self.file_editor.writable() { "" } else { " (read-only)" })))
+                            .child(Button::new("discard-file-edits").debug_selector(||"discard-file-edits".into()).label("Discard unsaved file edits").on_click(cx.listener(|app,_,window,cx| {
+                                if app.file_busy { app.status="Wait for the pending file operation before discarding".into();cx.notify();return; }
+                                let text=app.file_editor.saved.clone();app.file_contents.update(cx,|input,cx|input.set_value(text,window,cx));cx.notify();
+                            })))
+                            .child(Input::new(&self.file_contents)),
+                        )
+                    })
                     .child(conversation)
                     .child(
                         div()

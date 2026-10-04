@@ -3,6 +3,7 @@ pub mod commands;
 pub mod connection;
 pub mod credentials;
 pub mod drafts;
+pub mod files;
 pub mod palette;
 pub mod protocol;
 pub mod reconnect;

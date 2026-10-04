@@ -23,6 +23,23 @@ pub fn create_project(title: &str, workspace: &str) -> Result<Value, &'static st
     )
 }
 
+pub fn rename_project(project_id: &str, title: &str) -> Result<Value, &'static str> {
+    if project_id.trim().is_empty() || title.trim().is_empty() {
+        return Err("Select a project and enter its title");
+    }
+    Ok(
+        json!({"type":"project.meta.update","commandId":id(),"projectId":project_id,"title":title.trim()}),
+    )
+}
+
+pub fn remove_project(project_id: &str) -> Result<Value, &'static str> {
+    if project_id.trim().is_empty() {
+        return Err("Select a project first");
+    }
+    // No force flag: active sessions must be stopped explicitly before removal.
+    Ok(json!({"type":"project.delete","commandId":id(),"projectId":project_id}))
+}
+
 pub fn create_thread(
     project_id: &str,
     title: &str,
@@ -83,6 +100,17 @@ mod tests {
         assert!(create_project("Title", "").is_err());
         assert!(create_thread("p", "Title", Value::Null).is_err());
         assert!(start_turn("t", " \n", Value::Null, "full-access", "default").is_err());
+    }
+    #[test]
+    fn project_updates_are_metadata_only_and_removal_never_forces_running_sessions() {
+        let renamed = rename_project("p", " New name ").unwrap();
+        assert_eq!(renamed["title"], "New name");
+        assert!(renamed.get("workspaceRoot").is_none());
+        let removed = remove_project("p").unwrap();
+        assert_eq!(removed["type"], "project.delete");
+        assert!(removed.get("force").is_none());
+        assert!(rename_project("p", " ").is_err());
+        assert!(remove_project("").is_err());
     }
     #[test]
     fn unchanged_model_retains_provider_options_but_switching_does_not_leak_them() {

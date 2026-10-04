@@ -148,6 +148,133 @@ fn palette_deletion_still_requires_confirmation_and_shortcut_stash_preserves_tex
 }
 
 #[gpui::test]
+fn loaded_file_editor_accepts_real_input_dispatch(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.files_open = true;
+            app.file_path
+                .update(cx, |input, cx| input.set_value("notes.txt", window, cx));
+            app.file_operation(false, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call { reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected read");
+    };
+    reply.send_blocking(Ok(json!({"relativePath":"notes.txt","contents":"original","byteLength":8,"truncated":false}))).unwrap();
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.file_contents
+                .update(cx, |input, cx| input.focus(window, cx))
+        })
+    });
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("世界 native save");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.file_contents.read(cx).value().to_string()),
+        "世界 native save"
+    );
+}
+
+#[gpui::test]
+fn file_save_uses_loaded_target_preserves_later_edits_and_failed_reads(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.files_open = true;
+            app.file_path
+                .update(cx, |input, cx| input.set_value("notes.txt", window, cx));
+            app.file_operation(false, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("read request");
+    };
+    assert_eq!(tag, "projects.readFile");
+    assert_eq!(payload["cwd"], "/tmp/fixture");
+    reply.send_blocking(Ok(json!({"relativePath":"notes.txt","contents":"original","byteLength":8,"truncated":false}))).unwrap();
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.file_contents
+                .update(cx, |input, cx| input.set_value("edited", window, cx));
+            app.file_path
+                .update(cx, |input, cx| input.set_value("different.txt", window, cx));
+            app.file_operation(true, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("save request");
+    };
+    assert_eq!(tag, "projects.writeFile");
+    assert_eq!(payload["relativePath"], "notes.txt");
+    assert_eq!(payload["contents"], "edited");
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.file_contents
+                .update(cx, |input, cx| input.set_value("later edit", window, cx))
+        })
+    });
+    reply
+        .send_blocking(Ok(json!({"relativePath":"notes.txt"})))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, cx| {
+        app.file_editor.dirty(&app.file_contents.read(cx).value())
+    }));
+    cx.update(|window, cx| app.update(cx, |app, cx| app.file_operation(false, window, cx)));
+    cx.run_until_parked();
+    assert!(
+        requests.try_recv().is_err(),
+        "reading must not discard unsaved edits"
+    );
+}
+
+#[gpui::test]
+fn project_removal_requires_confirmation_and_rejection_preserves_navigation(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    let bounds = cx.debug_bounds("remove-project").unwrap();
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(requests.try_recv().is_err());
+    cx.simulate_click(bounds.center(), Default::default());
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected project removal");
+    };
+    assert_eq!(payload["type"], "project.delete");
+    assert_eq!(payload["projectId"], "p");
+    assert!(payload.get("force").is_none());
+    reply
+        .send_blocking(Err("Project has running sessions".into()))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_project.clone()),
+        Some("p".into())
+    );
+    assert_eq!(app.read_with(cx, |app, _| app.shell.projects.len()), 1);
+    assert_eq!(
+        app.read_with(cx, |app, _| app.status.clone()),
+        "Project has running sessions"
+    );
+}
+
+#[gpui::test]
 fn changing_server_cannot_reuse_another_origins_access_credential(cx: &mut TestAppContext) {
     let (app, cx, _) = harness(cx);
     cx.update(|window, cx| {
