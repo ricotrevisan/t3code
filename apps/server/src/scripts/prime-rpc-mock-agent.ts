@@ -859,6 +859,93 @@ function handle(command: Record<string, unknown>): void {
         });
         return;
       }
+      if (message === "mid-loop continuation") {
+        send({ type: "agent_start" });
+        send({
+          type: "tool_execution_start",
+          toolCallId: "prime-midloop-1",
+          toolName: "ipython",
+          args: { code: "step one" },
+        });
+        send({
+          type: "tool_execution_end",
+          toolCallId: "prime-midloop-1",
+          toolName: "ipython",
+          result: { content: [{ type: "text", text: "one" }] },
+          isError: false,
+        });
+        finishTurn(() => {
+          // Prime ends this run while the tool loop still owes work: the last
+          // assistant message requests a tool, so the T3 turn must stay open
+          // across the next cycle rather than settling and reopening.
+          send({
+            type: "agent_end",
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "toolCall", id: "prime-midloop-1", name: "ipython" }],
+                stopReason: "toolUse",
+              },
+            ],
+          });
+        });
+        setImmediate(() => {
+          streaming = true;
+          send({ type: "agent_start" });
+          send({
+            type: "message_update",
+            assistantMessageEvent: {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: "## Mid-loop verdict",
+            },
+          });
+          finishTurn(() => {
+            send({
+              type: "agent_end",
+              messages: [
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "## Mid-loop verdict" }],
+                  stopReason: "stop",
+                },
+              ],
+            });
+          });
+        });
+        return;
+      }
+      if (message === "mid-loop stall") {
+        send({ type: "agent_start" });
+        send({
+          type: "tool_execution_start",
+          toolCallId: "prime-midloop-stall-1",
+          toolName: "ipython",
+          args: { code: "step one" },
+        });
+        send({
+          type: "tool_execution_end",
+          toolCallId: "prime-midloop-stall-1",
+          toolName: "ipython",
+          result: { content: [{ type: "text", text: "one" }] },
+          isError: false,
+        });
+        finishTurn(() => {
+          // Ends mid-loop and never continues, so the held-open turn can only
+          // be closed by an interrupt.
+          send({
+            type: "agent_end",
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "toolCall", id: "prime-midloop-stall-1", name: "ipython" }],
+                stopReason: "toolUse",
+              },
+            ],
+          });
+        });
+        return;
+      }
       const recalled = message === "recall last" ? loadLastMessage() : undefined;
       if (message !== "recall last") {
         persistMessage(message);
