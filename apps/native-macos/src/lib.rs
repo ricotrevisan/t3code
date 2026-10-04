@@ -6,6 +6,7 @@ pub mod drafts;
 pub mod files;
 pub mod palette;
 pub mod protocol;
+pub mod providers;
 pub mod reconnect;
 pub mod shell;
 pub mod sidebar;

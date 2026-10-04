@@ -3,14 +3,15 @@ use gpui::{
     WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
-    Root,
+    Disableable, Root,
     button::Button,
     input::{Input, InputEvent, InputState},
     text::TextView,
 };
 use serde_json::{Value, json};
 use t3code_native_macos::{
-    auth, commands, connection, credentials, drafts, files, palette, shell, sidebar, thread,
+    auth, commands, connection, credentials, drafts, files, palette, providers, shell, sidebar,
+    thread,
 };
 
 gpui::actions!(
@@ -65,6 +66,8 @@ struct NativeApp {
     workspace: Entity<InputState>,
     provider: Entity<InputState>,
     model: Entity<InputState>,
+    provider_catalog: Vec<providers::Provider>,
+    catalog_open: bool,
     search: Entity<InputState>,
     search_results: Vec<Value>,
     files_open: bool,
@@ -217,6 +220,8 @@ impl NativeApp {
             workspace,
             provider,
             model,
+            provider_catalog: vec![],
+            catalog_open: false,
             search,
             search_results: vec![],
             files_open: false,
@@ -579,6 +584,7 @@ impl NativeApp {
         self.selected_project = None;
         self.confirm_project_removal = None;
         self.pending_actions = 0;
+        self.provider_catalog.clear();
         self.file_epoch += 1;
         self.file_busy = false;
         self.file_listing_task = None;
@@ -750,8 +756,12 @@ impl NativeApp {
                                         Ok(())
                                     }
                                     connection::Update::Shell(item) => {
+                                        let was_synchronized = app.shell.synchronized;
                                         let result = app.shell.apply(item).map_err(str::to_owned);
                                         app.schedule_snooze_wake(cx);
+                                        if app.shell.synchronized && !was_synchronized {
+                                            app.perform("server.getConfig", json!({}), None, cx);
+                                        }
                                         if app.shell.synchronized {
                                             app.status = "Connected · synchronized".into();
                                         }
@@ -886,6 +896,16 @@ impl NativeApp {
                 app.pending_actions = app.pending_actions.saturating_sub(1);
                 match result {
                     Ok(value) => {
+                        if tag == "server.getConfig" {
+                            match serde_json::from_value::<providers::Config>(value.clone()) {
+                                Ok(config) => app.provider_catalog = config.providers,
+                                Err(_) => {
+                                    app.status = "Invalid provider catalog response".into();
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                        }
                         if tag == "orchestration.getArchivedShellSnapshot" {
                             match serde_json::from_value::<shell::Snapshot>(value.clone()) {
                                 Ok(snapshot) => {
@@ -924,13 +944,20 @@ impl NativeApp {
                                 app.schedule_draft_save(cx);
                             }
                         }
-                        app.status = format!(
-                            "Server accepted · sequence {}",
-                            value["sequence"]
-                                .as_u64()
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| "—".into())
-                        );
+                        app.status = if tag == "server.getConfig" {
+                            format!(
+                                "Connected · provider catalog loaded ({} instances)",
+                                app.provider_catalog.len()
+                            )
+                        } else {
+                            format!(
+                                "Server accepted · sequence {}",
+                                value["sequence"]
+                                    .as_u64()
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "—".into())
+                            )
+                        };
                     }
                     Err(error) => app.status = error,
                 }
@@ -1086,6 +1113,50 @@ impl NativeApp {
         cx.notify();
     }
 
+    fn pick_model(
+        &mut self,
+        instance: &str,
+        model: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(provider) = self
+            .provider_catalog
+            .iter()
+            .find(|provider| provider.instance_id == instance)
+        else {
+            self.status = "Provider instance no longer available".into();
+            cx.notify();
+            return;
+        };
+        if !provider.selectable() || !provider.models.iter().any(|entry| entry.slug == model) {
+            self.status = "Provider or model is unavailable; refresh its catalog".into();
+            cx.notify();
+            return;
+        }
+        if provider.requires_new_thread_for_model_change
+            && self.detail.thread.as_ref().is_some_and(|thread| {
+                thread["messages"]
+                    .as_array()
+                    .is_some_and(|messages| !messages.is_empty())
+                    && (thread["modelSelection"]["instanceId"] != instance
+                        || thread["modelSelection"]["model"] != model)
+            })
+        {
+            self.status = "This provider requires a new thread for a model change".into();
+            cx.notify();
+            return;
+        }
+        self.provider.update(cx, |input, cx| {
+            input.set_value(instance.to_owned(), window, cx)
+        });
+        self.model.update(cx, |input, cx| {
+            input.set_value(model.to_owned(), window, cx)
+        });
+        self.catalog_open = false;
+        cx.notify();
+    }
+
     fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_actions > 0 {
             self.status = "Wait for the pending server receipt".into();
@@ -1123,6 +1194,20 @@ impl NativeApp {
                 return;
             }
         };
+        if self.provider_catalog.iter().any(|provider| {
+            provider.instance_id == selection["instanceId"].as_str().unwrap_or("")
+                && provider.requires_new_thread_for_model_change
+        }) && selection != thread.model_selection
+            && self.detail.thread.as_ref().is_some_and(|detail| {
+                detail["messages"]
+                    .as_array()
+                    .is_some_and(|messages| !messages.is_empty())
+            })
+        {
+            self.status = "This provider requires a new thread for a model change".into();
+            cx.notify();
+            return;
+        }
         match commands::start_turn(
             &id,
             &text,
@@ -1627,6 +1712,16 @@ impl Render for NativeApp {
                             .gap_2()
                             .child(Input::new(&self.provider))
                             .child(Input::new(&self.model)),
+                    )
+                    .child(Button::new("model-catalog").debug_selector(||"model-catalog".into()).label("Choose provider and model").on_click(cx.listener(|app,_,_,cx| { app.catalog_open = !app.catalog_open;cx.notify(); })))
+                    .when(self.catalog_open,|view|view.child(div().id("provider-model-catalog").max_h(px(200.)).overflow_y_scroll().flex().flex_col().gap_2()
+                        .child(Button::new("refresh-catalog").label("Reload server catalog").on_click(cx.listener(|app,_,_,cx|app.perform("server.getConfig",json!({}),None,cx))))
+                        .children(self.provider_catalog.iter().map(|provider|div().flex().flex_col().gap_1()
+                            .child(format!("{} · {} · {}",provider.label(),provider.instance_id,provider.explanation()))
+                            .children(provider.models.iter().enumerate().map(|(index,model)| {
+                                let instance=provider.instance_id.clone();let slug=model.slug.clone();let enabled=provider.selectable();
+                                Button::new(gpui::SharedString::from(format!("catalog-{}-{index}",provider.instance_id))).debug_selector({ let id=format!("catalog-{}-{index}",provider.instance_id);move||id.clone() }).disabled(!enabled).label(model.name.clone()).on_click(cx.listener(move|app,_,window,cx|app.pick_model(&instance,&slug,window,cx)))
+                            })))))
                     )
                     .child(Input::new(&self.composer))
                     .child(

@@ -148,6 +148,63 @@ fn palette_deletion_still_requires_confirmation_and_shortcut_stash_preserves_tex
 }
 
 #[gpui::test]
+fn model_change_restriction_cannot_be_bypassed_by_manual_ids(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window,cx|app.update(cx,|app,cx| {
+        app.provider_catalog=serde_json::from_value(json!([{"instanceId":"codex","driver":"codex","enabled":true,"installed":true,"status":"ready","requiresNewThreadForModelChange":true,"models":[{"slug":"other","name":"Other"}]}])).unwrap();
+        app.detail.thread=Some(json!({"modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"messages":[{"role":"user","text":"existing"}]}));
+        app.model.update(cx,|input,cx|input.set_value("other",window,cx));
+        app.composer.update(cx,|input,cx|input.set_value("keep this draft",window,cx));
+        app.send_prompt(window,cx);
+    }));
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err());
+    assert_eq!(
+        app.read_with(cx, |app, _| app.status.clone()),
+        "This provider requires a new thread for a model change"
+    );
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        "keep this draft"
+    );
+}
+
+#[gpui::test]
+fn choosing_catalog_model_uses_instance_routing_and_preserves_unchanged_options(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_,cx|app.update(cx,|app,cx| {
+        app.shell.threads[0].model_selection=json!({"instanceId":"codex","model":"gpt-5.4","options":[{"id":"reasoningEffort","value":"high"}]});
+        app.provider_catalog=serde_json::from_value(json!([{"instanceId":"codex","driver":"codex","enabled":true,"installed":true,"status":"ready","models":[{"slug":"gpt-5.4","name":"Current model"}]}])).unwrap();app.catalog_open=true;cx.notify();
+    }));
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("catalog-codex-0").unwrap();
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(!app.read_with(cx, |app, _| app.catalog_open));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.composer.update(cx, |input, cx| {
+                input.set_value("Prompt", window, cx);
+                input.focus(window, cx);
+            })
+        })
+    });
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("send").unwrap();
+    cx.simulate_click(bounds.center(), Default::default());
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected turn start");
+    };
+    assert_eq!(payload["modelSelection"]["instanceId"], "codex");
+    assert_eq!(payload["modelSelection"]["options"][0]["value"], "high");
+    reply
+        .send_blocking(Err("owned provider fixture".into()))
+        .unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
 fn workspace_browse_and_path_search_use_server_and_ignore_other_project_results(
     cx: &mut TestAppContext,
 ) {

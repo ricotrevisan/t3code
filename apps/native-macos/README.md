@@ -61,8 +61,12 @@ the final edit. Environment origins and thread IDs isolate drafts.
   Content search, complete picker entry points, clone and worktree UI still need
   implementation.
 - Native multiline composer, send with receipt-aware clearing, interrupt/stop,
-  Markdown messages and activity/session output. Provider/model IDs are manually
-  editable; provider setup and catalog UI remain unimplemented.
+  Markdown messages and activity/session output. The server provider/model catalog
+  loads after shell synchronization, exposes instance identities and availability,
+  and lets users select models without typing IDs. Unchanged selections preserve
+  provider options; advertised new-thread model-change restrictions are enforced.
+  Manual IDs remain available. Provider installation/authentication, model options,
+  and full catalog/settings entry-point parity remain unimplemented.
 - Draft recovery and prompt stash. Sending failure and edits made while a send
   is pending preserve the user's text.
 - Searchable native command palette (`Cmd+K`) with keyboard selection, Escape
