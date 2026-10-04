@@ -7,6 +7,8 @@ pub struct Model {
     pub name: String,
     #[serde(default)]
     pub is_default: bool,
+    #[serde(default)]
+    pub capabilities: serde_json::Value,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

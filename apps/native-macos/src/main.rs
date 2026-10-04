@@ -76,6 +76,7 @@ struct NativeApp {
     workspace: Entity<InputState>,
     provider: Entity<InputState>,
     model: Entity<InputState>,
+    model_override: Option<Value>,
     provider_catalog: Vec<providers::Provider>,
     catalog_open: bool,
     project_actions_open: bool,
@@ -306,6 +307,7 @@ impl NativeApp {
             workspace,
             provider,
             model,
+            model_override: None,
             provider_catalog: vec![],
             catalog_open: false,
             project_actions_open: false,
@@ -627,7 +629,7 @@ impl NativeApp {
         let selection = if instance.trim().is_empty() && model.trim().is_empty() {
             previous.clone()
         } else {
-            match commands::select_model(previous, &instance, &model) {
+            match self.model_selection(previous, cx) {
                 Ok(selection) => selection,
                 Err(error) => {
                     self.status = error.into();
@@ -1185,11 +1187,7 @@ impl NativeApp {
                 .and_then(|id| self.shell.threads.iter().find(|thread| &thread.id == id))
                 .map(|thread| &thread.model_selection)
                 .unwrap_or(&Value::Null);
-            match commands::select_model(
-                previous,
-                &self.provider.read(cx).value(),
-                &self.model.read(cx).value(),
-            ) {
+            match self.model_selection(previous, cx) {
                 Ok(selection) => Some(selection),
                 Err(error) => {
                     self.status = error.into();
@@ -1296,6 +1294,7 @@ impl NativeApp {
         self.worktree_outcome = None;
         self.new_thread_checkout = None;
         self.generation += 1;
+        self.model_override = None;
         self.status = "Disconnected".into();
         cx.notify();
     }
@@ -1606,6 +1605,7 @@ impl NativeApp {
             self.drafts
                 .insert(previous.clone(), self.composer.read(cx).value().to_string());
         }
+        self.model_override = None;
         self.selected_thread = Some(id.into());
         self.pending_history_attached = false;
         self.confirm_delete = None;
@@ -2208,6 +2208,86 @@ impl NativeApp {
         cx.notify();
     }
 
+    fn model_selection(&self, previous: &Value, cx: &App) -> Result<Value, &'static str> {
+        let selected = commands::select_model(
+            previous,
+            &self.provider.read(cx).value(),
+            &self.model.read(cx).value(),
+        )?;
+        Ok(self
+            .model_override
+            .as_ref()
+            .filter(|value| {
+                value["instanceId"] == selected["instanceId"] && value["model"] == selected["model"]
+            })
+            .cloned()
+            .unwrap_or(selected))
+    }
+
+    fn choose_model_option(&mut self, id: &str, value: Value, cx: &mut Context<Self>) {
+        let previous = self
+            .selected_thread
+            .as_ref()
+            .and_then(|id| {
+                self.shell
+                    .threads
+                    .iter()
+                    .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                    .find(|thread| &thread.id == id)
+            })
+            .map(|thread| &thread.model_selection)
+            .unwrap_or(&Value::Null);
+        let mut selection = match self.model_selection(previous, cx) {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+                return;
+            }
+        };
+        let descriptor = self
+            .provider_catalog
+            .iter()
+            .find(|provider| provider.instance_id == selection["instanceId"])
+            .and_then(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.slug == selection["model"])
+            })
+            .and_then(|model| model.capabilities["optionDescriptors"].as_array())
+            .and_then(|options| options.iter().find(|option| option["id"] == id));
+        let valid = descriptor.is_some_and(|descriptor| {
+            (descriptor["type"] == "boolean" && value.is_boolean())
+                || (descriptor["type"] == "select"
+                    && descriptor["options"]
+                        .as_array()
+                        .is_some_and(|choices| choices.iter().any(|choice| choice["id"] == value)))
+        });
+        if !valid {
+            self.status = "Model option is unavailable; refresh the catalog".into();
+            cx.notify();
+            return;
+        }
+        let mut options = selection["options"].as_array().cloned().unwrap_or_default();
+        options.retain(|option| option["id"] != id);
+        options.push(json!({"id":id,"value":value}));
+        selection["options"] = json!(options);
+        self.model_override = Some(selection.clone());
+        if let Some(draft) = self
+            .pending_threads
+            .iter_mut()
+            .find(|draft| Some(&draft.thread.id) == self.selected_thread.as_ref())
+        {
+            draft.thread.model_selection = selection;
+            if let Some(store) = &mut self.draft_store {
+                store.put_pending(&self.environment_scope, draft.clone());
+            }
+            self.schedule_draft_save(cx);
+        }
+        cx.notify();
+    }
+
     fn pick_model(
         &mut self,
         instance: &str,
@@ -2283,11 +2363,7 @@ impl NativeApp {
             return;
         };
         let text = self.composer.read(cx).value().to_string();
-        let selection = match commands::select_model(
-            &thread.model_selection,
-            self.provider.read(cx).value().as_str(),
-            self.model.read(cx).value().as_str(),
-        ) {
+        let selection = match self.model_selection(&thread.model_selection, cx) {
             Ok(selection) => selection,
             Err(error) => {
                 self.status = error.into();
@@ -2377,6 +2453,7 @@ impl Render for NativeApp {
                     })
                     .on_click(cx.listener(move |app, _, window, cx| {
                         if app.selected_project.as_ref() != Some(&project_id) {
+                            app.model_override = None;
                             app.provider.update(cx, |input, cx| {
                                 input.set_value(
                                     default_selection["instanceId"]
@@ -3028,6 +3105,16 @@ impl Render for NativeApp {
                                 Button::new(gpui::SharedString::from(format!("catalog-{}-{index}",provider.instance_id))).debug_selector({ let id=format!("catalog-{}-{index}",provider.instance_id);move||id.clone() }).disabled(!enabled).label(model.name.clone()).on_click(cx.listener(move|app,_,window,cx|app.pick_model(&instance,&slug,window,cx)))
                             })))))
                     )
+                    .children(self.provider_catalog.iter().find(|provider|provider.instance_id==self.provider.read(cx).value().as_str()).and_then(|provider|provider.models.iter().find(|model|model.slug==self.model.read(cx).value().as_str())).and_then(|model|model.capabilities["optionDescriptors"].as_array()).map(|options|div().flex().flex_col().gap_1().children(options.iter().enumerate().map(|(index,option)| {
+                        let id=option["id"].as_str().unwrap_or_default().to_owned();
+                        let previous=self.selected_thread.as_ref().and_then(|id|self.shell.threads.iter().chain(self.pending_threads.iter().map(|draft|&draft.thread)).find(|thread|&thread.id==id)).map(|thread|&thread.model_selection).unwrap_or(&Value::Null);
+                        let selected=self.model_selection(previous,cx).ok().and_then(|selection|selection["options"].as_array().and_then(|options|options.iter().find(|option|option["id"]==id)).map(|option|option["value"].clone())).or_else(||option.get("currentValue").cloned()).or_else(||option["options"].as_array().and_then(|choices|choices.iter().find(|choice|choice["isDefault"]==true)).map(|choice|choice["id"].clone()));
+                        let choices=if option["type"]=="boolean" {vec![json!({"id":false,"label":"Off"}),json!({"id":true,"label":"On"})]} else {option["options"].as_array().cloned().unwrap_or_default()};
+                        div().flex().flex_wrap().gap_1().child(option["label"].as_str().unwrap_or_default().to_owned()).children(choices.into_iter().enumerate().map(|(choice_index,choice)| {
+                            let id=id.clone();let value=choice["id"].clone();
+                            Button::new(gpui::SharedString::from(format!("model-option-{index}-{choice_index}"))).debug_selector(move||format!("model-option-{index}-{choice_index}")).label(format!("{}{}",choice["label"].as_str().unwrap_or_default(),if selected.as_ref()==Some(&value){" ✓"}else{""})).on_click(cx.listener(move|app,_,_,cx|app.choose_model_option(&id,value.clone(),cx)))
+                        }))
+                    }))))
                     .child(Input::new(&self.composer))
                     .child(
                         div()

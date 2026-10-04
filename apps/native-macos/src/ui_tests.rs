@@ -1328,3 +1328,37 @@ fn native_single_line_insertion_rejects_newlines_without_losing_previous_value(
         "codex"
     );
 }
+
+#[gpui::test]
+fn catalog_options_reach_emitted_turn_and_invalid_choices_preserve_selection(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_,cx|app.update(cx,|app,cx| {
+        app.provider_catalog=serde_json::from_value(json!([{"instanceId":"codex","driver":"codex","enabled":true,"installed":true,"status":"ready","models":[{"slug":"gpt-5.4","name":"Owned model","capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Effort","type":"select","options":[{"id":"low","label":"Low"},{"id":"high","label":"High"}]}]}}]}])).unwrap();
+        app.choose_model_option("reasoningEffort",json!("high"),cx);
+        app.choose_model_option("reasoningEffort",json!("invalid"),cx);
+    }));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.composer.update(cx, |input, cx| {
+                input.set_value("Owned options prompt", window, cx)
+            });
+            app.send_prompt(window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("turn")
+    };
+    assert_eq!(
+        payload["modelSelection"]["options"],
+        json!([{"id":"reasoningEffort","value":"high"}])
+    );
+    reply.send_blocking(Err("owned rejection".into())).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        "Owned options prompt"
+    );
+}
