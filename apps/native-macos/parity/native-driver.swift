@@ -20,6 +20,10 @@ func tree(_ element: AXUIElement, depth: Int = 0) -> [String: Any] {
     for (key, name) in [(kAXRoleAttribute, "role"), (kAXTitleAttribute, "title"), (kAXDescriptionAttribute, "description"), (kAXValueAttribute, "value")] {
         if let value = attribute(element, key) as? String { result[name] = value }
     }
+    if let dimensions = attribute(element, kAXSizeAttribute), CFGetTypeID(dimensions) == AXValueGetTypeID() {
+        var size = CGSize.zero
+        if AXValueGetValue(dimensions as! AXValue, .cgSize, &size) { result["size"] = ["width":size.width,"height":size.height] }
+    }
     result["children"] = (attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []).map { tree($0, depth: depth + 1) }
     return result
 }
@@ -48,7 +52,7 @@ let ax = AXUIElementCreateApplication(pid)
 let windows = attribute(ax, kAXWindowsAttribute) as? [AXUIElement] ?? []
 guard let window = windows.first else { fail("Native window is unavailable") }
 if command == "inspect" {
-    output(["scope": "native accessibility observation", "pid": pid, "capture_authorized": CGPreflightScreenCaptureAccess(), "screen_locked": false, "tree": tree(ax)])
+    output(["scope": "native accessibility observation", "pid": pid, "capture_authorized": CGPreflightScreenCaptureAccess(), "screen_locked": false, "windows": windows.map { tree($0) }])
     exit(0)
 }
 
@@ -99,7 +103,7 @@ case "type":
     output(["scope": "native OS input dispatch", "action": "type", "utf16_length": utf16.count, "pid": pid])
 case "key":
     guard args.count == 4 else { fail("key requires cmd-a, cmd-c, cmd-v, enter, tab or escape") }
-    let keys: [String: (CGKeyCode, CGEventFlags)] = ["cmd-a":(0,.maskCommand), "cmd-c":(8,.maskCommand), "cmd-v":(9,.maskCommand), "enter":(36,[]), "tab":(48,[]), "escape":(53,[])]
+    let keys: [String: (CGKeyCode, CGEventFlags)] = ["cmd-a":(0,.maskCommand), "cmd-c":(8,.maskCommand), "cmd-v":(9,.maskCommand), "cmd-k":(40,.maskCommand), "cmd-p":(35,.maskCommand), "cmd-shift-f":(3,[.maskCommand,.maskShift]), "enter":(36,[]), "tab":(48,[]), "escape":(53,[])]
     guard let (code, flags) = keys[args[3]] else { fail("Unsupported key") }
     for isDown in [true, false] {
         guard let event = CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:isDown) else { fail("Could not create key event") }
