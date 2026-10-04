@@ -447,6 +447,9 @@ impl NativeApp {
         match command {
             Command::SaveProjectDefault => self.update_project_default(false, cx),
             Command::ClearProjectDefault => self.update_project_default(true, cx),
+            Command::InheritProjectDefault => {
+                self.project_actions(Some(json!({"operation":"model-inherit"})), cx)
+            }
             Command::ProjectActions => {
                 self.project_actions_open = true;
                 self.project_actions(None, cx);
@@ -1777,14 +1780,19 @@ impl NativeApp {
                 let Some(change) = mutation else {
                     return Ok(settings);
                 };
-                if change["operation"] == "model-default" {
+                if change["operation"] == "model-default" || change["operation"] == "model-inherit"
+                {
                     return connection::call(
                         &sender,
                         "server.updateSettings",
                         project_actions::model_patch(
                             &settings,
                             &project,
-                            change["selection"].clone(),
+                            if change["operation"] == "model-inherit" {
+                                None
+                            } else {
+                                Some(change["selection"].clone())
+                            },
                         ),
                     )
                     .await;
@@ -2896,6 +2904,7 @@ impl Render for NativeApp {
                                     .child(Button::new(gpui::SharedString::from(format!("action-delete-{index}"))).label(if confirm{"Confirm delete action"}else{"Delete action"}).disabled(self.action_busy).on_click(cx.listener(move|app,_,_,cx|{if app.confirm_action_delete.as_ref()==Some(&id){app.project_actions(Some(json!({"operation":"delete","id":id})),cx);}else{app.confirm_action_delete=Some(id.clone());cx.notify();}})))
                             }))
                             .child(Button::new("project-default-save").label("Use selected provider and model for new threads").on_click(cx.listener(|app,_,_,cx|app.update_project_default(false,cx))))
+                            .child(Button::new("project-default-inherit").label("Use environment model default").on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"model-inherit"})),cx))))
                             .child(Button::new("project-default-clear").label("Clear project model default").on_click(cx.listener(|app,_,_,cx|app.update_project_default(true,cx))))
                             .child(Button::new("actions-refresh").label("Refresh actions").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(None,cx))))
                             .child(Button::new("actions-inherit").label("Use environment action defaults").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"inherit"})),cx))))

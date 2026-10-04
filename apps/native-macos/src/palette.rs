@@ -4,6 +4,7 @@ pub enum Command {
     ProjectActions,
     SaveProjectDefault,
     ClearProjectDefault,
+    InheritProjectDefault,
     Worktrees,
     CloneProject,
     Files,
@@ -38,6 +39,11 @@ pub struct Entry {
     pub needs_thread: bool,
 }
 pub const ENTRIES: &[Entry] = &[
+    Entry {
+        command: Command::InheritProjectDefault,
+        label: "Use environment model default for project",
+        needs_thread: false,
+    },
     Entry {
         command: Command::SaveProjectDefault,
         label: "Save selected model as project default",

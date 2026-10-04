@@ -40,12 +40,16 @@ pub fn model_default(settings: Option<&Value>, project: &str, legacy: Option<&Va
     settings["defaultModelSelection"].clone()
 }
 
-pub fn model_patch(settings: &Value, project: &str, selection: Value) -> Value {
+pub fn model_patch(settings: &Value, project: &str, selection: Option<Value>) -> Value {
     let mut entry = settings["projectSettingsOverrides"][project]
         .as_object()
         .cloned()
         .unwrap_or_default();
-    entry.insert("defaultModelSelection".into(), selection);
+    if let Some(selection) = selection {
+        entry.insert("defaultModelSelection".into(), selection);
+    } else {
+        entry.remove("defaultModelSelection");
+    }
     json!({"patch":{"projectSettingsOverrides":{project:entry}}})
 }
 
@@ -123,7 +127,17 @@ mod tests {
             model_default(Some(&unfolded), "other", Some(&legacy)),
             legacy
         );
-        let patch = model_patch(&settings, "p", legacy.clone());
+        let inherited = model_patch(&settings, "p", None);
+        assert!(
+            inherited["patch"]["projectSettingsOverrides"]["p"]
+                .get("defaultModelSelection")
+                .is_none()
+        );
+        assert_eq!(
+            inherited["patch"]["projectSettingsOverrides"]["p"]["defaultProjectScripts"],
+            settings["projectSettingsOverrides"]["p"]["defaultProjectScripts"]
+        );
+        let patch = model_patch(&settings, "p", Some(legacy.clone()));
         assert_eq!(
             patch["patch"]["projectSettingsOverrides"]["p"]["defaultProjectScripts"],
             settings["projectSettingsOverrides"]["p"]["defaultProjectScripts"]
