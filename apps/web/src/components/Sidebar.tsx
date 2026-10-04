@@ -4506,7 +4506,9 @@ export default function Sidebar() {
       if (threadSearchResults.length === 0) return;
       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
         const result = threadSearchResults[activeSearchResultIndex];
-        const row = document.getElementById(`sidebar-thread-search-result-${activeSearchResultIndex}`);
+        const row = document.getElementById(
+          `sidebar-thread-search-result-${activeSearchResultIndex}`,
+        );
         if (!result || !row) return;
         event.preventDefault();
         const rect = row.getBoundingClientRect();
