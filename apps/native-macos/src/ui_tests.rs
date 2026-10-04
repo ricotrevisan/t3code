@@ -1073,3 +1073,39 @@ fn unsent_thread_rename_and_discard_are_local_and_preserve_other_draft(cx: &mut 
         assert!(!matches!(request, connection::Command::Call { .. }));
     }
 }
+
+#[gpui::test]
+fn changing_project_clears_thread_scope_and_preserves_its_draft(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_input("retained previous thread draft");
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.shell.projects.push(
+                serde_json::from_value(
+                    json!({"id":"other","title":"Other project","workspaceRoot":"/tmp/other"}),
+                )
+                .unwrap(),
+            );
+            cx.notify();
+        })
+    });
+    let bounds = cx.debug_bounds("project-other").unwrap();
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_project.clone()),
+        Some("other".into())
+    );
+    assert!(app.read_with(cx, |app, _| app.selected_thread.is_none()));
+    assert!(app.read_with(cx, |app, cx| app.composer.read(cx).value().is_empty()));
+    assert_eq!(
+        app.read_with(cx, |app, _| app.drafts.get("t").cloned()),
+        Some("retained previous thread draft".into())
+    );
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(key) if key=="worktree-setup")
+    );
+    assert!(matches!(
+        requests.try_recv().unwrap(),
+        connection::Command::SelectThread(None)
+    ));
+}

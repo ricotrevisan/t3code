@@ -1965,7 +1965,38 @@ impl Render for NativeApp {
             let mut row = div().flex().flex_col().gap_2().child(
                 Button::new(gpui::SharedString::from(format!("project-{project_id}")))
                     .label(title.clone())
+                    .debug_selector({
+                        let id = project_id.clone();
+                        move || format!("project-{id}")
+                    })
                     .on_click(cx.listener(move |app, _, window, cx| {
+                        if app.selected_project.as_ref() != Some(&project_id) {
+                            if let Some(previous) = app.selected_thread.take() {
+                                app.drafts.insert(
+                                    previous.clone(),
+                                    app.composer.read(cx).value().to_string(),
+                                );
+                                if let Some(store) = &mut app.draft_store {
+                                    store.set(
+                                        &app.environment_scope,
+                                        &previous,
+                                        app.composer.read(cx).value().to_string(),
+                                    );
+                                }
+                                app.schedule_draft_save(cx);
+                            }
+                            app.detail = thread::ThreadDetail::default();
+                            app.setup_progress = None;
+                            app.confirm_delete = None;
+                            app.composer
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                            if let Some(sender) = &app.commands {
+                                let _ = sender.try_send(connection::Command::Unsubscribe(
+                                    "worktree-setup".into(),
+                                ));
+                                let _ = sender.try_send(connection::Command::SelectThread(None));
+                            }
+                        }
                         app.selected_project = Some(project_id.clone());
                         app.worktree_task = None;
                         app.worktree_busy = false;
