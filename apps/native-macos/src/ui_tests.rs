@@ -1309,3 +1309,22 @@ fn project_default_changes_read_fresh_settings_and_new_draft_keeps_saved_options
         selection
     );
 }
+
+#[gpui::test]
+fn native_single_line_insertion_rejects_newlines_without_losing_previous_value(
+    cx: &mut TestAppContext,
+) {
+    use gpui::EntityInputHandler;
+    let (app, cx, _) = harness(cx);
+    let provider = app.read_with(cx, |app, _| app.provider.clone());
+    cx.update(|window, cx| {
+        provider.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "\n", window, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        provider.read_with(cx, |input, _| input.value().to_string()),
+        "codex"
+    );
+}

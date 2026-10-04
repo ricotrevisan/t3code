@@ -37,6 +37,11 @@ gpui::actions!(
 #[cfg(test)]
 mod ui_tests;
 
+fn single_line_input(window: &mut Window, cx: &mut Context<InputState>) -> InputState {
+    // GPUI's single-line shaper panics if native text insertion includes a newline.
+    InputState::new(window, cx).validate(|text, _| !text.contains(['\n', '\r']))
+}
+
 struct NativeApp {
     focus: FocusHandle,
     palette_open: bool,
@@ -141,36 +146,39 @@ impl NativeApp {
                 .placeholder("What should we work on?")
         });
         let server = cx.new(|cx| {
-            InputState::new(window, cx)
+            single_line_input(window, cx)
                 .placeholder("Server origin (https://…)")
                 .default_value(std::env::var("T3_NATIVE_SERVER").unwrap_or_default())
         });
         let pairing = cx.new(|cx| {
-            InputState::new(window, cx)
+            single_line_input(window, cx)
                 .masked(true)
                 .placeholder("Pairing URL or one-time token")
         });
         let file_path =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Workspace-relative file path"));
+            cx.new(|cx| single_line_input(window, cx).placeholder("Workspace-relative file path"));
         let clone_remote =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Repository clone URL"));
+            cx.new(|cx| single_line_input(window, cx).placeholder("Repository clone URL"));
         let content_query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search workspace contents"));
+            cx.new(|cx| single_line_input(window, cx).placeholder("Search workspace contents"));
         let file_contents = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(8, 20)
         });
         let palette_query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search commands…"));
-        let title = cx.new(|cx| InputState::new(window, cx).placeholder("Project / thread title"));
+            cx.new(|cx| single_line_input(window, cx).placeholder("Search commands…"));
+        let title =
+            cx.new(|cx| single_line_input(window, cx).placeholder("Project / thread title"));
         let workspace =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Absolute project directory"));
-        let provider = cx.new(|cx| InputState::new(window, cx).placeholder("Provider instance ID"));
-        let model = cx.new(|cx| InputState::new(window, cx).placeholder("Model ID"));
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search thread history"));
+            cx.new(|cx| single_line_input(window, cx).placeholder("Absolute project directory"));
+        let provider =
+            cx.new(|cx| single_line_input(window, cx).placeholder("Provider instance ID"));
+        let model = cx.new(|cx| single_line_input(window, cx).placeholder("Model ID"));
+        let search =
+            cx.new(|cx| single_line_input(window, cx).placeholder("Search thread history"));
         let custom_snooze = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Snooze until: ISO date/time with timezone")
+            single_line_input(window, cx).placeholder("Snooze until: ISO date/time with timezone")
         });
         let mut subscriptions = vec![cx.subscribe_in(&search, window, |app, _, event, _, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -302,9 +310,9 @@ impl NativeApp {
             catalog_open: false,
             project_actions_open: false,
             project_settings: None,
-            action_name: cx.new(|cx| InputState::new(window, cx).placeholder("Action name")),
+            action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
             action_command: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Shell command in the project checkout")
+                single_line_input(window, cx).placeholder("Shell command in the project checkout")
             }),
             action_edit_id: None,
             action_setup: false,
@@ -325,11 +333,11 @@ impl NativeApp {
             worktree_outcome: None,
             worktrees_open: false,
             worktree_ref: cx
-                .new(|cx| InputState::new(window, cx).placeholder("Base or existing branch")),
+                .new(|cx| single_line_input(window, cx).placeholder("Base or existing branch")),
             worktree_branch: cx
-                .new(|cx| InputState::new(window, cx).placeholder("New branch (optional)")),
+                .new(|cx| single_line_input(window, cx).placeholder("New branch (optional)")),
             worktree_path: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Worktree path (optional for creation)")
+                single_line_input(window, cx).placeholder("Worktree path (optional for creation)")
             }),
             refs: vec![],
             refs_cursor: None,
