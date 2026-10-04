@@ -683,6 +683,63 @@ impl NativeApp {
         cx.notify();
     }
 
+    fn update_draft_checkout(&mut self, cx: &mut Context<Self>) {
+        if self.pending_actions > 0 {
+            self.status = "Wait for the pending server receipt".into();
+            cx.notify();
+            return;
+        }
+        let Some(draft) = self.pending_threads.iter_mut().find(|draft| {
+            Some(&draft.thread.id) == self.selected_thread.as_ref()
+                && !self
+                    .shell
+                    .threads
+                    .iter()
+                    .any(|thread| thread.id == draft.thread.id)
+        }) else {
+            self.status = "Select an unsent draft to change its checkout".into();
+            cx.notify();
+            return;
+        };
+        let Some(project) = self
+            .shell
+            .projects
+            .iter()
+            .find(|project| project.id == draft.thread.project_id)
+        else {
+            return;
+        };
+        let base = self.worktree_ref.read(cx).value().trim().to_owned();
+        if self.prepare_new_worktree && base.is_empty() {
+            self.status = "Select a base branch for the new worktree".into();
+            cx.notify();
+            return;
+        }
+        draft.prepare_worktree = self.prepare_new_worktree.then(|| {
+            let mut recipe = json!({"projectCwd":project.workspace_root,"baseBranch":base,"startFromOrigin":self.start_from_origin});
+            let branch = self.worktree_branch.read(cx).value().trim().to_owned();
+            if !branch.is_empty() { recipe["branch"] = json!(branch); }
+            recipe
+        });
+        draft.run_setup_script = self.run_setup_script;
+        draft.thread.branch = None;
+        draft.thread.worktree_path = None;
+        if !self.prepare_new_worktree
+            && let Some((project_id, branch, path)) = &self.new_thread_checkout
+            && project_id == &project.id
+        {
+            draft.thread.branch = Some(branch.clone());
+            draft.thread.worktree_path = path.clone();
+        }
+        if let Some(store) = &mut self.draft_store {
+            store.put_pending(&self.environment_scope, draft.clone());
+        }
+        self.setup_progress = None;
+        self.schedule_draft_save(cx);
+        self.status = "Draft checkout updated; message retained".into();
+        cx.notify();
+    }
+
     fn worktree_operation(&mut self, tag: &str, more: bool, cx: &mut Context<Self>) {
         if self.worktree_busy {
             self.status = "Wait for the worktree operation to finish".into();
@@ -1503,6 +1560,32 @@ impl NativeApp {
             .any(|draft| draft.thread.id == id)
             && !self.shell.threads.iter().any(|thread| thread.id == id);
         self.pending_history_attached = !pending;
+        if pending
+            && let Some(draft) = self
+                .pending_threads
+                .iter()
+                .find(|draft| draft.thread.id == id)
+        {
+            self.prepare_new_worktree = draft.prepare_worktree.is_some();
+            self.run_setup_script = draft.run_setup_script;
+            if let Some(recipe) = &draft.prepare_worktree {
+                self.start_from_origin = recipe["startFromOrigin"] == true;
+                self.worktree_ref.update(cx, |input, cx| {
+                    input.set_value(
+                        recipe["baseBranch"].as_str().unwrap_or_default().to_owned(),
+                        window,
+                        cx,
+                    )
+                });
+                self.worktree_branch.update(cx, |input, cx| {
+                    input.set_value(
+                        recipe["branch"].as_str().unwrap_or_default().to_owned(),
+                        window,
+                        cx,
+                    )
+                });
+            }
+        }
         self.setup_progress = None;
         if let Some(sender) = &self.commands {
             let _ = sender.try_send(connection::Command::Subscribe {
@@ -2683,6 +2766,7 @@ impl Render for NativeApp {
                         .child(Button::new("worktree-origin").label(if self.start_from_origin{"Base: fetch from origin"}else{"Base: local branch"}).on_click(cx.listener(|app,_,_,cx|{app.start_from_origin= !app.start_from_origin;cx.notify();})))
                         .child(Button::new("worktree-setup-script").label(if self.run_setup_script{"Run setup script"}else{"Skip setup script"}).on_click(cx.listener(|app,_,_,cx|{app.run_setup_script= !app.run_setup_script;cx.notify();})))
                         .child(Input::new(&self.worktree_ref)).child(Input::new(&self.worktree_branch)).child(Input::new(&self.worktree_path))
+                        .child(Button::new("draft-checkout-update").debug_selector(||"draft-checkout-update".into()).label("Update selected draft checkout").on_click(cx.listener(|app,_,_,cx|app.update_draft_checkout(cx))))
                         .child(div().flex().gap_2()
                             .child(Button::new("refs-refresh").label("Refresh branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",false,cx))))
                             .child(Button::new("worktree-create").label("Create worktree").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.createWorktree",false,cx))))

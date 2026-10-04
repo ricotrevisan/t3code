@@ -1217,3 +1217,42 @@ fn materialized_bootstrap_draft_attaches_history_once_before_turn_receipt(cx: &m
     assert!(!app.read_with(cx, |app, _| app.pending_history_attached));
     assert_eq!(app.read_with(cx, |app, _| app.pending_threads.len()), 1);
 }
+
+#[gpui::test]
+fn cancelled_draft_checkout_can_change_without_losing_prompt_or_identity(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.title
+                .update(cx, |input, cx| input.set_value("Retry fixture", window, cx));
+            app.new_thread(window, cx);
+            app.composer.update(cx, |input, cx| {
+                input.set_value("Retained prompt 世界", window, cx)
+            });
+            app.prepare_new_worktree = true;
+            app.worktree_ref
+                .update(cx, |input, cx| input.set_value("main", window, cx));
+            app.worktree_branch
+                .update(cx, |input, cx| input.set_value("fresh-retry", window, cx));
+            app.update_draft_checkout(cx);
+            app.send_prompt(window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let mut payload = None;
+    while let Ok(command) = requests.try_recv() {
+        if let connection::Command::Call { payload: sent, .. } = command {
+            payload = Some(sent);
+        }
+    }
+    let payload = payload.expect("first turn command");
+    assert_eq!(payload["message"]["text"], "Retained prompt 世界");
+    assert_eq!(
+        payload["bootstrap"]["prepareWorktree"]["branch"],
+        "fresh-retry"
+    );
+    assert_eq!(
+        payload["threadId"],
+        app.read_with(cx, |app, _| app.pending_threads[0].thread.id.clone())
+    );
+}
