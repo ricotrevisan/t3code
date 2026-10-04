@@ -407,6 +407,7 @@ fn changing_server_cannot_reuse_another_origins_access_credential(cx: &mut TestA
             app.access = Some(auth::Access {
                 origin: "http://localhost:1234".into(),
                 token: "private-first-origin".into(),
+                proof_key: None,
             });
             app.server.update(cx, |input, cx| {
                 input.set_value("http://localhost:5678", window, cx)

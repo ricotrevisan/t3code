@@ -1306,8 +1306,13 @@ impl NativeApp {
                     }
                     match result {
                         Ok(Some(token)) if loading => {
-                            app.access = Some(auth::Access { origin, token });
-                            app.connect(cx);
+                            match auth::Access::from_keychain(origin, token) {
+                                Ok(access) => {
+                                    app.access = Some(access);
+                                    app.connect(cx);
+                                }
+                                Err(error) => app.status = error.into(),
+                            }
                         }
                         Ok(None) if loading => {
                             app.status =
@@ -1330,7 +1335,10 @@ impl NativeApp {
             .as_ref()
             .filter(|access| Some(&access.origin) == origin.as_ref())
         {
-            self.credential_operation(credentials::Operation::Remember(access.token.clone()), cx);
+            self.credential_operation(
+                credentials::Operation::Remember(access.keychain_value()),
+                cx,
+            );
         } else {
             self.status = "Pair with this server before remembering its credential".into();
             cx.notify();
@@ -1369,6 +1377,12 @@ impl NativeApp {
         if let Some(token) = token {
             match connection::ConnectionOptions::new(&base, token) {
                 Ok(options) => {
+                    let options = options.with_proof_key(
+                        self.access
+                            .as_ref()
+                            .filter(|access| Some(&access.origin) == origin.as_ref())
+                            .and_then(|access| access.proof_key.clone()),
+                    );
                     let scope = options.origin();
                     if scope != self.environment_scope {
                         self.drafts.clear();

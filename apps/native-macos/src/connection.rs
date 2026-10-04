@@ -76,6 +76,7 @@ pub async fn call(
 pub struct ConnectionOptions {
     base: Url,
     token: String,
+    proof_key: Option<crate::dpop::Key>,
 }
 
 impl ConnectionOptions {
@@ -103,7 +104,16 @@ impl ConnectionOptions {
         if token.trim().is_empty() {
             return Err("A bearer access token is required");
         }
-        Ok(Self { base, token })
+        Ok(Self {
+            base,
+            token,
+            proof_key: None,
+        })
+    }
+
+    pub fn with_proof_key(mut self, key: Option<crate::dpop::Key>) -> Self {
+        self.proof_key = key;
+        self
     }
 }
 
@@ -155,14 +165,23 @@ async fn connect(options: &ConnectionOptions) -> Result<Socket, Failure> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| Failure::blocked("Could not create HTTP client"))?;
-    let response = client
-        .post(
-            options
-                .base
-                .join("api/auth/websocket-ticket")
-                .map_err(|_| Failure::blocked("Invalid ticket endpoint"))?,
-        )
-        .bearer_auth(&options.token)
+    let endpoint = options
+        .base
+        .join("api/auth/websocket-ticket")
+        .map_err(|_| Failure::blocked("Invalid ticket endpoint"))?;
+    let request = client.post(endpoint.clone());
+    let request = if let Some(key) = &options.proof_key {
+        request
+            .header("Authorization", format!("DPoP {}", options.token))
+            .header(
+                "DPoP",
+                key.proof("POST", endpoint.as_str(), Some(&options.token))
+                    .map_err(Failure::blocked)?,
+            )
+    } else {
+        request.bearer_auth(&options.token)
+    };
+    let response = request
         .send()
         .await
         .map_err(|_| Failure::transient("Could not reach authorization endpoint"))?;

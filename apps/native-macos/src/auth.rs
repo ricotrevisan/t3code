@@ -8,6 +8,52 @@ use url::Url;
 pub struct Access {
     pub origin: String,
     pub token: String,
+    pub proof_key: Option<crate::dpop::Key>,
+}
+
+impl Access {
+    pub fn keychain_value(&self) -> String {
+        match &self.proof_key {
+            Some(key) => {
+                serde_json::json!({"version":1,"token":self.token,"proof_key":key.keychain_value()})
+                    .to_string()
+            }
+            None => self.token.clone(),
+        }
+    }
+
+    pub fn from_keychain(origin: String, value: String) -> Result<Self, &'static str> {
+        if value.starts_with('{') {
+            let record: serde_json::Value =
+                serde_json::from_str(&value).map_err(|_| "Invalid stored credential")?;
+            if record["version"] != 1 {
+                return Err("Unsupported stored credential");
+            }
+            let token = record["token"]
+                .as_str()
+                .filter(|token| !token.trim().is_empty())
+                .ok_or("Invalid stored credential")?
+                .to_owned();
+            let proof_key = crate::dpop::Key::from_keychain(
+                record["proof_key"]
+                    .as_str()
+                    .ok_or("Invalid stored proof key")?,
+            )?;
+            Ok(Self {
+                origin,
+                token,
+                proof_key: Some(proof_key),
+            })
+        } else if !value.trim().is_empty() {
+            Ok(Self {
+                origin,
+                token: value,
+                proof_key: None,
+            })
+        } else {
+            Err("Invalid stored credential")
+        }
+    }
 }
 
 pub fn origin(value: &str) -> Result<String, &'static str> {
@@ -52,6 +98,14 @@ struct TokenResult {
 }
 
 pub async fn exchange(server: &str, credential: &str) -> Result<Access, &'static str> {
+    exchange_with_key(server, credential, None).await
+}
+
+pub async fn exchange_with_key(
+    server: &str,
+    credential: &str,
+    proof_key: Option<crate::dpop::Key>,
+) -> Result<Access, &'static str> {
     let (origin, token) = bootstrap(server, credential)?;
     let url = Url::parse(&origin)
         .map_err(|_| "Invalid server origin")?
@@ -62,26 +116,28 @@ pub async fn exchange(server: &str, credential: &str) -> Result<Access, &'static
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "Could not create authorization client")?;
-    let response = client
-        .post(url)
-        .form(&[
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:token-exchange",
-            ),
-            ("subject_token", token.as_str()),
-            (
-                "subject_token_type",
-                "urn:t3:params:oauth:token-type:environment-bootstrap",
-            ),
-            (
-                "requested_token_type",
-                "urn:ietf:params:oauth:token-type:access_token",
-            ),
-            ("client_label", "T3 Code Native"),
-            ("client_device_type", "desktop"),
-            ("client_os", "macOS"),
-        ])
+    let mut request = client.post(url.clone()).form(&[
+        (
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ),
+        ("subject_token", token.as_str()),
+        (
+            "subject_token_type",
+            "urn:t3:params:oauth:token-type:environment-bootstrap",
+        ),
+        (
+            "requested_token_type",
+            "urn:ietf:params:oauth:token-type:access_token",
+        ),
+        ("client_label", "T3 Code Native"),
+        ("client_device_type", "desktop"),
+        ("client_os", "macOS"),
+    ]);
+    if let Some(key) = &proof_key {
+        request = request.header("DPoP", key.proof("POST", url.as_str(), None)?);
+    }
+    let response = request
         .send()
         .await
         .map_err(|_| "Could not reach pairing endpoint")?;
@@ -92,7 +148,12 @@ pub async fn exchange(server: &str, credential: &str) -> Result<Access, &'static
         .json()
         .await
         .map_err(|_| "Invalid pairing response")?;
-    if result.token_type != "Bearer"
+    if result.token_type
+        != if proof_key.is_some() {
+            "DPoP"
+        } else {
+            "Bearer"
+        }
         || result.issued_token_type != "urn:ietf:params:oauth:token-type:access_token"
         || result.access_token.trim().is_empty()
         || !result.expires_in.is_finite()
@@ -103,6 +164,7 @@ pub async fn exchange(server: &str, credential: &str) -> Result<Access, &'static
     Ok(Access {
         origin,
         token: result.access_token,
+        proof_key,
     })
 }
 
@@ -124,7 +186,7 @@ pub fn pair(
         };
         runtime.block_on(async move {
             tokio::select! {
-                result=exchange(&server,&credential)=>{ let _=sender.send(result).await; }
+                result=exchange_with_key(&server,&credential,Some(crate::dpop::Key::generate()))=>{ let _=sender.send(result).await; }
                 _=sender.closed()=>{}
             }
         });
@@ -135,6 +197,38 @@ pub fn pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn keychain_restore_preserves_proof_binding_and_legacy_bearer_credentials() {
+        let access = Access {
+            origin: "https://owned.invalid".into(),
+            token: "owned-access".into(),
+            proof_key: Some(crate::dpop::Key::generate()),
+        };
+        let restored =
+            Access::from_keychain(access.origin.clone(), access.keychain_value()).unwrap();
+        assert_eq!(access.token, restored.token);
+        assert_eq!(
+            access.proof_key.unwrap().public_jwk(),
+            restored.proof_key.unwrap().public_jwk()
+        );
+        let legacy =
+            Access::from_keychain("https://owned.invalid".into(), "owned-bearer".into()).unwrap();
+        assert!(legacy.proof_key.is_none());
+        assert!(
+            Access::from_keychain(
+                "https://owned.invalid".into(),
+                r#"{"version":2,"token":"owned"}"#.into()
+            )
+            .is_err()
+        );
+        assert!(
+            Access::from_keychain(
+                "https://owned.invalid".into(),
+                r#"{"version":1,"token":"owned","proof_key":"invalid"}"#.into()
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn pairing_link_cannot_send_token_to_a_different_server() {
         assert!(bootstrap("https://host", "https://other/pair#token=secret").is_err());

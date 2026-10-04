@@ -22,7 +22,9 @@ to reconnect to the entered origin after relaunch. **Forget credential** disconn
 and removes that origin's local credential; it does not revoke the server session.
 Keychain operations run on an ordered background worker, so forgetting cannot be
 undone by an earlier delayed save. Plain HTTP is accepted only for loopback;
-remote origins require HTTPS. DPoP and relay pairing are not implemented yet.
+remote origins require HTTPS. Pairing binds the credential to a DPoP key; remembering
+it retains both the key and access token in Keychain. Previously remembered bearer
+credentials remain readable. Relay pairing is not implemented yet.
 
 For development, `T3_NATIVE_SERVER` and `T3_NATIVE_ACCESS_TOKEN` optionally supply
 an existing bearer **access token**, scoped to that server origin. Do not put
