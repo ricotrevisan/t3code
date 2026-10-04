@@ -325,6 +325,19 @@ function hasLiveRlmChildren(ctx: PrimeSessionContext): boolean {
   return false;
 }
 
+/**
+ * A run whose final assistant message requests a tool has not finished its
+ * tool loop, even though Prime emits `agent_end` for it. Prime's `done`
+ * streaming reason is one of `"stop" | "length" | "toolUse"` (docs/rpc.md),
+ * so `"toolUse"` means the loop owed another step. Settling here would turn
+ * one logical turn into one T3 turn per step and notify on each; the following
+ * `agent_start` reuses the still-open turn instead.
+ */
+function runEndedMidToolLoop(messages: ReadonlyArray<unknown> | undefined): boolean {
+  const stopReason = lastAssistantOutcome(messages ?? [])?.stopReason;
+  return typeof stopReason === "string" && stopReason.trim() === "toolUse";
+}
+
 function turnIsQuiescent(ctx: PrimeSessionContext): boolean {
   return (
     !ctx.parentCycleOpen &&
@@ -332,7 +345,8 @@ function turnIsQuiescent(ctx: PrimeSessionContext): boolean {
     ctx.queuedActionCount === 0 &&
     ctx.pendingUserInputs.size === 0 &&
     ctx.pendingApprovals.size === 0 &&
-    !hasLiveRlmChildren(ctx)
+    !hasLiveRlmChildren(ctx) &&
+    !runEndedMidToolLoop(ctx.latestAgentEndMessages)
   );
 }
 

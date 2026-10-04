@@ -1864,6 +1864,126 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
     }),
   );
 
+  it.effect("keeps one turn open when an agent run ends mid-tool-loop", () =>
+    Effect.gen(function* () {
+      const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
+      const adapter = yield* makeTestAdapter(binaryPath);
+      const threadId = ThreadId.make("prime-mid-loop-thread");
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const eventFiber = yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            runtimeEvents.push(event);
+            const hasVerdict = runtimeEvents.some(
+              (entry) =>
+                entry.type === "content.delta" &&
+                entry.payload.streamKind === "assistant_text" &&
+                entry.payload.delta.includes("## Mid-loop verdict"),
+            );
+            if (event.type === "turn.completed" && hasVerdict) {
+              yield* Deferred.succeed(turnCompleted, undefined).pipe(Effect.ignore);
+            }
+          }),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "mid-loop continuation",
+        attachments: [],
+      });
+      yield* Deferred.await(turnCompleted);
+
+      // The first agent run ends with a tool-call assistant message, so it must
+      // not settle; the following agent_start continues the same T3 turn.
+      const startedTurnIds = runtimeEvents
+        .filter((event) => event.type === "turn.started")
+        .map((event) => event.turnId);
+      assert.deepEqual(startedTurnIds, [turn.turnId]);
+
+      const completedTurnIds = runtimeEvents
+        .filter((event) => event.type === "turn.completed")
+        .map((event) => event.turnId);
+      assert.deepEqual(completedTurnIds, [turn.turnId]);
+
+      const verdictDelta = runtimeEvents.find(
+        (event) =>
+          event.type === "content.delta" &&
+          event.payload.streamKind === "assistant_text" &&
+          event.payload.delta.includes("## Mid-loop verdict"),
+      );
+      assert.isDefined(verdictDelta);
+      assert.equal(verdictDelta?.turnId, turn.turnId);
+      const completionIndex = runtimeEvents.findIndex((event) => event.type === "turn.completed");
+      assert.isAbove(completionIndex, runtimeEvents.indexOf(verdictDelta!));
+
+      yield* adapter.stopSession(threadId);
+      yield* Fiber.interrupt(eventFiber);
+    }),
+  );
+
+  it.effect("still closes a held-open mid-loop turn on interrupt", () =>
+    Effect.gen(function* () {
+      const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
+      const adapter = yield* makeTestAdapter(binaryPath);
+      const threadId = ThreadId.make("prime-mid-loop-interrupt-thread");
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const toolCompleted = yield* Deferred.make<void>();
+      const turnCompleted = yield* Deferred.make<void>();
+      const eventFiber = yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            runtimeEvents.push(event);
+            if (event.type === "item.completed") {
+              yield* Deferred.succeed(toolCompleted, undefined).pipe(Effect.ignore);
+            }
+            if (event.type === "turn.completed") {
+              yield* Deferred.succeed(turnCompleted, undefined).pipe(Effect.ignore);
+            }
+          }),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "mid-loop stall",
+        attachments: [],
+      });
+      yield* Deferred.await(toolCompleted);
+      // The mid-loop agent_end must not have settled the turn...
+      assert.isUndefined(runtimeEvents.find((event) => event.type === "turn.completed"));
+
+      // ...but interrupting must still close it, so the guard is not one-way.
+      yield* adapter.interruptTurn(threadId, turn.turnId);
+      yield* Deferred.await(turnCompleted);
+
+      const completedEvents = runtimeEvents.filter((event) => event.type === "turn.completed");
+      assert.lengthOf(completedEvents, 1);
+      assert.equal(completedEvents[0]?.turnId, turn.turnId);
+      assert.equal(completedEvents[0]?.payload.state, "interrupted");
+
+      yield* adapter.stopSession(threadId);
+      yield* Fiber.interrupt(eventFiber);
+    }),
+  );
+
   it.effect("flushes assistant text from agent_end when Prime skipped deltas", () =>
     Effect.gen(function* () {
       const binaryPath = yield* Effect.promise(() => makeMockPrimeWrapper());
