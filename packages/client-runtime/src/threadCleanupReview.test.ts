@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   ThreadId,
   type ThreadCleanupReview,
+  type OrchestrationThreadShell,
   type ThreadCleanupResult,
 } from "@t3tools/contracts";
 import { createThreadCleanupReview } from "./threadCleanupReview.ts";
@@ -184,5 +185,109 @@ describe("shared cleanup review", () => {
     expect(controller.getSnapshot().busy).toBe(false);
     await controller.reviewAgain();
     expect(controller.getSnapshot().error).toBeNull();
+  });
+});
+
+const lifecycle = {
+  archivedAt: null,
+  settledOverride: "settled",
+  settledAt: "2026-01-01T00:00:00Z",
+  session: { status: "ready" },
+  latestTurn: null,
+  backgroundLiveness: null,
+  hasPendingApprovals: false,
+  hasPendingUserInput: false,
+  latestUserMessageAt: null,
+  worktreePath: "/fixture",
+  branch: "task",
+} as OrchestrationThreadShell;
+const eligible = { ...review, actions: review.actions.map((a) => ({ ...a, blockedReason: null })) };
+const blocked = {
+  ...review,
+  actions: review.actions.map((a) => ({ ...a, blockedReason: "Session has not stopped" })),
+};
+describe("cleanup lifecycle refresh", () => {
+  it("refreshes the blocked settle review when the projected session stops, without running anything", async () => {
+    const inspect = vi.fn(async () =>
+      success(inspect.mock.calls.length === 1 ? blocked : eligible),
+    );
+    const run = vi.fn(async () => success({ threadId: target.threadId, actions: [] }));
+    const c = createThreadCleanupReview(target, { inspect, run });
+    await c.observeThread(lifecycle);
+    await c.reviewAgain();
+    expect(c.getSnapshot().selected).toEqual([]);
+    await c.observeThread({ ...lifecycle, session: { ...lifecycle.session!, status: "stopped" } });
+    expect(c.getSnapshot().review?.actions.every((a) => a.blockedReason === null)).toBe(true);
+    expect(c.getSnapshot().selected).toEqual(["worktree"]);
+    expect(inspect).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+  it("keeps a failed stop blocked and does not loop on unrelated updates", async () => {
+    const inspect = vi.fn(async () => success(blocked));
+    const c = createThreadCleanupReview(target, { inspect, run: vi.fn() });
+    await c.observeThread(lifecycle);
+    await c.reviewAgain();
+    await c.observeThread({ ...lifecycle, title: "Unrelated", updatedAt: "later" });
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(c.getSnapshot().selected).toEqual([]);
+    await c.observeThread({ ...lifecycle, session: { ...lifecycle.session!, status: "error" } });
+    expect(inspect).toHaveBeenCalledTimes(2);
+    expect(c.getSnapshot().selected).toEqual([]);
+  });
+  it("preserves explicit choices across automatic refresh, including temporary blockers", async () => {
+    let response: ThreadCleanupReview = eligible;
+    const c = createThreadCleanupReview(target, {
+      inspect: async () => success(response),
+      run: vi.fn(),
+    });
+    await c.observeThread(lifecycle);
+    await c.reviewAgain();
+    c.toggle("worktree", false);
+    c.toggle("archive", true);
+    response = blocked;
+    await c.observeThread({ ...lifecycle, hasPendingApprovals: true });
+    expect(c.getSnapshot().selected).toEqual([]);
+    response = eligible;
+    await c.observeThread({ ...lifecycle, hasPendingApprovals: false });
+    expect(c.getSnapshot().selected).toEqual(["archive"]);
+  });
+  it("discards a stale blocked async response and prevents execution while refreshing", async () => {
+    const old = deferred<ReturnType<typeof success<ThreadCleanupReview>>>();
+    const fresh = deferred<ReturnType<typeof success<ThreadCleanupReview>>>();
+    const inspect = vi
+      .fn()
+      .mockImplementationOnce(() => old.promise)
+      .mockImplementationOnce(() => fresh.promise);
+    const run = vi.fn();
+    const c = createThreadCleanupReview(target, { inspect, run });
+    await c.observeThread(lifecycle);
+    const first = c.reviewAgain();
+    const refresh = c.observeThread({
+      ...lifecycle,
+      session: { ...lifecycle.session!, status: "stopped" },
+    });
+    await c.execute();
+    expect(run).not.toHaveBeenCalled();
+    fresh.resolve(success({ ...eligible, reviewId: "fresh" }));
+    await refresh;
+    old.resolve(success(blocked));
+    await first;
+    expect(c.getSnapshot().review?.reviewId).toBe("fresh");
+  });
+  it("does not reopen disposed reviews or invalidate a cleanup in progress", async () => {
+    const pending = deferred<ReturnType<typeof success<ThreadCleanupResult>>>();
+    const inspect = vi.fn(async () => success(eligible));
+    const c = createThreadCleanupReview(target, { inspect, run: () => pending.promise });
+    await c.observeThread(lifecycle);
+    await c.reviewAgain();
+    const running = c.execute();
+    await c.observeThread({ ...lifecycle, archivedAt: "later" });
+    expect(inspect).toHaveBeenCalledOnce();
+    pending.resolve(success({ threadId: target.threadId, actions: [] }));
+    await running;
+    expect(c.getSnapshot().result).not.toBeNull();
+    c.dispose();
+    await c.observeThread(lifecycle);
+    expect(inspect).toHaveBeenCalledOnce();
   });
 });

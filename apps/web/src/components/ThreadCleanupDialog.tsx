@@ -1,3 +1,4 @@
+import { useThreadShell } from "../state/entities";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { create } from "zustand";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -29,6 +30,7 @@ export function ThreadCleanupDialogHost() {
 }
 
 function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
+  const thread = useThreadShell(target);
   const inspect = useAtomCommand(threadEnvironment.reviewCleanup, { reportFailure: false });
   const run = useAtomCommand(threadEnvironment.runCleanup, { reportFailure: false });
   const controller = useMemo(
@@ -47,6 +49,9 @@ function ThreadCleanupDialog({ target }: { target: ScopedThreadRef }) {
     void controller.reviewAgain();
     return controller.dispose;
   }, [controller]);
+  useEffect(() => {
+    void controller.observeThread(thread);
+  }, [controller, thread]);
   const close = controller.dismiss;
   return (
     <Dialog

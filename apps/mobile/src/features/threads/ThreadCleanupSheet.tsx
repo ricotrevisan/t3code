@@ -1,3 +1,4 @@
+import { useThreadShell } from "../../state/entities";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Modal, Pressable, ScrollView, View } from "react-native";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -35,6 +36,7 @@ export function ThreadCleanupHost() {
   ) : null;
 }
 function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onClose: () => void }) {
+  const thread = useThreadShell(target);
   const inspect = useAtomCommand(threadEnvironment.reviewCleanup, { reportFailure: false });
   const run = useAtomCommand(threadEnvironment.runCleanup, { reportFailure: false });
   const controller = useMemo(
@@ -53,6 +55,9 @@ function ThreadCleanupSheet({ target, onClose }: { target: ScopedThreadRef; onCl
     void controller.reviewAgain();
     return controller.dispose;
   }, [controller]);
+  useEffect(() => {
+    void controller.observeThread(thread);
+  }, [controller, thread]);
   return (
     <Modal visible transparent animationType="fade" onRequestClose={controller.dismiss}>
       <View className="flex-1 items-center justify-center bg-backdrop px-6">

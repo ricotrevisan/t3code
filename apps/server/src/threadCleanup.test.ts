@@ -2,6 +2,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -272,6 +273,67 @@ it.layer(live)("reviewed thread cleanup", (it) => {
       ]);
       expect((yield* f.review()).actions[1]?.blockedReason).toContain("push target");
     }),
+  );
+  it.effect(
+    "distinguishes lifecycle blockers and only enables cleanup after a successful stop",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.update({ latestUserMessageAt: null });
+        const session = {
+          threadId: f.thread().id,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: NOW,
+        } as NonNullable<OrchestrationThreadShell["session"]>;
+        for (const status of ["starting", "running", "ready", "error"] as const) {
+          f.update({ session: { ...session, status } });
+          const blocked = yield* f.review();
+          expect(blocked.actions.every((a) => a.blockedReason?.includes(`(${status})`))).toBe(true);
+          const result = yield* f.execute(blocked.reviewId);
+          expect(result.actions.map((a) => a.status)).toEqual(["deferred", "deferred"]);
+          expect(yield* f.fs.exists(f.worktree)).toBe(true);
+          expect(f.thread().archivedAt).toBeNull();
+        }
+        f.update({ session: { ...session, status: "stopped" } });
+        expect((yield* f.review()).actions.every((a) => a.blockedReason === null)).toBe(true);
+        const gates: [Partial<OrchestrationThreadShell>, string][] = [
+          [{ hasPendingApprovals: true }, "approval"],
+          [{ hasPendingUserInput: true }, "user input"],
+          [
+            {
+              backgroundLiveness: {} as NonNullable<OrchestrationThreadShell["backgroundLiveness"]>,
+            },
+            "Background work",
+          ],
+          [
+            {
+              latestTurn: { state: "running" } as NonNullable<
+                OrchestrationThreadShell["latestTurn"]
+              >,
+            },
+            "turn is still running",
+          ],
+          [{ latestUserMessageAt: DateTime.formatIso(yield* DateTime.now) }, "queued turn"],
+        ];
+        for (const [patch, message] of gates) {
+          f.update({
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            backgroundLiveness: null,
+            latestTurn: null,
+            latestUserMessageAt: null,
+            ...patch,
+          });
+          expect((yield* f.review()).actions.every((a) => a.blockedReason?.includes(message))).toBe(
+            true,
+          );
+        }
+      }),
   );
   it.effect("defers selected actions when a thread resumes after review", () =>
     Effect.gen(function* () {

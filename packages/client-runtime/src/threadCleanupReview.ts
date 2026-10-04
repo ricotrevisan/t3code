@@ -1,6 +1,7 @@
 // @effect-diagnostics globalTimers:off globalDate:off - UI dismissal timing outside an Effect runtime; disposed with the review.
 import type {
   ScopedThreadRef,
+  OrchestrationThreadShell,
   ThreadCleanupReview,
   ThreadCleanupResult,
   ThreadCleanupRunInput,
@@ -43,6 +44,8 @@ export function createThreadCleanupReview(
   let interacted = false;
   let dismissed = false;
   let generation = 0;
+  let lifecycleKey: string | undefined;
+  const choices = new Map<ThreadCleanupRunInput["selected"][number], boolean>();
   const listeners = new Set<() => void>();
   const update = (patch: Partial<CleanupState>) => {
     state = { ...state, ...patch };
@@ -75,6 +78,34 @@ export function createThreadCleanupReview(
       else update({ remainingSeconds });
     }, 1000);
   };
+  const inspectReview = async (automatic = false) => {
+    if (state.busy) return;
+    if (automatic && (dismissed || state.result)) return;
+    if (!automatic) {
+      dismissed = false;
+      choices.clear();
+      startCountdown();
+    }
+    const current = ++generation;
+    update({ review: null, result: null, selected: [], error: null });
+    try {
+      const response = await commands.inspect({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId },
+      });
+      if (current !== generation) return;
+      if (response._tag === "Success")
+        update({
+          review: response.value,
+          selected: response.value.actions
+            .filter((a) => !a.blockedReason && (choices.get(a.id) ?? a.id !== "archive"))
+            .map((a) => a.id),
+        });
+      else update({ error: String(squashAtomCommandFailure(response)) });
+    } catch (error) {
+      if (current === generation) update({ error: String(error) });
+    }
+  };
   return {
     interact,
     dismiss,
@@ -90,29 +121,32 @@ export function createThreadCleanupReview(
       stopCountdown();
       generation++;
     },
-    reviewAgain: async () => {
-      if (state.busy) return;
-      dismissed = false;
-      startCountdown();
-      const current = ++generation;
-      update({ review: null, result: null, selected: [], error: null });
-      try {
-        const response = await commands.inspect({
-          environmentId: target.environmentId,
-          input: { threadId: target.threadId },
-        });
-        if (current !== generation) return;
-        if (response._tag === "Success")
-          update({
-            review: response.value,
-            selected: response.value.actions
-              .filter((a) => a.id !== "archive" && !a.blockedReason)
-              .map((a) => a.id),
-          });
-        else update({ error: String(squashAtomCommandFailure(response)) });
-      } catch (error) {
-        if (current === generation) update({ error: String(error) });
-      }
+    reviewAgain: () => inspectReview(),
+    /** Observe the shell, not chat/message updates. Settlement and session stop are separate events. */
+    observeThread: async (thread: OrchestrationThreadShell | null) => {
+      const key = JSON.stringify(
+        thread === null
+          ? null
+          : [
+              thread.archivedAt,
+              thread.settledOverride,
+              thread.settledAt,
+              thread.session?.status,
+              thread.latestTurn?.state,
+              thread.latestTurn?.requestedAt,
+              thread.latestTurn?.startedAt,
+              thread.latestTurn?.completedAt,
+              thread.backgroundLiveness != null,
+              thread.hasPendingApprovals,
+              thread.hasPendingUserInput,
+              thread.latestUserMessageAt,
+              thread.worktreePath,
+              thread.branch,
+            ],
+      );
+      const previous = lifecycleKey;
+      lifecycleKey = key;
+      if (previous !== undefined && previous !== key) await inspectReview(true);
     },
     toggle: (id: ThreadCleanupRunInput["selected"][number], checked: boolean) => {
       interact();
@@ -123,6 +157,7 @@ export function createThreadCleanupReview(
         !state.review?.actions.some((a) => a.id === id && !a.blockedReason)
       )
         return;
+      choices.set(id, checked);
       update({
         selected: checked
           ? [...new Set([...state.selected, id])]

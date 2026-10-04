@@ -9,15 +9,18 @@ export function threadCleanupBlockReason(
   if (thread.archivedAt !== null) return "This thread is already archived.";
   if (thread.settledOverride !== "settled" || thread.settledAt === null)
     return "This thread is active. Settle it before cleaning up.";
-  if (
-    (thread.session !== null && thread.session.status !== "stopped") ||
-    thread.latestTurn?.state === "running" ||
-    thread.backgroundLiveness != null ||
-    thread.hasPendingApprovals ||
-    thread.hasPendingUserInput ||
-    threadHasQueuedTurnStart(thread, now)
-  )
-    return "This thread still has an active session or pending work. Review again once it stops.";
+  if (thread.latestTurn?.state === "running")
+    return "This thread's turn is still running. Wait for it to finish before cleaning up.";
+  if (thread.backgroundLiveness != null)
+    return "Background work is still active. Wait for it to finish before cleaning up.";
+  if (thread.hasPendingApprovals)
+    return "This thread has a pending approval. Resolve it before cleaning up.";
+  if (thread.hasPendingUserInput)
+    return "This thread is waiting for user input. Resolve it before cleaning up.";
+  if (threadHasQueuedTurnStart(thread, now))
+    return "This thread has a queued turn. Wait for it to finish before cleaning up.";
+  if (thread.session !== null && thread.session.status !== "stopped")
+    return `The provider session has not stopped (${thread.session.status}). Wait for it to stop, or retry stopping it if the stop failed.`;
   return null;
 }
 
