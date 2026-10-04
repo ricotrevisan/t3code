@@ -369,7 +369,6 @@ impl NativeApp {
             _subscriptions: subscriptions,
         };
         if auto_connect {
-            app.connect(cx);
             match drafts::Drafts::open(drafts::default_path()) {
                 Ok(store) => app.draft_store = Some(store),
                 Err(_) => app.storage_error = Some(
@@ -377,6 +376,7 @@ impl NativeApp {
                         .into(),
                 ),
             }
+            app.connect(cx);
         }
         app
     }
