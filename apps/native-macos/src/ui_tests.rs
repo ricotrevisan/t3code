@@ -148,6 +148,62 @@ fn palette_deletion_still_requires_confirmation_and_shortcut_stash_preserves_tex
 }
 
 #[gpui::test]
+fn workspace_browse_and_path_search_use_server_and_ignore_other_project_results(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, cx| app.list_files(false, cx)));
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("list request");
+    };
+    assert_eq!(tag, "projects.listEntries");
+    assert_eq!(payload["directoryPath"], "");
+    assert_eq!(payload["cwd"], "/tmp/fixture");
+    reply.send_blocking(Ok(json!({"entries":[{"path":"src","kind":"directory"},{"path":"README.md","kind":"file"}],"truncated":false}))).unwrap();
+    cx.run_until_parked();
+    assert_eq!(app.read_with(cx, |app, _| app.file_entries.len()), 2);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.file_path
+                .update(cx, |input, cx| input.set_value("README", window, cx));
+            app.list_files(true, cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("search request");
+    };
+    assert_eq!(tag, "projects.searchEntries");
+    assert_eq!(payload["query"], "README");
+    assert_eq!(payload["limit"], 100);
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| {
+            app.selected_project = Some("other-project".into())
+        })
+    });
+    reply
+        .send_blocking(Ok(json!({"entries":[],"truncated":true})))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.file_entries.len()),
+        2,
+        "outdated listing must not replace current results"
+    );
+}
+
+#[gpui::test]
 fn loaded_file_editor_accepts_real_input_dispatch(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {

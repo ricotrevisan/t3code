@@ -74,6 +74,10 @@ struct NativeApp {
     file_epoch: u64,
     file_busy: bool,
     file_environment: String,
+    file_entries: Vec<files::Entry>,
+    file_listing_truncated: bool,
+    file_listing_task: Option<Task<()>>,
+    file_listing_epoch: u64,
     drafts: std::collections::HashMap<String, String>,
     draft_store: Option<drafts::Drafts>,
     draft_save: Option<Task<()>>,
@@ -222,6 +226,10 @@ impl NativeApp {
             file_epoch: 0,
             file_busy: false,
             file_environment: String::new(),
+            file_entries: vec![],
+            file_listing_truncated: false,
+            file_listing_task: None,
+            file_listing_epoch: 0,
             drafts: Default::default(),
             draft_store: None,
             draft_save: None,
@@ -348,6 +356,67 @@ impl NativeApp {
                 cx,
             ),
         }
+    }
+
+    fn list_files(&mut self, search: bool, cx: &mut Context<Self>) {
+        let Some(sender) = self.commands.clone() else {
+            self.status = "Not connected".into();
+            cx.notify();
+            return;
+        };
+        let Some(project) = self
+            .selected_project
+            .as_ref()
+            .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
+        else {
+            self.status = "Select a project first".into();
+            cx.notify();
+            return;
+        };
+        let cwd = project.workspace_root.clone();
+        let query = self.file_path.read(cx).value().to_string();
+        let payload = if search {
+            json!({"cwd":cwd,"query":query,"limit":100})
+        } else {
+            json!({"cwd":cwd,"directoryPath":query.trim()})
+        };
+        self.file_listing_epoch += 1;
+        let epoch = self.file_listing_epoch;
+        let generation = self.generation;
+        let project_id = self.selected_project.clone();
+        self.file_listing_task = Some(cx.spawn(async move |entity, cx| {
+            let result = connection::call(
+                &sender,
+                if search {
+                    "projects.searchEntries"
+                } else {
+                    "projects.listEntries"
+                },
+                payload,
+            )
+            .await;
+            let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation
+                    || app.file_listing_epoch != epoch
+                    || app.selected_project != project_id
+                {
+                    return;
+                }
+                match result {
+                    Ok(value) => match serde_json::from_value::<files::Listing>(value) {
+                        Ok(list) => {
+                            app.file_entries = list.entries;
+                            app.file_listing_truncated = list.truncated;
+                            app.status = "Workspace entries loaded".into();
+                        }
+                        Err(_) => app.status = "Invalid workspace listing".into(),
+                    },
+                    Err(error) => app.status = error,
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn file_operation(&mut self, write: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -512,6 +581,9 @@ impl NativeApp {
         self.pending_actions = 0;
         self.file_epoch += 1;
         self.file_busy = false;
+        self.file_listing_task = None;
+        self.file_entries.clear();
+        self.file_listing_epoch += 1;
         if !self.file_editor.dirty(&self.file_contents.read(cx).value()) {
             self.file_editor = files::Editor::default();
         }
@@ -1101,6 +1173,9 @@ impl Render for NativeApp {
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.selected_project = Some(project_id.clone());
                         app.confirm_project_removal = None;
+                        app.file_entries.clear();
+                        app.file_listing_task = None;
+                        app.file_listing_epoch += 1;
                         app.title
                             .update(cx, |input, cx| input.set_value(title.clone(), window, cx));
                         app.workspace.update(cx, |input, cx| {
@@ -1504,6 +1579,18 @@ impl Render for NativeApp {
                                 .flex_col()
                                 .gap_2()
                                 .child(Input::new(&self.file_path))
+                            .child(div().flex().gap_2()
+                                .child(Button::new("list-files").debug_selector(||"list-files".into()).label("Browse directory").on_click(cx.listener(|app,_,_,cx|app.list_files(false,cx))))
+                                .child(Button::new("search-files").debug_selector(||"search-files".into()).label("Search file paths").on_click(cx.listener(|app,_,_,cx|app.list_files(true,cx)))))
+                            .when(self.file_listing_truncated,|view|view.child("Results truncated; refine the path or search"))
+                            .child(div().id("file-entry-list").max_h(px(160.)).overflow_y_scroll().flex().flex_col().gap_1().children(self.file_entries.iter().enumerate().map(|(index,entry)| {
+                                let path=entry.path.clone();let directory=entry.kind=="directory";
+                                Button::new(gpui::SharedString::from(format!("file-entry-{index}"))).debug_selector(move||format!("file-entry-{index}")).label(format!("{}{}",entry.path,if directory { "/" } else { "" }))
+                                    .on_click(cx.listener(move|app,_,window,cx| {
+                                        app.file_path.update(cx,|input,cx|input.set_value(path.clone(),window,cx));
+                                        if directory { app.list_files(false,cx); } else { app.file_operation(false,window,cx); }
+                                    }))
+                            })))
                                 .child(
                                     div()
                                         .flex()

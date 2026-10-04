@@ -55,8 +55,11 @@ the final edit. Environment origins and thread IDs isolate drafts.
   confirms before dispatch and does not force active sessions. File read/edit/save
   uses the selected environment's server RPCs, never the client's local filesystem.
   Saves target the loaded file even if the path field changes; pending responses
-  preserve later edits. Truncated and external files are read-only. File browsing,
-  content search, clone and worktree UI still need implementation.
+  preserve later edits. Truncated and external files are read-only. Server-backed
+  directory browsing and bounded file-path search open entries in the editor;
+  results from a previous project or connection cannot replace the active listing.
+  Content search, complete picker entry points, clone and worktree UI still need
+  implementation.
 - Native multiline composer, send with receipt-aware clearing, interrupt/stop,
   Markdown messages and activity/session output. Provider/model IDs are manually
   editable; provider setup and catalog UI remain unimplemented.
