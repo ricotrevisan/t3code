@@ -95,12 +95,13 @@ impl SearchOptions {
         )
     }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentMatch {
     pub path: String,
     pub line_number: usize,
     pub line_content: String,
+    pub match_ranges: Vec<MatchRange>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,4 +109,59 @@ pub struct ContentResults {
     pub matches: Vec<ContentMatch>,
     pub truncated: bool,
     pub regex_fallback_error: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct MatchRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+// Server search ranges use JavaScript UTF-16 indices; GPUI highlights use UTF-8 bytes.
+pub fn utf16_byte_offset(text: &str, offset: usize) -> Option<usize> {
+    let mut units = 0;
+    for (byte, character) in text.char_indices() {
+        if units == offset {
+            return Some(byte);
+        }
+        units += character.len_utf16();
+        if units > offset {
+            return None;
+        }
+    }
+    (units == offset).then_some(text.len())
+}
+impl ContentMatch {
+    pub fn byte_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        self.match_ranges
+            .iter()
+            .filter_map(|range| {
+                let start = utf16_byte_offset(&self.line_content, range.start)?;
+                let end = utf16_byte_offset(&self.line_content, range.end)?;
+                (start < end).then_some(start..end)
+            })
+            .collect()
+    }
+    pub fn character_column(&self) -> usize {
+        self.byte_ranges()
+            .first()
+            .map_or(0, |range| self.line_content[..range.start].chars().count())
+    }
+}
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    #[test]
+    fn unicode_match_offsets_are_safe_for_highlights_and_native_cursor() {
+        let hit = ContentMatch {
+            path: "notes".into(),
+            line_number: 3,
+            line_content: "🎉 世界".into(),
+            match_ranges: vec![MatchRange { start: 3, end: 5 }],
+        };
+        assert_eq!(hit.byte_ranges(), vec![5..11]);
+        assert_eq!(hit.character_column(), 2);
+        assert_eq!(utf16_byte_offset(&hit.line_content, 1), None);
+        assert_eq!(utf16_byte_offset(&hit.line_content, 99), None);
+    }
 }

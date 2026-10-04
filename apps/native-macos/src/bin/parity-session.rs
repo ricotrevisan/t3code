@@ -32,12 +32,13 @@ impl Projection {
                 self.shell = Shell::default();
                 self.detail = ThreadDetail::default();
             }
-            Update::Shell(item) => self.shell.apply(item)?,
+            Update::Shell(item) => self.shell.apply(*item)?,
             Update::Thread { thread_id, item } => {
                 if self.selected.as_ref() == Some(&thread_id) {
                     self.detail.apply(&thread_id, item)?;
                 }
             }
+            Update::Subscription { .. } => {}
             Update::Status(status) => {
                 if status != "Authorizing…" && status != "Loading projects and threads…" {
                     return Err(status.into());

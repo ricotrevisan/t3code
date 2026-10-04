@@ -31,6 +31,10 @@ pub struct Thread {
     pub settled_override: Option<String>,
     #[serde(default)]
     pub pinned_at: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

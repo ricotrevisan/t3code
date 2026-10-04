@@ -5,18 +5,21 @@ use gpui::{
 use gpui_component::{
     Disableable, Root,
     button::Button,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Position},
     text::TextView,
 };
 use serde_json::{Value, json};
 use t3code_native_macos::{
     auth, commands, connection, credentials, drafts, files, palette, providers, shell, sidebar,
-    thread,
+    thread, workspaces,
 };
 
 gpui::actions!(
     native,
     [
+        ContentSubmit,
+        ContentNext,
+        ContentPrevious,
         OpenFiles,
         OpenContentSearch,
         TogglePalette,
@@ -72,6 +75,21 @@ struct NativeApp {
     catalog_open: bool,
     search: Entity<InputState>,
     search_results: Vec<Value>,
+    new_thread_checkout: Option<(String, String, Option<String>)>,
+    worktree_outcome: Option<Value>,
+    worktrees_open: bool,
+    worktree_ref: Entity<InputState>,
+    worktree_branch: Entity<InputState>,
+    worktree_path: Entity<InputState>,
+    refs: Vec<workspaces::Ref>,
+    refs_cursor: Option<u64>,
+    worktree_task: Option<Task<()>>,
+    worktree_epoch: u64,
+    worktree_busy: bool,
+    confirm_worktree_removal: Option<String>,
+    clone_open: bool,
+    clone_remote: Entity<InputState>,
+    clone_progress: Vec<workspaces::CloneProgress>,
     files_open: bool,
     file_path: Entity<InputState>,
     file_contents: Entity<InputState>,
@@ -83,6 +101,9 @@ struct NativeApp {
     content_query: Entity<InputState>,
     content_options: files::SearchOptions,
     content_results: Option<files::ContentResults>,
+    content_request_query: String,
+    content_index: usize,
+    content_scroll: gpui::ScrollHandle,
     file_listing_truncated: bool,
     file_listing_task: Option<Task<()>>,
     file_listing_epoch: u64,
@@ -114,6 +135,8 @@ impl NativeApp {
         });
         let file_path =
             cx.new(|cx| InputState::new(window, cx).placeholder("Workspace-relative file path"));
+        let clone_remote =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Repository clone URL"));
         let content_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search workspace contents"));
         let file_contents = cx.new(|cx| {
@@ -138,11 +161,35 @@ impl NativeApp {
             }
         })];
         subscriptions.push(
-            cx.subscribe_in(&content_query, window, |app, _, event, _, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    app.search_contents(cx);
-                }
-            }),
+            cx.subscribe_in(
+                &content_query,
+                window,
+                |app, _, event, window, cx| match event {
+                    InputEvent::Change => {
+                        if app.content_query.read(cx).value().as_str() == app.content_request_query
+                        {
+                            return;
+                        }
+                        app.content_results = None;
+                        app.content_index = 0;
+                        app.file_listing_epoch += 1;
+                        app.file_listing_task = None;
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => {
+                        if app
+                            .content_results
+                            .as_ref()
+                            .is_some_and(|results| !results.matches.is_empty())
+                        {
+                            app.open_content_hit(app.content_index, window, cx);
+                        } else {
+                            app.search_contents(cx);
+                        }
+                    }
+                    _ => {}
+                },
+            ),
         );
         subscriptions.push(
             cx.subscribe_in(&pairing, window, |app, _, event, window, cx| {
@@ -238,6 +285,25 @@ impl NativeApp {
             catalog_open: false,
             search,
             search_results: vec![],
+            new_thread_checkout: None,
+            worktree_outcome: None,
+            worktrees_open: false,
+            worktree_ref: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Base or existing branch")),
+            worktree_branch: cx
+                .new(|cx| InputState::new(window, cx).placeholder("New branch (optional)")),
+            worktree_path: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Worktree path (optional for creation)")
+            }),
+            refs: vec![],
+            refs_cursor: None,
+            worktree_task: None,
+            worktree_epoch: 0,
+            worktree_busy: false,
+            confirm_worktree_removal: None,
+            clone_open: false,
+            clone_remote,
+            clone_progress: Vec::new(),
             files_open: false,
             file_path,
             file_contents,
@@ -249,6 +315,9 @@ impl NativeApp {
             content_query,
             content_options: files::SearchOptions::default(),
             content_results: None,
+            content_request_query: String::new(),
+            content_index: 0,
+            content_scroll: gpui::ScrollHandle::new(),
             file_listing_truncated: false,
             file_listing_task: None,
             file_listing_epoch: 0,
@@ -323,6 +392,23 @@ impl NativeApp {
     ) {
         use palette::Command;
         match command {
+            Command::Worktrees => {
+                self.worktrees_open = true;
+                self.worktree_operation("vcs.listRefs", false, cx);
+            }
+            Command::CloneProject => {
+                self.clone_open = true;
+                if let Some(sender) = &self.commands {
+                    let _ = sender.try_send(connection::Command::Subscribe {
+                        key: "project-clones".into(),
+                        tag: "subscribeProjectClones".into(),
+                        payload: json!({}),
+                    });
+                }
+                self.clone_remote
+                    .update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }
             Command::Files | Command::ContentSearch => {
                 self.files_open = true;
                 if command == Command::ContentSearch {
@@ -351,7 +437,15 @@ impl NativeApp {
                     let selection = json!({"instanceId":self.provider.read(cx).value().as_str(),"model":self.model.read(cx).value().as_str()});
                     match commands::create_thread(project, &self.title.read(cx).value(), selection)
                     {
-                        Ok(command) => self.dispatch(command, cx),
+                        Ok(mut command) => {
+                            if let Some((project_id, branch, path)) = &self.new_thread_checkout
+                                && project_id == project
+                            {
+                                command["branch"] = json!(branch);
+                                command["worktreePath"] = json!(path);
+                            }
+                            self.dispatch(command, cx);
+                        }
                         Err(error) => {
                             self.status = error.into();
                             cx.notify();
@@ -406,7 +500,9 @@ impl NativeApp {
             cx.notify();
             return;
         };
-        let cwd = project.workspace_root.clone();
+        let cwd = self
+            .selected_workspace()
+            .unwrap_or_else(|| project.workspace_root.clone());
         let query = self.file_path.read(cx).value().to_string();
         let payload = if search {
             json!({"cwd":cwd,"query":query,"limit":100})
@@ -452,6 +548,204 @@ impl NativeApp {
         cx.notify();
     }
 
+    fn choose_checkout(
+        &mut self,
+        branch: String,
+        path: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.selected_project.clone() else {
+            return;
+        };
+        if let Some(previous) = &self.selected_thread {
+            self.drafts
+                .insert(previous.clone(), self.composer.read(cx).value().to_string());
+        }
+        self.selected_thread = None;
+        self.detail = thread::ThreadDetail::default();
+        self.new_thread_checkout = Some((project, branch, path));
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        if let Some(sender) = &self.commands {
+            let _ = sender.try_send(connection::Command::SelectThread(None));
+        }
+        self.status = "Checkout selected for the next new thread".into();
+        cx.notify();
+    }
+
+    fn worktree_operation(&mut self, tag: &str, more: bool, cx: &mut Context<Self>) {
+        if self.worktree_busy {
+            self.status = "Wait for the worktree operation to finish".into();
+            cx.notify();
+            return;
+        }
+        let Some(project) = self
+            .shell
+            .projects
+            .iter()
+            .find(|p| Some(&p.id) == self.selected_project.as_ref())
+        else {
+            self.status = "Select a project first".into();
+            cx.notify();
+            return;
+        };
+        let Some(sender) = self.commands.clone() else {
+            self.status = "Not connected".into();
+            cx.notify();
+            return;
+        };
+        let cwd = project.workspace_root.clone();
+        let project_id = project.id.clone();
+        let base = self.worktree_ref.read(cx).value().trim().to_owned();
+        let path = self.worktree_path.read(cx).value().trim().to_owned();
+        let payload = match tag {
+            "vcs.listRefs" => {
+                let mut payload = json!({"cwd":cwd,"refresh":!more,"limit":100});
+                if more {
+                    if let Some(cursor) = self.refs_cursor {
+                        payload["cursor"] = json!(cursor);
+                    } else {
+                        return;
+                    }
+                }
+                payload
+            }
+            "vcs.createWorktree" => match workspaces::create_worktree(
+                &cwd,
+                &base,
+                self.worktree_branch.read(cx).value().as_str(),
+                &path,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.status = error.into();
+                    cx.notify();
+                    return;
+                }
+            },
+            "vcs.switchRef" if !base.is_empty() => {
+                json!({"cwd":self.selected_workspace().unwrap_or(cwd),"refName":base})
+            }
+            "vcs.removeWorktree" if !path.is_empty() => {
+                if self.confirm_worktree_removal.as_ref() != Some(&path) {
+                    self.confirm_worktree_removal = Some(path.clone());
+                    self.status =
+                        "Click Remove again to confirm worktree removal; dirty files are preserved"
+                            .into();
+                    cx.notify();
+                    return;
+                }
+                json!({"cwd":cwd,"path":path,"force":false})
+            }
+            _ => {
+                self.status = "Enter a branch or worktree path".into();
+                cx.notify();
+                return;
+            }
+        };
+        self.worktree_busy = true;
+        self.worktree_epoch += 1;
+        let epoch = self.worktree_epoch;
+        let generation = self.generation;
+        let tag = tag.to_owned();
+        self.worktree_task = Some(cx.spawn(async move |entity, cx| {
+            let result = connection::call(&sender, &tag, payload).await;
+            let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation
+                    || app.worktree_epoch != epoch
+                    || app.selected_project.as_deref() != Some(&project_id)
+                {
+                    return;
+                }
+                app.worktree_busy = false;
+                match result {
+                    Ok(value) => {
+                        if tag == "vcs.listRefs" {
+                            match serde_json::from_value::<workspaces::Refs>(value) {
+                                Ok(rows) => {
+                                    if !more {
+                                        app.refs.clear();
+                                    }
+                                    app.refs.extend(rows.refs);
+                                    app.refs_cursor = rows.next_cursor;
+                                    app.status = if rows.is_repo {
+                                        "Branches loaded"
+                                    } else {
+                                        "This directory is not a repository"
+                                    }
+                                    .into();
+                                }
+                                Err(_) => app.status = "Invalid branch listing".into(),
+                            }
+                        } else {
+                            app.confirm_worktree_removal = None;
+                            app.status = "Worktree operation completed".into();
+                            app.worktree_outcome = Some(value);
+                            app.refs.clear();
+                            app.refs_cursor = None;
+                        }
+                    }
+                    Err(error) => app.status = error,
+                };
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn selected_workspace(&self) -> Option<String> {
+        let project = self
+            .shell
+            .projects
+            .iter()
+            .find(|p| Some(&p.id) == self.selected_project.as_ref())?;
+        let selected = self
+            .shell
+            .threads
+            .iter()
+            .chain(self.archived_shell.threads.iter())
+            .find(|t| Some(&t.id) == self.selected_thread.as_ref() && t.project_id == project.id);
+        if selected.is_none()
+            && let Some((id, _, Some(path))) = &self.new_thread_checkout
+            && id == &project.id
+        {
+            return Some(path.clone());
+        }
+        Some(
+            selected
+                .and_then(|t| {
+                    if let Some(detail) = self.detail.thread.as_ref().filter(|detail| {
+                        detail["id"] == t.id && detail.get("worktreePath").is_some()
+                    }) {
+                        detail["worktreePath"].as_str().map(str::to_owned)
+                    } else {
+                        t.worktree_path.clone()
+                    }
+                })
+                .unwrap_or_else(|| project.workspace_root.clone()),
+        )
+    }
+
+    fn clone_project(&mut self, cx: &mut Context<Self>) {
+        if self.pending_actions > 0 {
+            self.status = "Wait for the pending server receipt".into();
+            cx.notify();
+            return;
+        }
+        match workspaces::clone_request(
+            self.title.read(cx).value().as_str(),
+            self.clone_remote.read(cx).value().as_str(),
+            self.workspace.read(cx).value().as_str(),
+        ) {
+            Ok(payload) => self.perform("projectClone.start", payload, None, cx),
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+            }
+        }
+    }
+
     fn search_contents(&mut self, cx: &mut Context<Self>) {
         let Some(sender) = self.commands.clone() else {
             self.status = "Not connected".into();
@@ -468,7 +762,9 @@ impl NativeApp {
             return;
         };
         let payload = match self.content_options.request(
-            &project.workspace_root,
+            &self
+                .selected_workspace()
+                .unwrap_or_else(|| project.workspace_root.clone()),
             self.content_query.read(cx).value().as_str(),
         ) {
             Ok(payload) => payload,
@@ -483,6 +779,8 @@ impl NativeApp {
         let generation = self.generation;
         let project_id = self.selected_project.clone();
         self.content_results = None;
+        self.content_request_query = self.content_query.read(cx).value().to_string();
+        self.content_index = 0;
         self.file_listing_task = Some(cx.spawn(async move |entity, cx| {
             let result = connection::call(&sender, "projects.searchContents", payload).await;
             let _ = entity.update(cx, |app, cx| {
@@ -514,7 +812,58 @@ impl NativeApp {
         cx.notify();
     }
 
+    fn move_content_hit(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let count = self
+            .content_results
+            .as_ref()
+            .map_or(0, |results| results.matches.len());
+        if count > 0 {
+            self.content_index = if forward {
+                (self.content_index + 1) % count
+            } else {
+                (self.content_index + count - 1) % count
+            };
+            self.content_scroll.scroll_to_item(self.content_index);
+            cx.notify();
+        }
+    }
+
+    fn open_content_hit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self
+            .content_results
+            .as_ref()
+            .and_then(|results| results.matches.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.content_index = index;
+        self.file_path.update(cx, |input, cx| {
+            input.set_value(hit.path.clone(), window, cx)
+        });
+        let column = hit.character_column();
+        self.file_operation_at(
+            false,
+            Some(Position::new(
+                hit.line_number.saturating_sub(1) as u32,
+                column as u32,
+            )),
+            window,
+            cx,
+        );
+    }
+
     fn file_operation(&mut self, write: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_operation_at(write, None, window, cx);
+    }
+
+    fn file_operation_at(
+        &mut self,
+        write: bool,
+        position: Option<Position>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.file_busy {
             self.status = "A file operation is already pending".into();
             cx.notify();
@@ -539,6 +888,14 @@ impl NativeApp {
                         .projects
                         .iter()
                         .any(|project| project.workspace_root == target.cwd)
+                        && !self
+                            .shell
+                            .threads
+                            .iter()
+                            .chain(self.archived_shell.threads.iter())
+                            .any(|thread| {
+                                thread.worktree_path.as_deref() == Some(target.cwd.as_str())
+                            })
                 })
             {
                 self.status = "The file belongs to a disconnected workspace".into();
@@ -568,7 +925,9 @@ impl NativeApp {
                 return;
             }
             files::Target {
-                cwd: project.workspace_root.clone(),
+                cwd: self
+                    .selected_workspace()
+                    .unwrap_or_else(|| project.workspace_root.clone()),
                 path,
             }
         };
@@ -594,7 +953,15 @@ impl NativeApp {
                             if app.file_contents.read(cx).value().as_str()!=text {
                                 app.status="File response arrived after an edit; edits preserved. Save or discard before retrying.".into();cx.notify();return;
                             }
-                            app.file_contents.update(cx,|input,cx|input.set_value(read.contents.clone(),window,cx));
+                            app.file_contents.update(cx,|input,cx| {
+                                input.set_value(read.contents.clone(),window,cx);
+                                if let Some(mut position) = position {
+                                    let lines = read.contents.split('\n').collect::<Vec<_>>();
+                                    position.line = position.line.min(lines.len().saturating_sub(1) as u32);
+                                    position.character = position.character.min(lines[position.line as usize].chars().count() as u32);
+                                    input.set_cursor_position(position,window,cx);
+                                }
+                            });
                             app.status=if read.truncated { "File truncated; saving disabled" } else { "File loaded" }.into();
                             app.file_environment=app.environment_scope.clone();
                             app.file_editor.loaded(target.cwd,read);
@@ -675,15 +1042,25 @@ impl NativeApp {
         self.confirm_project_removal = None;
         self.pending_actions = 0;
         self.provider_catalog.clear();
+        self.clone_progress.clear();
         self.file_epoch += 1;
         self.file_busy = false;
         self.file_listing_task = None;
         self.file_entries.clear();
+        self.content_results = None;
+        self.content_index = 0;
         self.file_listing_epoch += 1;
         if !self.file_editor.dirty(&self.file_contents.read(cx).value()) {
             self.file_editor = files::Editor::default();
         }
         self.snooze_wake = None;
+        self.worktree_task = None;
+        self.worktree_busy = false;
+        self.worktree_epoch += 1;
+        self.refs.clear();
+        self.refs_cursor = None;
+        self.worktree_outcome = None;
+        self.new_thread_checkout = None;
         self.generation += 1;
         self.status = "Disconnected".into();
         cx.notify();
@@ -837,6 +1214,7 @@ impl NativeApp {
                                         app.archived_shell = shell::Shell::default();
                                         app.detail = thread::ThreadDetail::default();
                                         app.snooze_wake = None;
+                                        app.clone_progress.clear();
                                         app.status =
                                             "Reconnecting — history is being synchronized".into();
                                         Ok(())
@@ -847,15 +1225,43 @@ impl NativeApp {
                                     }
                                     connection::Update::Shell(item) => {
                                         let was_synchronized = app.shell.synchronized;
-                                        let result = app.shell.apply(item).map_err(str::to_owned);
+                                        let result = app.shell.apply(*item).map_err(str::to_owned);
                                         app.schedule_snooze_wake(cx);
                                         if app.shell.synchronized && !was_synchronized {
                                             app.perform("server.getConfig", json!({}), None, cx);
+                                            if app.clone_open
+                                                && let Some(sender) = &app.commands
+                                            {
+                                                let _ = sender.try_send(
+                                                    connection::Command::Subscribe {
+                                                        key: "project-clones".into(),
+                                                        tag: "subscribeProjectClones".into(),
+                                                        payload: json!({}),
+                                                    },
+                                                );
+                                            }
                                         }
                                         if app.shell.synchronized {
                                             app.status = "Connected · synchronized".into();
                                         }
                                         result
+                                    }
+                                    connection::Update::Subscription { key, item } => {
+                                        if key == "project-clones" && app.clone_open {
+                                            match item {
+                                                Ok(value) => workspaces::apply_clones(
+                                                    &mut app.clone_progress,
+                                                    value,
+                                                ),
+                                                Err(error) => {
+                                                    app.status = error;
+                                                    app.clone_progress.clear();
+                                                    Ok(())
+                                                }
+                                            }
+                                        } else {
+                                            Ok(())
+                                        }
                                     }
                                     connection::Update::Thread { thread_id, item } => {
                                         if app.selected_thread.as_ref() == Some(&thread_id) {
@@ -986,6 +1392,9 @@ impl NativeApp {
                 app.pending_actions = app.pending_actions.saturating_sub(1);
                 match result {
                     Ok(value) => {
+                        if tag == "projectClone.start" {
+                            app.selected_project = value["projectId"].as_str().map(str::to_owned);
+                        }
                         if tag == "server.getConfig" {
                             match serde_json::from_value::<providers::Config>(value.clone()) {
                                 Ok(config) => app.provider_catalog = config.providers,
@@ -1347,6 +1756,13 @@ impl Render for NativeApp {
                     .label(title.clone())
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.selected_project = Some(project_id.clone());
+                        app.worktree_task = None;
+                        app.worktree_busy = false;
+                        app.worktree_epoch += 1;
+                        app.refs.clear();
+                        app.worktree_outcome = None;
+                        app.new_thread_checkout = None;
+                        app.confirm_worktree_removal = None;
                         app.confirm_project_removal = None;
                         app.file_entries.clear();
                         app.file_listing_task = None;
@@ -1526,6 +1942,11 @@ impl Render for NativeApp {
             .relative()
             .key_context("NativeApp")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|app, _: &ContentSubmit, window, cx| {
+                if app.content_results.as_ref().is_some_and(|results| !results.matches.is_empty()) { app.open_content_hit(app.content_index,window,cx); } else { app.search_contents(cx); }
+            }))
+            .on_action(cx.listener(|app, _: &ContentNext, _, cx| app.move_content_hit(true,cx)))
+            .on_action(cx.listener(|app, _: &ContentPrevious, _, cx| app.move_content_hit(false,cx)))
             .on_action(cx.listener(|app, _: &OpenFiles, window, cx| app.execute_command(palette::Command::Files,window,cx)))
             .on_action(cx.listener(|app, _: &OpenContentSearch, window, cx| app.execute_command(palette::Command::ContentSearch,window,cx)))
             .on_action(
@@ -1743,6 +2164,32 @@ impl Render for NativeApp {
                                     .on_click(cx.listener(|app, _, _, cx| app.snooze_custom(cx))),
                             ),
                     )
+                    .child(Button::new("worktrees").label("Branches and worktrees").on_click(cx.listener(|app,_,window,cx|app.execute_command(palette::Command::Worktrees,window,cx))))
+                    .when(self.worktrees_open,|view|view.child(div().flex().flex_col().gap_2()
+                        .child(Input::new(&self.worktree_ref)).child(Input::new(&self.worktree_branch)).child(Input::new(&self.worktree_path))
+                        .child(div().flex().gap_2()
+                            .child(Button::new("refs-refresh").label("Refresh branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",false,cx))))
+                            .child(Button::new("worktree-create").label("Create worktree").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.createWorktree",false,cx))))
+                            .child(Button::new("ref-switch").label("Switch branch").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.switchRef",false,cx))))
+                            .child(Button::new("worktree-remove").label("Remove worktree").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.removeWorktree",false,cx))))
+                            .child(Button::new("worktrees-close").label("Close").on_click(cx.listener(|app,_,_,cx|{app.worktrees_open=false;cx.notify();}))))
+                        .children(self.refs.iter().map(|row| {let branch=row.name.clone();let path=row.worktree_path.clone();Button::new(gpui::SharedString::from(format!("choose-ref-{}",row.name))).label(format!("{}{}{}",if row.current{"● "}else{""},row.name,row.worktree_path.as_ref().map_or(String::new(),|path|format!(" · {path}")))).on_click(cx.listener(move|app,_,window,cx|app.choose_checkout(branch.clone(),path.clone(),window,cx))) }))
+                        .when_some(self.worktree_outcome.as_ref(),|view,result|view.child(if let Some(path)=result["worktree"]["path"].as_str() {format!("Created worktree {path} on {}",result["worktree"]["refName"].as_str().unwrap_or("branch"))}else{format!("Current branch: {}",result["refName"].as_str().unwrap_or("updated"))}))
+                        .when(self.refs_cursor.is_some(),|view|view.child(Button::new("refs-more").label("More branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",true,cx)))))
+                    ))
+                    .child(Button::new("clone-repository").label("Clone repository").on_click(cx.listener(|app,_,window,cx| app.execute_command(palette::Command::CloneProject,window,cx))))
+                    .when(self.clone_open,|view| view.child(div().flex().flex_col().gap_2()
+                        .child(Button::new("clone-close").label("Close clone panel").on_click(cx.listener(|app,_,_,cx| { app.clone_open = false; if let Some(sender) = &app.commands { let _ = sender.try_send(connection::Command::Unsubscribe("project-clones".into())); } cx.notify(); })))
+                        .child(Input::new(&self.clone_remote))
+                        .child(Button::new("clone-start").debug_selector(|| "clone-start".into()).label("Start clone to project directory").on_click(cx.listener(|app,_,_,cx|app.clone_project(cx))))
+                        .children(self.clone_progress.iter().map(|row| {
+                            let cancel_id = row.project_id.clone();let retry_id=cancel_id.clone();
+                            div().flex().flex_col().gap_1().child(format!("{} · {} · {}{}",row.destination_path,row.phase,row.stage,row.percent.map_or(String::new(),|percent| format!(" {percent}%"))))
+                                .children(row.detail.clone()).children(row.error.clone())
+                                .when(row.phase == "running",|view|view.child(Button::new(gpui::SharedString::from(format!("clone-cancel-{cancel_id}"))).label("Cancel clone").on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.cancel",json!({"projectId":cancel_id}),None,cx)))))
+                                .when(row.phase == "failed" || row.phase == "cancelled",|view|view.child(Button::new(gpui::SharedString::from(format!("clone-retry-{retry_id}"))).label("Retry clone").on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.retry",json!({"projectId":retry_id}),None,cx)))))
+                        }))
+                    ))
                     .child(
                         Button::new("files")
                             .debug_selector(|| "files".into())
@@ -1758,21 +2205,17 @@ impl Render for NativeApp {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(Input::new(&self.content_query))
+                                .child(div().key_context("NativeContentSearch").child(Input::new(&self.content_query)))
                                 .child(div().flex().gap_2()
-                                    .child(Button::new("content-case").label(if self.content_options.case_sensitive { "Case sensitive ✓" } else { "Case sensitive" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.case_sensitive = !app.content_options.case_sensitive; cx.notify(); })))
-                                    .child(Button::new("content-word").label(if self.content_options.whole_word { "Whole word ✓" } else { "Whole word" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.whole_word = !app.content_options.whole_word; cx.notify(); })))
-                                    .child(Button::new("content-regex").label(if self.content_options.use_regex { "Regex ✓" } else { "Regex" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.use_regex = !app.content_options.use_regex; cx.notify(); })))
+                                    .child(Button::new("content-case").label(if self.content_options.case_sensitive { "Case sensitive ✓" } else { "Case sensitive" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.case_sensitive = !app.content_options.case_sensitive; app.search_contents(cx); })))
+                                    .child(Button::new("content-word").label(if self.content_options.whole_word { "Whole word ✓" } else { "Whole word" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.whole_word = !app.content_options.whole_word; app.search_contents(cx); })))
+                                    .child(Button::new("content-regex").label(if self.content_options.use_regex { "Regex ✓" } else { "Regex" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.use_regex = !app.content_options.use_regex; app.search_contents(cx); })))
                                     .child(Button::new("search-contents").debug_selector(|| "search-contents".into()).label("Search contents").on_click(cx.listener(|app,_,_,cx| app.search_contents(cx)))))
                                 .children(self.content_results.as_ref().map(|results| div().flex().flex_col().gap_1()
                                     .when(results.truncated, |view| view.child("Content results truncated; refine the search"))
                                     .when(results.matches.is_empty(), |view| view.child("No content matches"))
-                                    .child(div().id("content-result-list").max_h(px(160.)).overflow_y_scroll().flex().flex_col().children(results.matches.iter().enumerate().map(|(index,hit)| {
-                                        let path = hit.path.clone();
-                                        Button::new(gpui::SharedString::from(format!("content-hit-{index}"))).label(format!("{}:{}  {}",hit.path,hit.line_number,hit.line_content)).on_click(cx.listener(move|app,_,window,cx| {
-                                            app.file_path.update(cx,|input,cx| input.set_value(path.clone(),window,cx));
-                                            app.file_operation(false,window,cx);
-                                        }))
+                                    .child(div().id("content-result-list").track_scroll(&self.content_scroll).max_h(px(160.)).overflow_y_scroll().flex().flex_col().children(results.matches.iter().enumerate().map(|(index,hit)| {
+                                        Button::new(gpui::SharedString::from(format!("content-hit-{index}"))).debug_selector(move||format!("content-hit-{index}")).label(format!("{}{}:{}  {}",if index == self.content_index { "› " } else { "" },hit.path,hit.line_number,"")).child(gpui::StyledText::new(hit.line_content.clone()).with_highlights(hit.byte_ranges().into_iter().map(|range| (range,gpui::HighlightStyle { background_color:Some(rgb(0x454b78).into()),..Default::default() })))).on_click(cx.listener(move|app,_,window,cx| app.open_content_hit(index,window,cx)))
                                     })))
                                 ))
                                 .child(Input::new(&self.file_path))
@@ -1884,6 +2327,21 @@ impl Render for NativeApp {
 fn bind_native_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", QuitNative, None),
+        KeyBinding::new(
+            "enter",
+            ContentSubmit,
+            Some("NativeApp > NativeContentSearch > Input"),
+        ),
+        KeyBinding::new(
+            "down",
+            ContentNext,
+            Some("NativeApp > NativeContentSearch > Input"),
+        ),
+        KeyBinding::new(
+            "up",
+            ContentPrevious,
+            Some("NativeApp > NativeContentSearch > Input"),
+        ),
         KeyBinding::new("cmd-p", OpenFiles, Some("NativeApp")),
         KeyBinding::new("cmd-shift-f", OpenContentSearch, Some("NativeApp")),
         KeyBinding::new("cmd-k", TogglePalette, Some("NativeApp")),

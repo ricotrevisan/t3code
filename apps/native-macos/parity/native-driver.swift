@@ -35,7 +35,7 @@ func output(_ value: [String: Any]) {
 }
 
 let args = CommandLine.arguments
-if args.count < 3 { fail("Usage: swift native-driver.swift <owned-native-pid> <inspect|click|type|key|capture|close> [arguments]") }
+if args.count < 3 { fail("Usage: swift native-driver.swift <owned-native-pid> <inspect|click|scroll|type|key|capture|close> [arguments]") }
 guard let pid = pid_t(args[1]), let app = NSRunningApplication(processIdentifier: pid),
       app.executableURL?.lastPathComponent == "t3code-native-macos" else { fail("Target is not the experimental native T3 client") }
 guard AXIsProcessTrusted() else { fail("Grant Accessibility to the execution host in macOS settings") }
@@ -85,6 +85,15 @@ case "click":
         event.post(tap: .cghidEventTap)
     }
     output(["scope": "native OS input dispatch", "action": "click", "x": x, "y": y, "pid": pid])
+case "scroll":
+    guard args.count == 6, let x = Double(args[3]), let y = Double(args[4]), let delta = Int32(args[5]), abs(Int64(delta)) <= 2000 else { fail("scroll requires owned-window x y and pixel delta within 2000") }
+    guard let position = attribute(window,kAXPositionAttribute),let dimensions=attribute(window,kAXSizeAttribute),CFGetTypeID(position)==AXValueGetTypeID(),CFGetTypeID(dimensions)==AXValueGetTypeID() else {fail("Window geometry unavailable")}
+    var origin=CGPoint.zero;var dimensionsValue=CGSize.zero
+    guard AXValueGetValue(position as! AXValue,.cgPoint,&origin),AXValueGetValue(dimensions as! AXValue,.cgSize,&dimensionsValue),x.isFinite,y.isFinite,x>=0,y>=0,x<dimensionsValue.width,y<dimensionsValue.height else {fail("Scroll is outside the owned window")}
+    let point=CGPoint(x:origin.x+x,y:origin.y+y)
+    guard let move=CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:point,mouseButton:.left),let event=CGEvent(scrollWheelEvent2Source:nil,units:.pixel,wheelCount:1,wheel1:delta,wheel2:0,wheel3:0) else {fail("Could not create scroll event")}
+    move.post(tap:.cghidEventTap);event.location=point;event.flags=[];event.post(tap:.cghidEventTap)
+    output(["scope":"native OS input dispatch","action":"scroll","pid":pid,"x":x,"y":y,"pixels":delta])
 case "type":
     // Read text from stdin to keep user input off argv. Dispatch through the native IME input path.
     guard let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8), !text.isEmpty else { fail("type requires UTF-8 text on stdin") }
@@ -102,8 +111,8 @@ case "type":
     up.post(tap: .cghidEventTap)
     output(["scope": "native OS input dispatch", "action": "type", "utf16_length": utf16.count, "pid": pid])
 case "key":
-    guard args.count == 4 else { fail("key requires cmd-a, cmd-c, cmd-v, enter, tab or escape") }
-    let keys: [String: (CGKeyCode, CGEventFlags)] = ["cmd-a":(0,.maskCommand), "cmd-c":(8,.maskCommand), "cmd-v":(9,.maskCommand), "cmd-k":(40,.maskCommand), "cmd-p":(35,.maskCommand), "cmd-shift-f":(3,[.maskCommand,.maskShift]), "enter":(36,[]), "tab":(48,[]), "escape":(53,[])]
+    guard args.count == 4 else { fail("key requires a supported command shortcut, up, down, enter, tab or escape") }
+    let keys: [String: (CGKeyCode, CGEventFlags)] = ["cmd-a":(0,.maskCommand), "cmd-c":(8,.maskCommand), "cmd-v":(9,.maskCommand), "cmd-k":(40,.maskCommand), "cmd-p":(35,.maskCommand), "cmd-shift-f":(3,[.maskCommand,.maskShift]), "up":(126,[]), "down":(125,[]), "enter":(36,[]), "tab":(48,[]), "escape":(53,[])]
     guard let (code, flags) = keys[args[3]] else { fail("Unsupported key") }
     for isDown in [true, false] {
         guard let event = CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:isDown) else { fail("Could not create key event") }

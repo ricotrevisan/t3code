@@ -98,7 +98,7 @@ async fn reconnect_uses_fresh_ticket_restores_selection_and_never_replays_uncert
     });
     while !matches!(
         updates.recv().await.unwrap(),
-        Update::Shell(ShellItem::Synchronized)
+        Update::Shell(item) if matches!(*item,ShellItem::Synchronized)
     ) {}
     commands
         .send(Command::SelectThread(Some("t".into())))
@@ -148,7 +148,13 @@ async fn reconnect_uses_fresh_ticket_restores_selection_and_never_replays_uncert
 #[tokio::test]
 async fn disconnected_commands_fail_without_being_requeued_and_selection_is_remembered() {
     let mut selected = None;
-    reject_disconnected(Command::SelectThread(Some("t".into())), &mut selected).await;
+    let mut subscriptions = Subscriptions::new();
+    reject_disconnected(
+        Command::SelectThread(Some("t".into())),
+        &mut selected,
+        &mut subscriptions,
+    )
+    .await;
     assert_eq!(selected.as_deref(), Some("t"));
     let (reply, result) = async_channel::bounded(1);
     reject_disconnected(
@@ -158,6 +164,7 @@ async fn disconnected_commands_fail_without_being_requeued_and_selection_is_reme
             reply,
         },
         &mut selected,
+        &mut subscriptions,
     )
     .await;
     assert!(
@@ -168,6 +175,11 @@ async fn disconnected_commands_fail_without_being_requeued_and_selection_is_reme
             .unwrap_err()
             .contains("not sent")
     );
-    reject_disconnected(Command::SelectThread(None), &mut selected).await;
+    reject_disconnected(
+        Command::SelectThread(None),
+        &mut selected,
+        &mut subscriptions,
+    )
+    .await;
     assert!(selected.is_none());
 }

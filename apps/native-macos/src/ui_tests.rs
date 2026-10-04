@@ -672,3 +672,257 @@ fn content_search_preserves_spaces_reports_regex_fallback_and_ignores_stale_resu
     cx.run_until_parked();
     assert!(app.read_with(cx, |app, _| app.content_results.is_none()));
 }
+
+#[gpui::test]
+fn content_results_keyboard_open_unicode_match_at_correct_line_and_column(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-shift-f");
+    cx.simulate_input("世界");
+    cx.simulate_keystrokes("enter");
+    let connection::Command::Call { reply, .. } = requests.try_recv().unwrap() else {
+        panic!("search request")
+    };
+    reply.send_blocking(Ok(json!({"matches":[
+        {"path":"first.txt","lineNumber":1,"lineContent":"世界","matchRanges":[{"start":0,"end":2}]},
+        {"path":"second.txt","lineNumber":3,"lineContent":"🎉 世界","matchRanges":[{"start":3,"end":5}]}
+    ],"truncated":false}))).unwrap();
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down enter");
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("read request")
+    };
+    assert_eq!(tag, "projects.readFile");
+    assert_eq!(payload["relativePath"], "second.txt");
+    reply
+        .send_blocking(Ok(
+            json!({"relativePath":"second.txt","contents":"one\ntwo\n🎉 世界","truncated":false}),
+        ))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.file_contents.read(cx).cursor_position()),
+        Position::new(2, 2)
+    );
+    cx.simulate_input("HERE");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.file_contents.read(cx).value().to_string()),
+        "one\ntwo\n🎉 HERE世界"
+    );
+}
+
+#[gpui::test]
+fn clone_validates_destination_and_keeps_failed_form_for_retry(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("clone repository");
+    cx.simulate_keystrokes("enter");
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Subscribe { key, tag, .. } if key == "project-clones" && tag == "subscribeProjectClones")
+    );
+    cx.simulate_input("file:///tmp/owned-source.git");
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.title
+                .update(cx, |input, cx| input.set_value("Owned clone", window, cx));
+            app.clone_project(cx);
+        })
+    });
+    assert!(requests.try_recv().is_err());
+    assert!(app.read_with(cx, |app, _| app.status.contains("destination")));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.workspace.update(cx, |input, cx| {
+                input.set_value("/tmp/owned-destination", window, cx)
+            });
+            app.clone_project(cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("expected clone")
+    };
+    assert_eq!(tag, "projectClone.start");
+    assert_eq!(payload["remoteUrl"], "file:///tmp/owned-source.git");
+    assert_eq!(payload["destinationPath"], "/tmp/owned-destination");
+    reply
+        .send_blocking(Err("Destination already exists".into()))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.status.clone()),
+        "Destination already exists"
+    );
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.clone_remote.read(cx).value().to_string()),
+        "file:///tmp/owned-source.git"
+    );
+    cx.update(|_, cx| app.update(cx, |app, cx| app.clone_project(cx)));
+    cx.run_until_parked();
+    let connection::Command::Call {
+        payload: retry,
+        reply,
+        ..
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("retry")
+    };
+    assert_ne!(payload["projectId"], retry["projectId"]);
+    reply
+        .send_blocking(Ok(json!({"projectId":"created"})))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_project.clone()),
+        Some("created".into())
+    );
+}
+
+#[gpui::test]
+fn workspace_reads_follow_selected_thread_worktree_and_reject_other_project_detail(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.shell.threads[0].worktree_path = Some("/tmp/owned-worktree".into());
+            app.files_open = true;
+            app.file_path
+                .update(cx, |input, cx| input.set_value("README.md", window, cx));
+            app.file_operation(false, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("read")
+    };
+    assert_eq!(tag, "projects.readFile");
+    assert_eq!(payload["cwd"], "/tmp/owned-worktree");
+    reply
+        .send_blocking(Err("File missing in worktree".into()))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| {
+            app.detail.thread = Some(json!({"id":"other-thread","worktreePath":"/tmp/unrelated"}));
+            assert_eq!(
+                app.selected_workspace().as_deref(),
+                Some("/tmp/owned-worktree")
+            );
+            app.detail.thread = Some(json!({"id":"t","worktreePath":null}));
+            app.shell.threads[0].worktree_path = None;
+            assert_eq!(app.selected_workspace().as_deref(), Some("/tmp/fixture"));
+        })
+    });
+}
+
+#[gpui::test]
+fn worktree_removal_requires_confirmation_and_dirty_rejection_preserves_choice(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.worktree_path.update(cx, |input, cx| {
+                input.set_value("/tmp/owned-worktree", window, cx)
+            });
+            app.worktree_operation("vcs.removeWorktree", false, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err());
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.worktree_operation("vcs.removeWorktree", false, cx)
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("remove")
+    };
+    assert_eq!(tag, "vcs.removeWorktree");
+    assert_eq!(payload["force"], false);
+    assert_eq!(payload["path"], "/tmp/owned-worktree");
+    reply
+        .send_blocking(Err("Worktree contains modified files".into()))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(!app.read_with(cx, |app, _| app.worktree_busy));
+    assert!(app.read_with(cx, |app, _| app.status.contains("modified files")));
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.worktree_path.read(cx).value().to_string()),
+        "/tmp/owned-worktree"
+    );
+}
+
+#[gpui::test]
+fn checkout_choice_preserves_draft_and_creates_new_thread_in_chosen_worktree(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_input("Existing draft 世界");
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.choose_checkout(
+                "owned-branch".into(),
+                Some("/tmp/owned-worktree".into()),
+                window,
+                cx,
+            );
+            app.title.update(cx, |input, cx| {
+                input.set_value("New worktree thread", window, cx)
+            });
+            app.provider
+                .update(cx, |input, cx| input.set_value("codex", window, cx));
+            app.model
+                .update(cx, |input, cx| input.set_value("gpt-6.1-sol", window, cx));
+            app.execute_command(palette::Command::NewThread, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(matches!(
+        requests.try_recv().unwrap(),
+        connection::Command::SelectThread(None)
+    ));
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("create")
+    };
+    assert_eq!(payload["type"], "thread.create");
+    assert_eq!(payload["branch"], "owned-branch");
+    assert_eq!(payload["worktreePath"], "/tmp/owned-worktree");
+    assert_eq!(
+        app.read_with(cx, |app, _| app.drafts.get("t").cloned()),
+        Some("Existing draft 世界".into())
+    );
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_workspace()),
+        Some("/tmp/owned-worktree".into())
+    );
+    reply
+        .send_blocking(Err("Creation rejected".into()))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.status.clone()),
+        "Creation rejected"
+    );
+}

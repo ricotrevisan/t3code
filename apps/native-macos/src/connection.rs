@@ -16,11 +16,24 @@ use url::Url;
 pub enum Update {
     Status(String),
     Resynchronizing,
-    Shell(ShellItem),
-    Thread { thread_id: String, item: Value },
+    Shell(Box<ShellItem>),
+    Thread {
+        thread_id: String,
+        item: Value,
+    },
+    Subscription {
+        key: String,
+        item: Result<Value, String>,
+    },
 }
 
 pub enum Command {
+    Subscribe {
+        key: String,
+        tag: String,
+        payload: Value,
+    },
+    Unsubscribe(String),
     SelectThread(Option<String>),
     Call {
         tag: String,
@@ -206,8 +219,24 @@ async fn connect(options: &ConnectionOptions) -> Result<Socket, Failure> {
     Ok(socket)
 }
 
-async fn reject_disconnected(command: Command, selected: &mut Option<String>) {
+type Subscriptions = HashMap<String, (String, Value)>;
+fn supported_subscription(tag: &str) -> bool {
+    matches!(tag, "subscribeProjectClones" | "subscribeWorktreeSetup")
+}
+async fn reject_disconnected(
+    command: Command,
+    selected: &mut Option<String>,
+    subscriptions: &mut Subscriptions,
+) {
     match command {
+        Command::Subscribe { key, tag, payload } => {
+            if supported_subscription(&tag) {
+                subscriptions.insert(key, (tag, payload));
+            }
+        }
+        Command::Unsubscribe(key) => {
+            subscriptions.remove(&key);
+        }
         Command::SelectThread(id) => *selected = id,
         Command::Call { reply, .. } => {
             let _ = reply
@@ -225,6 +254,7 @@ async fn supervise(
     requests: &async_channel::Receiver<Command>,
 ) {
     let mut selected = None;
+    let mut subscriptions = Subscriptions::new();
     let mut backoff = Backoff::default();
     loop {
         let _ = sender.send(Update::Resynchronizing).await;
@@ -235,7 +265,7 @@ async fn supervise(
         let result = loop {
             tokio::select! {
                 result=&mut connection => break result,
-                command=requests.recv(), if !requests.is_closed() => { if let Ok(command)=command { reject_disconnected(command,&mut selected).await; } }
+                command=requests.recv(), if !requests.is_closed() => { if let Ok(command)=command { reject_disconnected(command,&mut selected,&mut subscriptions).await; } }
             }
         };
         let failure = match result {
@@ -250,6 +280,7 @@ async fn supervise(
                     requests,
                     &mut selected,
                     &mut reached_sync,
+                    &mut subscriptions,
                 )
                 .await;
                 if reached_sync {
@@ -274,7 +305,7 @@ async fn supervise(
         };
         // No queued mutation survives the disconnected epoch, regardless of whether it was read.
         while let Ok(command) = requests.try_recv() {
-            reject_disconnected(command, &mut selected).await;
+            reject_disconnected(command, &mut selected, &mut subscriptions).await;
         }
         if !failure.retryable {
             let _ = sender.send(Update::Status(failure.message.into())).await;
@@ -293,7 +324,7 @@ async fn supervise(
         loop {
             tokio::select! {
                 _=&mut wait => break,
-                command=requests.recv(), if !requests.is_closed() => { if let Ok(command)=command { reject_disconnected(command,&mut selected).await; } }
+                command=requests.recv(), if !requests.is_closed() => { if let Ok(command)=command { reject_disconnected(command,&mut selected,&mut subscriptions).await; } }
             }
         }
     }
@@ -328,6 +359,7 @@ where
 enum Pending {
     Shell,
     Thread(String),
+    Subscription(String),
     Call(async_channel::Sender<Result<Value, String>>),
 }
 
@@ -340,7 +372,15 @@ async fn run_session<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    run_selected_session(socket, sender, commands, &mut None, &mut false).await
+    run_selected_session(
+        socket,
+        sender,
+        commands,
+        &mut None,
+        &mut false,
+        &mut Subscriptions::new(),
+    )
+    .await
 }
 
 async fn run_selected_session<S>(
@@ -349,6 +389,7 @@ async fn run_selected_session<S>(
     commands: &async_channel::Receiver<Command>,
     selected: &mut Option<String>,
     reached_sync: &mut bool,
+    subscriptions: &mut Subscriptions,
 ) -> Result<(), &'static str>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -375,6 +416,18 @@ where
         );
         next_id += 1;
     }
+    for (key, (tag, payload)) in subscriptions.iter() {
+        send(
+            &mut socket,
+            protocol::request(next_id, tag, payload.clone()),
+        )
+        .await?;
+        pending.insert(
+            RequestId::String(next_id.to_string()),
+            Pending::Subscription(key.clone()),
+        );
+        next_id += 1;
+    }
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(5),
         Duration::from_secs(5),
@@ -387,6 +440,28 @@ where
                 let command = match command { Ok(command) => command, Err(_) => { commands_open = false; continue; } };
                 let id = RequestId::String(next_id.to_string());
                 match command {
+                    Command::Subscribe { key,tag,payload } => {
+                        if !supported_subscription(&tag) {
+                            sender.send(Update::Subscription { key, item:Err("Unsupported read subscription".into()) }).await.map_err(|_| "Client closed")?;
+                            continue;
+                        }
+                        let old_ids: Vec<_> = pending.iter().filter_map(|(id,kind)| if matches!(kind,Pending::Subscription(old) if old == &key) { Some(id.clone()) } else { None }).collect();
+                        for old in old_ids {
+                            send(&mut socket,ClientMessage::Interrupt { request_id:old.clone() }).await?;
+                            pending.remove(&old);cancelled.insert(old);
+                        }
+                        subscriptions.insert(key.clone(),(tag.clone(),payload.clone()));
+                        send(&mut socket,protocol::request(next_id,&tag,payload)).await?;
+                        pending.insert(id,Pending::Subscription(key));next_id += 1;
+                    }
+                    Command::Unsubscribe(key) => {
+                        subscriptions.remove(&key);
+                        let old_ids: Vec<_> = pending.iter().filter_map(|(id,kind)| if matches!(kind,Pending::Subscription(old) if old == &key) { Some(id.clone()) } else { None }).collect();
+                        for old in old_ids {
+                            send(&mut socket,ClientMessage::Interrupt { request_id:old.clone() }).await?;
+                            pending.remove(&old);cancelled.insert(old);
+                        }
+                    }
                     Command::SelectThread(thread_id) => {
                         *selected=thread_id.clone();
                         let old_ids: Vec<_> = pending.iter().filter_map(|(id, kind)| if matches!(kind, Pending::Thread(_)) { Some(id.clone()) } else { None }).collect();
@@ -437,9 +512,10 @@ where
                                         Pending::Shell => {
                                             let item:ShellItem=serde_json::from_value(value).map_err(|_| "Unsupported shell stream event")?;
                                             if matches!(item,ShellItem::Synchronized) { synchronized=true; *reached_sync=true; }
-                                            Update::Shell(item)
+                                            Update::Shell(Box::new(item))
                                         },
                                         Pending::Thread(thread_id) => Update::Thread { thread_id: thread_id.clone(), item: value },
+                                        Pending::Subscription(key) => Update::Subscription { key:key.clone(),item:Ok(value) },
                                         Pending::Call(_) => return Err("Unary RPC returned a stream chunk"),
                                     };
                                     sender.send(update).await.map_err(|_| "Client closed")?;
@@ -455,6 +531,10 @@ where
                                 Pending::Call(reply) => {
                                     let result = match exit { RpcExit::Success { value } => Ok(value), RpcExit::Failure { cause } => Err(rpc_failure(&cause)) };
                                     let _ = reply.send(result).await;
+                                }
+                                Pending::Subscription(key) => {
+                                    let message = match exit { RpcExit::Success { .. } => "Read subscription ended".into(),RpcExit::Failure { cause } => rpc_failure(&cause) };
+                                    sender.send(Update::Subscription { key,item:Err(message) }).await.map_err(|_| "Client closed")?;
                                 }
                                 Pending::Thread(_) => {
                                     let status = match exit { RpcExit::Success { .. } => "Thread subscription ended".to_owned(), RpcExit::Failure { cause } => rpc_failure(&cause) };
@@ -552,7 +632,7 @@ mod tests {
                     failed |= status.contains("Authorization rejected");
                 }
                 Update::Resynchronizing => {}
-                Update::Shell(_) | Update::Thread { .. } => {
+                Update::Shell(_) | Update::Thread { .. } | Update::Subscription { .. } => {
                     panic!("unauthorized connection delivered shell state")
                 }
             }
@@ -617,7 +697,7 @@ mod tests {
         let mut shell = crate::shell::Shell::default();
         while let Ok(update) = receiver.recv().await {
             if let Update::Shell(item) = update {
-                shell.apply(item).unwrap();
+                shell.apply(*item).unwrap();
                 if shell.synchronized {
                     break;
                 }
@@ -780,12 +860,132 @@ mod tests {
         let mut shell = crate::shell::Shell::default();
         for _ in 0..2 {
             match receiver.recv().await.unwrap() {
-                Update::Shell(item) => shell.apply(item).unwrap(),
+                Update::Shell(item) => shell.apply(*item).unwrap(),
                 _ => panic!("expected shell item"),
             }
         }
         assert_eq!(shell.projects[0].title, "Example");
         assert!(shell.synchronized);
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod subscription_tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    async fn receive(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+    ) -> Value {
+        let message = socket.next().await.unwrap().unwrap();
+        serde_json::from_str(message.to_text().unwrap()).unwrap()
+    }
+    #[tokio::test]
+    async fn read_subscription_replacement_cancels_old_stream_and_rejects_mutation_tags() {
+        let (client, server) = tokio::io::duplex(16384);
+        let client =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let mut server =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let (updates, rx) = async_channel::bounded(16);
+        let (commands, requests) = async_channel::bounded(16);
+        let task = tokio::spawn(async move { run_session(client, &updates, &requests).await });
+        assert_eq!(
+            receive(&mut server).await["tag"],
+            "orchestration.subscribeShell"
+        );
+        commands
+            .send(Command::Subscribe {
+                key: "clones".into(),
+                tag: "subscribeProjectClones".into(),
+                payload: json!({}),
+            })
+            .await
+            .unwrap();
+        let old = receive(&mut server).await;
+        commands
+            .send(Command::Subscribe {
+                key: "clones".into(),
+                tag: "subscribeProjectClones".into(),
+                payload: json!({}),
+            })
+            .await
+            .unwrap();
+        let interrupt = receive(&mut server).await;
+        assert_eq!(interrupt["_tag"], "Interrupt");
+        assert_eq!(interrupt["requestId"], old["id"]);
+        let fresh = receive(&mut server).await;
+        server
+            .send(Message::Text(
+                json!({"_tag":"Chunk","requestId":old["id"],"values":[{"stale":true}]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut server).await["_tag"], "Ack");
+        server
+            .send(Message::Text(
+                json!({"_tag":"Chunk","requestId":fresh["id"],"values":[[]]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.recv().await.unwrap(),Update::Subscription { key,item:Ok(value) } if key == "clones" && value == json!([]))
+        );
+        assert_eq!(receive(&mut server).await["_tag"], "Ack");
+        commands
+            .send(Command::Subscribe {
+                key: "unsafe".into(),
+                tag: "orchestration.dispatchCommand".into(),
+                payload: json!({}),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.recv().await.unwrap(),Update::Subscription { key,item:Err(_) } if key == "unsafe")
+        );
+        commands
+            .send(Command::Unsubscribe("clones".into()))
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut server).await["requestId"], fresh["id"]);
+        server.close(None).await.unwrap();
+        assert_eq!(task.await.unwrap(), Err("Server disconnected"));
+    }
+    #[tokio::test]
+    async fn disconnected_read_subscriptions_are_restored_but_mutations_are_not_retained() {
+        let mut selected = None;
+        let mut subscriptions = Subscriptions::new();
+        reject_disconnected(
+            Command::Subscribe {
+                key: "clones".into(),
+                tag: "subscribeProjectClones".into(),
+                payload: json!({}),
+            },
+            &mut selected,
+            &mut subscriptions,
+        )
+        .await;
+        reject_disconnected(
+            Command::Subscribe {
+                key: "unsafe".into(),
+                tag: "orchestration.dispatchCommand".into(),
+                payload: json!({}),
+            },
+            &mut selected,
+            &mut subscriptions,
+        )
+        .await;
+        assert_eq!(subscriptions.len(), 1);
+        reject_disconnected(
+            Command::Unsubscribe("clones".into()),
+            &mut selected,
+            &mut subscriptions,
+        )
+        .await;
+        assert!(subscriptions.is_empty());
     }
 }
