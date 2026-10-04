@@ -1526,9 +1526,6 @@ impl NativeApp {
     }
 
     fn attach_created_pending(&mut self, cx: &mut Context<Self>) {
-        if self.pending_history_attached {
-            return;
-        }
         let Some(id) = self.selected_thread.as_ref() else {
             return;
         };
@@ -1536,8 +1533,22 @@ impl NativeApp {
             .pending_threads
             .iter()
             .any(|draft| &draft.thread.id == id)
-            || !self.shell.threads.iter().any(|thread| &thread.id == id)
         {
+            return;
+        }
+        let materialized = self.shell.threads.iter().any(|thread| &thread.id == id);
+        if self.pending_history_attached && !materialized {
+            // Bootstrap cancellation deletes the server thread but retains the local draft.
+            // Its old starting session must not prevent sending that draft again.
+            self.detail = thread::ThreadDetail::default();
+            self.pending_history_attached = false;
+            if let Some(sender) = &self.commands {
+                let _ = sender.try_send(connection::Command::SelectThread(None));
+            }
+            cx.notify();
+            return;
+        }
+        if self.pending_history_attached || !materialized {
             return;
         }
         if let Some(sender) = &self.commands
@@ -1637,7 +1648,7 @@ impl NativeApp {
                         }
                         app.project_settings = Some(settings);
                         app.confirm_action_delete = None;
-                        app.status = "Project actions loaded and saved on this environment".into();
+                        app.status = "Project actions loaded from this environment".into();
                     }
                     Err(error) => app.status = error,
                 }
@@ -2298,6 +2309,10 @@ impl Render for NativeApp {
             }
             if let Some(activities) = detail["activities"].as_array() {
                 for activity in activities {
+                    if activity["kind"] == "worktree-setup" {
+                        // The setup card renders the live stages and terminal output.
+                        continue;
+                    }
                     conversation = conversation.child(
                         div()
                             .flex()

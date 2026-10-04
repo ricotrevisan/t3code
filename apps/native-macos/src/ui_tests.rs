@@ -1202,4 +1202,18 @@ fn materialized_bootstrap_draft_attaches_history_once_before_turn_receipt(cx: &m
     );
     assert!(requests.try_recv().is_err());
     assert!(app.read_with(cx, |app, _| app.pending_history_attached));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(json!({"id":"t","session":{"status":"starting"}}));
+            app.shell.threads.clear();
+            app.attach_created_pending(cx);
+        })
+    });
+    assert!(matches!(
+        requests.try_recv().unwrap(),
+        connection::Command::SelectThread(None)
+    ));
+    assert!(app.read_with(cx, |app, _| app.detail.thread.is_none()));
+    assert!(!app.read_with(cx, |app, _| app.pending_history_attached));
+    assert_eq!(app.read_with(cx, |app, _| app.pending_threads.len()), 1);
 }
