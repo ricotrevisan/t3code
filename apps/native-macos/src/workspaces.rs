@@ -84,3 +84,46 @@ pub fn create_worktree(
     }
     Ok(request)
 }
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupProgress {
+    pub thread_id: String,
+    pub phase: String,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub stages: Vec<SetupStage>,
+    pub error: Option<String>,
+    pub sequence: u64,
+}
+#[derive(Clone, Deserialize)]
+pub struct SetupStage {
+    pub id: String,
+    pub status: String,
+    pub percent: Option<u64>,
+    pub detail: Option<String>,
+    pub tail: Vec<String>,
+}
+pub fn apply_setup(
+    previous: &mut Option<SetupProgress>,
+    thread_id: &str,
+    value: Value,
+) -> Result<(), String> {
+    if value.is_null() {
+        *previous = None;
+        return Ok(());
+    }
+    let incoming: SetupProgress =
+        serde_json::from_value(value).map_err(|_| "Invalid worktree setup progress")?;
+    if incoming.thread_id != thread_id {
+        return Ok(());
+    }
+    if previous
+        .as_ref()
+        .is_some_and(|old| old.thread_id == thread_id && old.sequence > incoming.sequence)
+    {
+        return Ok(());
+    }
+    *previous = Some(incoming);
+    Ok(())
+}

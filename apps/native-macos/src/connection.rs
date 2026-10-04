@@ -341,7 +341,32 @@ where
     socket
         .send(Message::Text(text.into()))
         .await
-        .map_err(|_| "Connection closed while sending")
+        .map_err(|_| "Connection closed while sending")?;
+    if let ClientMessage::Request {
+        id, tag, payload, ..
+    } = &message
+        && (tag.starts_with("orchestration.")
+            || tag.starts_with("vcs.")
+            || tag.starts_with("projects.")
+            || tag.starts_with("projectClone.")
+            || supported_subscription(tag))
+        && let Some(path) = std::env::var_os("T3_NATIVE_EVIDENCE_TRACE")
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let record = json!({"direction":"outgoing","at":crate::commands::now(),"id":id,"tag":tag,"payload":payload});
+        // Explicitly enabled for owned-fixture UI verification; never record auth traffic or headers.
+        let result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|mut file| writeln!(file, "{record}"));
+        if result.is_err() {
+            eprintln!("Could not retain native RPC evidence");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -553,15 +578,52 @@ where
 }
 
 fn rpc_failure(cause: &Value) -> String {
-    let name = cause
-        .as_array()
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find_map(|entry| entry["error"]["_tag"].as_str())
-        })
+    let error = cause.as_array().and_then(|entries| {
+        entries
+            .iter()
+            .find_map(|entry| entry.get("error").filter(|error| error["_tag"].is_string()))
+    });
+    let name = error
+        .and_then(|error| error["_tag"].as_str())
         .unwrap_or("RequestFailed");
-    format!("Server rejected request ({name})")
+    // Only the contract's user-facing fields belong in the UI. Commands, headers and
+    // nested defects can contain credentials and must never be serialized as an error.
+    let detail = error
+        .and_then(|error| {
+            error["message"]
+                .as_str()
+                .or_else(|| error["detail"].as_str())
+        })
+        .filter(|detail| !detail.trim().is_empty());
+    match detail {
+        Some(detail) => format!("{} ({name})", safe_error_detail(detail)),
+        None => format!("Server rejected request ({name})"),
+    }
+}
+fn safe_error_detail(detail: &str) -> String {
+    let bounded: String = detail
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .take(4000)
+        .collect();
+    bounded
+        .split_inclusive(char::is_whitespace)
+        .map(|word| {
+            let trimmed = word.trim();
+            let core = trimmed.trim_matches(['\'', '"', '(', ')', ',']);
+            if let Ok(mut url) = url::Url::parse(core)
+                && matches!(url.scheme(), "http" | "https" | "ssh")
+            {
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                url.set_query(None);
+                url.set_fragment(None);
+                word.replace(core, url.as_str())
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -598,6 +660,31 @@ mod tests {
             );
         }
         assert!(ConnectionOptions::new("https://host", "".into()).is_err());
+    }
+
+    #[test]
+    fn typed_server_failures_keep_actionable_reason_without_dumping_command_or_cause() {
+        let error = rpc_failure(
+            &json!([{"_tag":"Fail","error":{"_tag":"GitCommandError","detail":"Worktree contains modified or untracked files","command":"secret command","cause":{"token":"secret cause"}}}]),
+        );
+        assert!(error.contains("Worktree contains modified or untracked files"));
+        assert!(!error.contains("secret"));
+        assert!(rpc_failure(&json!([{"_tag":"Fail","error":{"_tag":"ProjectReadFileError","message":"File not found"}}])).contains("File not found"));
+        assert_eq!(
+            rpc_failure(&json!([{"_tag":"Die","defect":{"password":"hidden"}}])),
+            "Server rejected request (RequestFailed)"
+        );
+    }
+
+    #[test]
+    fn actionable_errors_redact_url_credentials_and_query_tokens() {
+        let result = rpc_failure(
+            &json!([{"error":{"_tag":"SourceControlRepositoryError","detail":"Cannot clone https://user:password@example.invalid/repo?token=secret#private"}}]),
+        );
+        assert!(result.contains("Cannot clone https://example.invalid/repo"));
+        assert!(!result.contains("password"));
+        assert!(!result.contains("secret"));
+        assert!(!result.contains("private"));
     }
 
     #[tokio::test]

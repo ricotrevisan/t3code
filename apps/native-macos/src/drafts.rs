@@ -8,8 +8,18 @@ use std::{
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct EnvironmentDrafts {
+    #[serde(default)]
+    pending_threads: BTreeMap<String, PendingThread>,
     drafts: BTreeMap<String, String>,
     stash: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingThread {
+    pub thread: crate::shell::Thread,
+    pub created_at: String,
+    pub prepare_worktree: Option<serde_json::Value>,
+    pub run_setup_script: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -59,6 +69,29 @@ impl Drafts {
         })
     }
 
+    pub fn pending_threads(&self, environment: &str) -> Vec<PendingThread> {
+        self.document
+            .environments
+            .get(environment)
+            .map(|state| state.pending_threads.values().cloned().collect())
+            .unwrap_or_default()
+    }
+    pub fn put_pending(&mut self, environment: &str, draft: PendingThread) {
+        self.revision += 1;
+        self.document
+            .environments
+            .entry(environment.into())
+            .or_default()
+            .pending_threads
+            .insert(draft.thread.id.clone(), draft);
+    }
+    pub fn remove_pending(&mut self, environment: &str, id: &str) {
+        if let Some(state) = self.document.environments.get_mut(environment)
+            && state.pending_threads.remove(id).is_some()
+        {
+            self.revision += 1;
+        }
+    }
     pub fn get(&self, environment: &str, thread: &str) -> &str {
         self.document
             .environments
@@ -166,6 +199,30 @@ pub fn default_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pending_thread_checkout_recipe_survives_restart_and_is_environment_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let mut store = Drafts::open(path.clone()).unwrap();
+        let draft=PendingThread{thread:serde_json::from_value(serde_json::json!({"id":"draft","projectId":"p","title":"Owned draft","modelSelection":{"instanceId":"codex","model":"gpt-6-astra"}})).unwrap(),created_at:crate::commands::now(),prepare_worktree:Some(serde_json::json!({"projectCwd":"/tmp/owned","baseBranch":"main","startFromOrigin":true})),run_setup_script:true};
+        store.put_pending("a", draft);
+        store.set("a", "draft", "Unsent 世界".into());
+        store.write_snapshot().unwrap().persist().unwrap();
+        let mut restored = Drafts::open(path.clone()).unwrap();
+        assert!(restored.pending_threads("b").is_empty());
+        assert_eq!(
+            restored.pending_threads("a")[0]
+                .prepare_worktree
+                .as_ref()
+                .unwrap()["baseBranch"],
+            "main"
+        );
+        assert_eq!(restored.get("a", "draft"), "Unsent 世界");
+        restored.remove_pending("a", "draft");
+        restored.write_snapshot().unwrap().persist().unwrap();
+        assert!(Drafts::open(path).unwrap().pending_threads("a").is_empty());
+    }
+
     #[test]
     fn drafts_and_stash_survive_restart_without_cross_environment_leaks() {
         let directory = tempfile::tempdir().unwrap();

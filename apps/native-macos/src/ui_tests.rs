@@ -31,6 +31,9 @@ fn harness(
     }));
     // Selection request belongs to setup, not the action under test.
     assert!(
+        matches!(requests.try_recv().unwrap(),connection::Command::Subscribe {tag,..} if tag=="subscribeWorktreeSetup")
+    );
+    assert!(
         matches!(requests.try_recv().unwrap(),connection::Command::SelectThread(Some(id)) if id == "t")
     );
     cx.run_until_parked();
@@ -903,12 +906,35 @@ fn checkout_choice_preserves_draft_and_creates_new_thread_in_chosen_worktree(
         requests.try_recv().unwrap(),
         connection::Command::SelectThread(None)
     ));
+    assert!(
+        matches!(requests.try_recv().unwrap(),connection::Command::Subscribe {tag,..} if tag=="subscribeWorktreeSetup")
+    );
+    assert!(matches!(
+        requests.try_recv().unwrap(),
+        connection::Command::SelectThread(None)
+    ));
+    assert!(requests.try_recv().is_err());
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.composer.update(cx, |input, cx| {
+                input.set_value("Owned first turn", window, cx)
+            });
+            app.send_prompt(window, cx);
+        })
+    });
+    cx.run_until_parked();
     let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
-        panic!("create")
+        panic!("first turn")
     };
-    assert_eq!(payload["type"], "thread.create");
-    assert_eq!(payload["branch"], "owned-branch");
-    assert_eq!(payload["worktreePath"], "/tmp/owned-worktree");
+    assert_eq!(payload["type"], "thread.turn.start");
+    assert_eq!(
+        payload["bootstrap"]["createThread"]["branch"],
+        "owned-branch"
+    );
+    assert_eq!(
+        payload["bootstrap"]["createThread"]["worktreePath"],
+        "/tmp/owned-worktree"
+    );
     assert_eq!(
         app.read_with(cx, |app, _| app.drafts.get("t").cloned()),
         Some("Existing draft 世界".into())
@@ -925,4 +951,117 @@ fn checkout_choice_preserves_draft_and_creates_new_thread_in_chosen_worktree(
         app.read_with(cx, |app, _| app.status.clone()),
         "Creation rejected"
     );
+}
+
+#[gpui::test]
+fn first_turn_bootstrap_keeps_failed_draft_and_subscribes_history_only_after_acceptance(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.prepare_new_worktree = true;
+            app.worktree_ref
+                .update(cx, |input, cx| input.set_value("main", window, cx));
+            app.worktree_branch
+                .update(cx, |input, cx| input.set_value("owned-branch", window, cx));
+            app.title.update(cx, |input, cx| {
+                input.set_value("Owned deferred thread", window, cx)
+            });
+            app.new_thread(window, cx);
+            app.composer.update(cx, |input, cx| {
+                input.set_value("Owned first turn 世界", window, cx)
+            });
+            app.send_prompt(window, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(),connection::Command::Subscribe {tag,..} if tag=="subscribeWorktreeSetup")
+    );
+    assert!(matches!(
+        requests.try_recv().unwrap(),
+        connection::Command::SelectThread(None)
+    ));
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("start")
+    };
+    assert_eq!(
+        payload["bootstrap"]["prepareWorktree"]["projectCwd"],
+        "/tmp/fixture"
+    );
+    assert_eq!(
+        payload["bootstrap"]["prepareWorktree"]["baseBranch"],
+        "main"
+    );
+    assert_eq!(
+        payload["bootstrap"]["prepareWorktree"]["branch"],
+        "owned-branch"
+    );
+    assert_eq!(
+        payload["bootstrap"]["prepareWorktree"]["startFromOrigin"],
+        true
+    );
+    assert_eq!(payload["bootstrap"]["runSetupScript"], true);
+    assert_eq!(payload["message"]["text"], "Owned first turn 世界");
+    reply.send_blocking(Err("Setup cancelled".into())).unwrap();
+    cx.run_until_parked();
+    assert_eq!(app.read_with(cx, |app, _| app.pending_threads.len()), 1);
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        "Owned first turn 世界"
+    );
+    cx.update(|window, cx| app.update(cx, |app, cx| app.send_prompt(window, cx)));
+    cx.run_until_parked();
+    let connection::Command::Call {
+        payload: retry,
+        reply,
+        ..
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("retry")
+    };
+    assert_ne!(payload["commandId"], retry["commandId"]);
+    assert_eq!(payload["threadId"], retry["threadId"]);
+    reply.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.pending_threads.is_empty()));
+    assert!(
+        matches!(requests.try_recv().unwrap(),connection::Command::SelectThread(Some(id)) if id==retry["threadId"])
+    );
+}
+
+#[gpui::test]
+fn unsent_thread_rename_and_discard_are_local_and_preserve_other_draft(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_input("Existing draft");
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.new_thread(window, cx);
+            app.title.update(cx, |input, cx| {
+                input.set_value("Renamed unsent", window, cx)
+            });
+            app.lifecycle("thread.meta.update", cx);
+            app.composer.update(cx, |input, cx| {
+                input.set_value("Draft to discard", window, cx)
+            });
+            app.discard_pending(window, cx);
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.pending_threads[0].thread.title.clone()),
+        "Renamed unsent"
+    );
+    cx.update(|window, cx| app.update(cx, |app, cx| app.discard_pending(window, cx)));
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.pending_threads.is_empty()));
+    assert_eq!(
+        app.read_with(cx, |app, _| app.drafts.get("t").cloned()),
+        Some("Existing draft".into())
+    );
+    assert!(app.read_with(cx, |app, cx| app.composer.read(cx).value().is_empty()));
+    while let Ok(request) = requests.try_recv() {
+        assert!(!matches!(request, connection::Command::Call { .. }));
+    }
 }

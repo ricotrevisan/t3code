@@ -75,6 +75,11 @@ struct NativeApp {
     catalog_open: bool,
     search: Entity<InputState>,
     search_results: Vec<Value>,
+    pending_threads: Vec<drafts::PendingThread>,
+    prepare_new_worktree: bool,
+    start_from_origin: bool,
+    run_setup_script: bool,
+    setup_progress: Option<workspaces::SetupProgress>,
     new_thread_checkout: Option<(String, String, Option<String>)>,
     worktree_outcome: Option<Value>,
     worktrees_open: bool,
@@ -285,6 +290,11 @@ impl NativeApp {
             catalog_open: false,
             search,
             search_results: vec![],
+            pending_threads: vec![],
+            prepare_new_worktree: false,
+            start_from_origin: true,
+            run_setup_script: true,
+            setup_progress: None,
             new_thread_checkout: None,
             worktree_outcome: None,
             worktrees_open: false,
@@ -391,6 +401,15 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         use palette::Command;
+        if command == Command::Delete
+            && self
+                .pending_threads
+                .iter()
+                .any(|draft| Some(&draft.thread.id) == self.selected_thread.as_ref())
+        {
+            self.discard_pending(window, cx);
+            return;
+        }
         match command {
             Command::Worktrees => {
                 self.worktrees_open = true;
@@ -432,30 +451,7 @@ impl NativeApp {
             },
             Command::RenameProject => self.update_project(false, cx),
             Command::RemoveProject => self.update_project(true, cx),
-            Command::NewThread => {
-                if let Some(project) = &self.selected_project {
-                    let selection = json!({"instanceId":self.provider.read(cx).value().as_str(),"model":self.model.read(cx).value().as_str()});
-                    match commands::create_thread(project, &self.title.read(cx).value(), selection)
-                    {
-                        Ok(mut command) => {
-                            if let Some((project_id, branch, path)) = &self.new_thread_checkout
-                                && project_id == project
-                            {
-                                command["branch"] = json!(branch);
-                                command["worktreePath"] = json!(path);
-                            }
-                            self.dispatch(command, cx);
-                        }
-                        Err(error) => {
-                            self.status = error.into();
-                            cx.notify();
-                        }
-                    }
-                } else {
-                    self.status = "Select a project first".into();
-                    cx.notify();
-                }
-            }
+            Command::NewThread => self.new_thread(window, cx),
             Command::Search => self.search.update(cx, |input, cx| input.focus(window, cx)),
             Command::CustomSnooze => self
                 .custom_snooze
@@ -545,6 +541,86 @@ impl NativeApp {
                 cx.notify();
             });
         }));
+        cx.notify();
+    }
+
+    fn selected_setup(&self) -> Option<workspaces::SetupProgress> {
+        self.setup_progress.clone().or_else(|| {
+            self.detail
+                .thread
+                .as_ref()
+                .and_then(|thread| thread["activities"].as_array())
+                .and_then(|activities| {
+                    activities
+                        .iter()
+                        .rev()
+                        .find(|activity| activity["kind"] == "worktree-setup")
+                })
+                .and_then(|activity| serde_json::from_value(activity["payload"].clone()).ok())
+        })
+    }
+
+    fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self
+            .shell
+            .projects
+            .iter()
+            .find(|project| Some(&project.id) == self.selected_project.as_ref())
+        else {
+            self.status = "Select a project first".into();
+            cx.notify();
+            return;
+        };
+        let project_id = project.id.clone();
+        let cwd = project.workspace_root.clone();
+        let selection = json!({"instanceId":self.provider.read(cx).value().as_str(),"model":self.model.read(cx).value().as_str()});
+        let title = self.title.read(cx).value().to_string();
+        let mut command = match commands::create_thread(&project_id, &title, selection) {
+            Ok(value) => value,
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+                return;
+            }
+        };
+        if let Some((id, branch, path)) = &self.new_thread_checkout
+            && id == &project_id
+        {
+            command["branch"] = json!(branch);
+            command["worktreePath"] = json!(path);
+        }
+        let prepare = if self.prepare_new_worktree {
+            let base = self.worktree_ref.read(cx).value().trim().to_owned();
+            if base.is_empty() {
+                self.status = "Select a base branch for the new worktree".into();
+                cx.notify();
+                return;
+            }
+            let mut value = json!({"projectCwd":cwd,"baseBranch":base,"startFromOrigin":self.start_from_origin});
+            let branch = self.worktree_branch.read(cx).value().trim().to_owned();
+            if !branch.is_empty() {
+                value["branch"] = json!(branch);
+            }
+            Some(value)
+        } else {
+            None
+        };
+        command["id"] = command["threadId"].clone();
+        let draft = drafts::PendingThread {
+            thread: serde_json::from_value(command.clone())
+                .expect("native create command has shell fields"),
+            created_at: command["createdAt"].as_str().unwrap().into(),
+            prepare_worktree: prepare,
+            run_setup_script: self.run_setup_script,
+        };
+        let id = draft.thread.id.clone();
+        if let Some(store) = &mut self.draft_store {
+            store.put_pending(&self.environment_scope, draft.clone());
+        }
+        self.pending_threads.push(draft);
+        self.schedule_draft_save(cx);
+        self.select_thread(&id, window, cx);
+        self.status = "New thread draft · sent to the server with the first message".into();
         cx.notify();
     }
 
@@ -705,6 +781,7 @@ impl NativeApp {
             .threads
             .iter()
             .chain(self.archived_shell.threads.iter())
+            .chain(self.pending_threads.iter().map(|draft| &draft.thread))
             .find(|t| Some(&t.id) == self.selected_thread.as_ref() && t.project_id == project.id);
         if selected.is_none()
             && let Some((id, _, Some(path))) = &self.new_thread_checkout
@@ -1202,6 +1279,11 @@ impl NativeApp {
                         self.stash_memory.clear();
                         self.search_results.clear();
                     }
+                    self.pending_threads = self
+                        .draft_store
+                        .as_ref()
+                        .map(|store| store.pending_threads(&scope))
+                        .unwrap_or_default();
                     self.environment_scope = scope;
                     let session = connection::start_session(options);
                     self.commands = Some(session.commands);
@@ -1215,6 +1297,7 @@ impl NativeApp {
                                         app.detail = thread::ThreadDetail::default();
                                         app.snooze_wake = None;
                                         app.clone_progress.clear();
+                                        app.setup_progress = None;
                                         app.status =
                                             "Reconnecting — history is being synchronized".into();
                                         Ok(())
@@ -1256,6 +1339,24 @@ impl NativeApp {
                                                 Err(error) => {
                                                     app.status = error;
                                                     app.clone_progress.clear();
+                                                    Ok(())
+                                                }
+                                            }
+                                        } else if key == "worktree-setup" {
+                                            match item {
+                                                Ok(value) => {
+                                                    if let Some(id) = &app.selected_thread {
+                                                        workspaces::apply_setup(
+                                                            &mut app.setup_progress,
+                                                            id,
+                                                            value,
+                                                        )
+                                                    } else {
+                                                        Ok(())
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    app.status = error;
                                                     Ok(())
                                                 }
                                             }
@@ -1314,6 +1415,7 @@ impl NativeApp {
             .threads
             .iter()
             .chain(&self.archived_shell.threads)
+            .chain(self.pending_threads.iter().map(|draft| &draft.thread))
             .find(|t| t.id == id)
         {
             self.selected_project = Some(thread.project_id.clone());
@@ -1341,9 +1443,25 @@ impl NativeApp {
                 )
             });
         }
+        let pending = self
+            .pending_threads
+            .iter()
+            .any(|draft| draft.thread.id == id);
+        self.setup_progress = None;
+        if let Some(sender) = &self.commands {
+            let _ = sender.try_send(connection::Command::Subscribe {
+                key: "worktree-setup".into(),
+                tag: "subscribeWorktreeSetup".into(),
+                payload: json!({"threadId":id}),
+            });
+        }
         if let Some(sender) = &self.commands
             && sender
-                .try_send(connection::Command::SelectThread(Some(id.into())))
+                .try_send(connection::Command::SelectThread(if pending {
+                    None
+                } else {
+                    Some(id.into())
+                }))
                 .is_err()
         {
             self.status = "Connection busy or closed; retry selection".into();
@@ -1392,6 +1510,25 @@ impl NativeApp {
                 app.pending_actions = app.pending_actions.saturating_sub(1);
                 match result {
                     Ok(value) => {
+                        if sent_prompt.is_some()
+                            && let Some(id) = &thread_id
+                            && app
+                                .pending_threads
+                                .iter()
+                                .any(|draft| &draft.thread.id == id)
+                        {
+                            app.pending_threads.retain(|draft| &draft.thread.id != id);
+                            if let Some(store) = &mut app.draft_store {
+                                store.remove_pending(&app.environment_scope, id);
+                            }
+                            app.schedule_draft_save(cx);
+                            if app.selected_thread.as_ref() == Some(id)
+                                && let Some(sender) = &app.commands
+                            {
+                                let _ = sender
+                                    .try_send(connection::Command::SelectThread(Some(id.clone())));
+                            }
+                        }
                         if tag == "projectClone.start" {
                             app.selected_project = value["projectId"].as_str().map(str::to_owned);
                         }
@@ -1471,10 +1608,63 @@ impl NativeApp {
         self.perform("orchestration.dispatchCommand", payload, None, cx);
     }
 
+    fn discard_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_thread.clone() else {
+            return;
+        };
+        if self.confirm_delete.as_ref() != Some(&id) {
+            self.confirm_delete = Some(id);
+            self.status = "Click Delete again to discard this unsent thread".into();
+            cx.notify();
+            return;
+        }
+        self.pending_threads.retain(|draft| draft.thread.id != id);
+        self.drafts.remove(&id);
+        if let Some(store) = &mut self.draft_store {
+            store.remove_pending(&self.environment_scope, &id);
+            store.set(&self.environment_scope, &id, String::new());
+        }
+        self.selected_thread = None;
+        self.confirm_delete = None;
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.setup_progress = None;
+        if let Some(sender) = &self.commands {
+            let _ = sender.try_send(connection::Command::Unsubscribe("worktree-setup".into()));
+        }
+        self.schedule_draft_save(cx);
+        self.status = "Unsent thread discarded".into();
+        cx.notify();
+    }
+
     fn lifecycle(&mut self, kind: &str, cx: &mut Context<Self>) {
         let Some(id) = &self.selected_thread else {
             return;
         };
+        if let Some(draft) = self
+            .pending_threads
+            .iter_mut()
+            .find(|draft| &draft.thread.id == id)
+        {
+            if kind == "thread.meta.update" {
+                let title = self.title.read(cx).value().trim().to_owned();
+                if title.is_empty() {
+                    self.status = "A title is required".into();
+                    cx.notify();
+                    return;
+                }
+                draft.thread.title = title;
+                if let Some(store) = &mut self.draft_store {
+                    store.put_pending(&self.environment_scope, draft.clone());
+                }
+                self.schedule_draft_save(cx);
+                self.status = "Draft renamed".into();
+            } else {
+                self.status = "Send the first message before changing thread status".into();
+            }
+            cx.notify();
+            return;
+        }
         let mut payload = commands::command(kind, id);
         match kind {
             "thread.meta.update" => {
@@ -1677,7 +1867,13 @@ impl NativeApp {
         let Some(id) = self.selected_thread.clone() else {
             return;
         };
-        let Some(thread) = self.shell.threads.iter().find(|t| t.id == id) else {
+        let Some(thread) = self
+            .shell
+            .threads
+            .iter()
+            .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+            .find(|t| t.id == id)
+        else {
             return;
         };
         let text = self.composer.read(cx).value().to_string();
@@ -1714,7 +1910,17 @@ impl NativeApp {
             thread.runtime_mode.as_deref().unwrap_or("full-access"),
             thread.interaction_mode.as_deref().unwrap_or("default"),
         ) {
-            Ok(payload) => {
+            Ok(mut payload) => {
+                if let Some(draft) = self
+                    .pending_threads
+                    .iter()
+                    .find(|draft| draft.thread.id == id)
+                {
+                    payload["bootstrap"] = json!({"createThread":{"projectId":draft.thread.project_id,"title":draft.thread.title,"modelSelection":payload["modelSelection"],"runtimeMode":payload["runtimeMode"],"interactionMode":payload["interactionMode"],"branch":draft.thread.branch,"worktreePath":draft.thread.worktree_path,"createdAt":draft.created_at},"runSetupScript":draft.run_setup_script});
+                    if let Some(prepare) = &draft.prepare_worktree {
+                        payload["bootstrap"]["prepareWorktree"] = prepare.clone();
+                    }
+                }
                 self.drafts.insert(id, text.clone());
                 self.perform(
                     "orchestration.dispatchCommand",
@@ -1776,6 +1982,23 @@ impl Render for NativeApp {
                         cx.notify();
                     })),
             );
+            for draft in self.pending_threads.iter().filter(|draft| {
+                draft.thread.project_id == project.id
+                    && !self
+                        .shell
+                        .threads
+                        .iter()
+                        .any(|thread| thread.id == draft.thread.id)
+            }) {
+                let id = draft.thread.id.clone();
+                row = row.child(
+                    Button::new(gpui::SharedString::from(format!("draft-{id}")))
+                        .label(format!("{} · unsent", draft.thread.title))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.select_thread(&id, window, cx)
+                        })),
+                );
+            }
             let threads = if self.sidebar_view == sidebar::View::Archived {
                 &self.archived_shell.threads
             } else {
@@ -1869,10 +2092,17 @@ impl Render for NativeApp {
                     session["lastError"].as_str().unwrap_or("")
                 ));
             }
+        } else if self
+            .pending_threads
+            .iter()
+            .any(|draft| Some(&draft.thread.id) == self.selected_thread.as_ref())
+        {
+            conversation =
+                conversation.child("New thread draft · send a message to start the conversation");
+        } else if self.selected_thread.is_some() {
+            conversation = conversation.child("Loading thread history…");
         } else {
-            conversation = conversation.child(
-                "Select a thread. Loading history uses the server's per-thread subscription.",
-            );
+            conversation = conversation.child("Select a thread or create a new one");
         }
         let mut search_results = div().flex().flex_col().gap_2();
         for result in &self.search_results {
@@ -2148,7 +2378,7 @@ impl Render for NativeApp {
                                     .debug_selector(move || id.into())
                                     .label(label)
                                     .on_click(
-                                        cx.listener(move |app, _, _, cx| app.lifecycle(kind, cx)),
+                                        cx.listener(move |app, _, window, cx| {if kind=="thread.delete" && app.pending_threads.iter().any(|draft|Some(&draft.thread.id)==app.selected_thread.as_ref()){app.discard_pending(window,cx);}else{app.lifecycle(kind,cx);}}),
                                     )
                             }),
                         ),
@@ -2164,8 +2394,18 @@ impl Render for NativeApp {
                                     .on_click(cx.listener(|app, _, _, cx| app.snooze_custom(cx))),
                             ),
                     )
+                    .when_some(self.selected_setup(),|view,setup| {
+                        let id=setup.thread_id.clone();view.child(div().flex().flex_col().gap_1()
+                            .child(format!("Worktree setup · {}{}{}",setup.phase,setup.branch.as_ref().map_or(String::new(),|branch|format!(" · {branch}")),setup.worktree_path.as_ref().map_or(String::new(),|path|format!(" · {path}"))))
+                            .children(setup.error.clone()).children(setup.stages.iter().map(|stage|div().flex().flex_col().child(format!("{} · {}{}",stage.id,stage.status,stage.percent.map_or(String::new(),|percent|format!(" {percent}%")))).children(stage.detail.clone()).children(stage.tail.clone())))
+                            .when(setup.phase=="running",|view|view.child(Button::new("setup-cancel").label("Cancel worktree setup").on_click(cx.listener(move|app,_,_,cx|app.perform("worktreeSetup.cancel",json!({"threadId":id}),None,cx)))))
+                        )
+                    })
                     .child(Button::new("worktrees").label("Branches and worktrees").on_click(cx.listener(|app,_,window,cx|app.execute_command(palette::Command::Worktrees,window,cx))))
                     .when(self.worktrees_open,|view|view.child(div().flex().flex_col().gap_2()
+                        .child(Button::new("prepare-worktree").label(if self.prepare_new_worktree{"Next new thread: new worktree"}else{"Next new thread: selected checkout"}).on_click(cx.listener(|app,_,_,cx|{app.prepare_new_worktree=!app.prepare_new_worktree;cx.notify();})))
+                        .child(Button::new("worktree-origin").label(if self.start_from_origin{"Base: fetch from origin"}else{"Base: local branch"}).on_click(cx.listener(|app,_,_,cx|{app.start_from_origin=!app.start_from_origin;cx.notify();})))
+                        .child(Button::new("worktree-setup-script").label(if self.run_setup_script{"Run setup script"}else{"Skip setup script"}).on_click(cx.listener(|app,_,_,cx|{app.run_setup_script=!app.run_setup_script;cx.notify();})))
                         .child(Input::new(&self.worktree_ref)).child(Input::new(&self.worktree_branch)).child(Input::new(&self.worktree_path))
                         .child(div().flex().gap_2()
                             .child(Button::new("refs-refresh").label("Refresh branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",false,cx))))
