@@ -5,6 +5,7 @@ pub mod credentials;
 pub mod drafts;
 pub mod files;
 pub mod palette;
+pub mod project_actions;
 pub mod protocol;
 pub mod providers;
 pub mod reconnect;

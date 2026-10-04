@@ -10,8 +10,8 @@ use gpui_component::{
 };
 use serde_json::{Value, json};
 use t3code_native_macos::{
-    auth, commands, connection, credentials, drafts, files, palette, providers, shell, sidebar,
-    thread, workspaces,
+    auth, commands, connection, credentials, drafts, files, palette, project_actions, providers,
+    shell, sidebar, thread, workspaces,
 };
 
 gpui::actions!(
@@ -73,6 +73,16 @@ struct NativeApp {
     model: Entity<InputState>,
     provider_catalog: Vec<providers::Provider>,
     catalog_open: bool,
+    project_actions_open: bool,
+    project_settings: Option<Value>,
+    action_name: Entity<InputState>,
+    action_command: Entity<InputState>,
+    action_edit_id: Option<String>,
+    action_setup: bool,
+    action_wait: bool,
+    action_busy: bool,
+    action_task: Option<Task<()>>,
+    confirm_action_delete: Option<String>,
     search: Entity<InputState>,
     search_results: Vec<Value>,
     pending_threads: Vec<drafts::PendingThread>,
@@ -289,6 +299,18 @@ impl NativeApp {
             model,
             provider_catalog: vec![],
             catalog_open: false,
+            project_actions_open: false,
+            project_settings: None,
+            action_name: cx.new(|cx| InputState::new(window, cx).placeholder("Action name")),
+            action_command: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Shell command in the project checkout")
+            }),
+            action_edit_id: None,
+            action_setup: false,
+            action_wait: false,
+            action_busy: false,
+            action_task: None,
+            confirm_action_delete: None,
             search,
             search_results: vec![],
             pending_threads: vec![],
@@ -413,6 +435,10 @@ impl NativeApp {
             return;
         }
         match command {
+            Command::ProjectActions => {
+                self.project_actions_open = true;
+                self.project_actions(None, cx);
+            }
             Command::Worktrees => {
                 self.worktrees_open = true;
                 self.worktree_operation("vcs.listRefs", false, cx);
@@ -1116,6 +1142,11 @@ impl NativeApp {
         self.pairing_task = None;
         self.credential_task = None;
         self.commands = None;
+        self.action_task = None;
+        self.action_busy = false;
+        self.project_settings = None;
+        self.action_edit_id = None;
+        self.confirm_action_delete = None;
         self.shell = shell::Shell::default();
         self.archived_shell = shell::Shell::default();
         self.detail = thread::ThreadDetail::default();
@@ -1299,6 +1330,11 @@ impl NativeApp {
                                     connection::Update::Resynchronizing => {
                                         app.shell = shell::Shell::default();
                                         app.archived_shell = shell::Shell::default();
+                                        app.action_task = None;
+                                        app.action_busy = false;
+                                        app.project_settings = None;
+                                        app.action_edit_id = None;
+                                        app.confirm_action_delete = None;
                                         app.detail = thread::ThreadDetail::default();
                                         app.snooze_wake = None;
                                         app.clone_progress.clear();
@@ -1423,6 +1459,13 @@ impl NativeApp {
             .chain(self.pending_threads.iter().map(|draft| &draft.thread))
             .find(|t| t.id == id)
         {
+            if self.selected_project.as_ref() != Some(&thread.project_id) {
+                self.action_task = None;
+                self.action_busy = false;
+                self.project_settings = None;
+                self.action_edit_id = None;
+                self.confirm_action_delete = None;
+            }
             self.selected_project = Some(thread.project_id.clone());
             self.title.update(cx, |input, cx| {
                 input.set_value(thread.title.clone(), window, cx)
@@ -1472,6 +1515,114 @@ impl NativeApp {
             self.status = "Connection busy or closed; retry selection".into();
         }
         cx.notify();
+    }
+
+    fn project_actions(&mut self, mutation: Option<Value>, cx: &mut Context<Self>) {
+        if self.action_busy {
+            self.status = "Another action change is pending".into();
+            cx.notify();
+            return;
+        }
+        let Some(project) = self.selected_project.clone() else {
+            self.status = "Select a project first".into();
+            cx.notify();
+            return;
+        };
+        let Some(sender) = self.commands.clone() else {
+            self.status = "Not connected".into();
+            cx.notify();
+            return;
+        };
+        let legacy = self
+            .shell
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.scripts.clone())
+            .unwrap_or_default();
+        let generation = self.generation;
+        self.action_busy = true;
+        self.status = "Reading project actions…".into();
+        self.action_task = Some(cx.spawn(async move |entity, cx| {
+            let saved_change = mutation.clone();
+            let result = async {
+                let settings = connection::call(&sender, "server.getSettings", json!({})).await?;
+                let Some(change) = mutation else {
+                    return Ok(settings);
+                };
+                let current = project_actions::resolve(&settings, &project, &legacy);
+                let scripts = match change["operation"].as_str() {
+                    Some("inherit") => None,
+                    Some("delete") => Some(
+                        current
+                            .into_iter()
+                            .filter(|s| s["id"] != change["id"])
+                            .collect(),
+                    ),
+                    Some("save") => Some(
+                        project_actions::save(
+                            &current,
+                            change["previousId"].as_str(),
+                            change["id"].as_str().unwrap_or_default(),
+                            change["name"].as_str().unwrap_or_default(),
+                            change["command"].as_str().unwrap_or_default(),
+                            change["setup"] == true,
+                            change["wait"] == true,
+                        )
+                        .map_err(str::to_owned)?,
+                    ),
+                    _ => return Err("Unknown project action operation".into()),
+                };
+                connection::call(
+                    &sender,
+                    "server.updateSettings",
+                    project_actions::patch(&settings, &project, scripts),
+                )
+                .await
+            }
+            .await;
+            let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation || app.selected_project.as_ref() != Some(&project) {
+                    return;
+                }
+                app.action_busy = false;
+                match result {
+                    Ok(settings) => {
+                        if let Some(change) = &saved_change {
+                            if change["operation"] == "save"
+                                && app.action_name.read(cx).value().as_str()
+                                    == change["name"].as_str().unwrap_or_default()
+                                && app.action_command.read(cx).value().as_str()
+                                    == change["command"].as_str().unwrap_or_default()
+                            {
+                                app.action_edit_id = change["id"].as_str().map(str::to_owned);
+                            } else if change["operation"] == "delete"
+                                && app.action_edit_id.as_deref() == change["id"].as_str()
+                            {
+                                app.action_edit_id = None;
+                            }
+                        }
+                        app.project_settings = Some(settings);
+                        app.confirm_action_delete = None;
+                        app.status = "Project actions loaded and saved on this environment".into();
+                    }
+                    Err(error) => app.status = error,
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn save_project_action(&mut self, cx: &mut Context<Self>) {
+        let name = self.action_name.read(cx).value().to_string();
+        let command = self.action_command.read(cx).value().to_string();
+        if name.trim().is_empty() || command.trim().is_empty() {
+            self.status = "Action name and command are required".into();
+            cx.notify();
+            return;
+        }
+        self.project_actions(Some(json!({"operation":"save","previousId":self.action_edit_id,"id":self.action_edit_id.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string()),"name":name,"command":command,"setup":self.action_setup,"wait":self.action_wait})),cx);
     }
 
     fn perform(
@@ -1971,6 +2122,11 @@ impl Render for NativeApp {
                     })
                     .on_click(cx.listener(move |app, _, window, cx| {
                         if app.selected_project.as_ref() != Some(&project_id) {
+                            app.action_task = None;
+                            app.action_busy = false;
+                            app.project_settings = None;
+                            app.action_edit_id = None;
+                            app.confirm_action_delete = None;
                             if let Some(previous) = app.selected_thread.take() {
                                 app.drafts.insert(
                                     previous.clone(),
@@ -2442,6 +2598,26 @@ impl Render for NativeApp {
                             .when(show,|view|view.children(setup.stages.iter().map(|stage|div().w_full().min_w_0().whitespace_normal().flex().flex_col().child(format!("{} · {}{}",stage.id,stage.status,stage.percent.map_or(String::new(),|percent|format!(" {percent}%")))).children(stage.detail.clone()).children(stage.tail.clone()))))
                             .when(setup.phase=="running",|view|view.child(Button::new("setup-cancel").label("Cancel worktree setup").on_click(cx.listener(move|app,_,_,cx|app.perform("worktreeSetup.cancel",json!({"threadId":id}),None,cx)))))
                         )
+                    })
+                    .child(Button::new("project-actions").label("Project actions").on_click(cx.listener(|app,_,_,cx|{app.project_actions_open=true;app.project_actions(None,cx);})))
+                    .when(self.project_actions_open,|view| {
+                        let scripts=self.selected_project.as_ref().and_then(|id|self.project_settings.as_ref().map(|settings|project_actions::resolve(settings,id,self.shell.projects.iter().find(|p|&p.id==id).map(|p|p.scripts.as_slice()).unwrap_or_default()))).unwrap_or_default();
+                        view.child(div().flex().flex_col().gap_2().min_w_0()
+                            .child("Actions for the selected project on this environment")
+                            .child(Input::new(&self.action_name)).child(Input::new(&self.action_command))
+                            .child(Button::new("action-setup").label(if self.action_setup{"Runs on worktree creation"}else{"Run manually"}).on_click(cx.listener(|app,_,_,cx|{app.action_setup= !app.action_setup;cx.notify();})))
+                            .child(Button::new("action-wait").label(if self.action_wait{"Wait before starting agent"}else{"Start agent while setup runs"}).on_click(cx.listener(|app,_,_,cx|{app.action_wait= !app.action_wait;cx.notify();})))
+                            .child(Button::new("action-save").debug_selector(||"action-save".into()).label("Save action").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.save_project_action(cx))))
+                            .child(Button::new("action-new").label("New action").on_click(cx.listener(|app,_,window,cx|{app.action_edit_id=None;app.confirm_action_delete=None;app.action_setup=false;app.action_wait=false;app.action_name.update(cx,|input,cx|input.set_value("",window,cx));app.action_command.update(cx,|input,cx|input.set_value("",window,cx));cx.notify();})))
+                            .children(scripts.into_iter().enumerate().map(|(index,script)| {
+                                let edit=script.clone();let id=script["id"].as_str().unwrap_or_default().to_owned();let confirm=self.confirm_action_delete.as_ref()==Some(&id);
+                                div().flex().flex_col().min_w_0().whitespace_normal().child(format!("{} · {}{}",script["name"].as_str().unwrap_or_default(),script["command"].as_str().unwrap_or_default(),if script["runOnWorktreeCreate"]==true{" · worktree setup"}else{""}))
+                                    .child(Button::new(gpui::SharedString::from(format!("action-edit-{index}"))).label("Edit action").on_click(cx.listener(move|app,_,window,cx|{app.action_edit_id=edit["id"].as_str().map(str::to_owned);app.action_setup=edit["runOnWorktreeCreate"]==true;app.action_wait=edit["async"]==false;app.action_name.update(cx,|input,cx|input.set_value(edit["name"].as_str().unwrap_or_default().to_owned(),window,cx));app.action_command.update(cx,|input,cx|input.set_value(edit["command"].as_str().unwrap_or_default().to_owned(),window,cx));cx.notify();})))
+                                    .child(Button::new(gpui::SharedString::from(format!("action-delete-{index}"))).label(if confirm{"Confirm delete action"}else{"Delete action"}).disabled(self.action_busy).on_click(cx.listener(move|app,_,_,cx|{if app.confirm_action_delete.as_ref()==Some(&id){app.project_actions(Some(json!({"operation":"delete","id":id})),cx);}else{app.confirm_action_delete=Some(id.clone());cx.notify();}})))
+                            }))
+                            .child(Button::new("actions-refresh").label("Refresh actions").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(None,cx))))
+                            .child(Button::new("actions-inherit").label("Use environment action defaults").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"inherit"})),cx))))
+                            .child(Button::new("actions-close").label("Close actions").on_click(cx.listener(|app,_,_,cx|{app.project_actions_open=false;cx.notify();}))))
                     })
                     .child(Button::new("worktrees").label("Branches and worktrees").on_click(cx.listener(|app,_,window,cx|app.execute_command(palette::Command::Worktrees,window,cx))))
                     .when(self.worktrees_open,|view|view.child(div().flex().flex_col().gap_2()

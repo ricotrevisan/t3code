@@ -349,6 +349,12 @@ where
             || tag.starts_with("vcs.")
             || tag.starts_with("projects.")
             || tag.starts_with("projectClone.")
+            || (tag == "server.updateSettings"
+                && payload["patch"].as_object().is_some_and(|patch| {
+                    patch.keys().all(|key| {
+                        key == "projectSettingsOverrides" || key == "defaultProjectScripts"
+                    })
+                }))
             || supported_subscription(tag))
         && let Some(path) = std::env::var_os("T3_NATIVE_EVIDENCE_TRACE")
     {

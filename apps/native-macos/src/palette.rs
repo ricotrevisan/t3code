@@ -1,6 +1,7 @@
 //! Native entry points share command identities with the chat controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    ProjectActions,
     Worktrees,
     CloneProject,
     Files,
@@ -35,6 +36,11 @@ pub struct Entry {
     pub needs_thread: bool,
 }
 pub const ENTRIES: &[Entry] = &[
+    Entry {
+        command: Command::ProjectActions,
+        label: "Edit project actions and setup scripts",
+        needs_thread: false,
+    },
     Entry {
         command: Command::Worktrees,
         label: "Manage branches and worktrees",

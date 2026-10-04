@@ -1109,3 +1109,73 @@ fn changing_project_clears_thread_scope_and_preserves_its_draft(cx: &mut TestApp
         connection::Command::SelectThread(None)
     ));
 }
+
+#[gpui::test]
+fn project_action_save_reads_latest_settings_and_preserves_form_on_rejection(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("edit project actions");
+    cx.simulate_keystrokes("enter");
+    let connection::Command::Call { tag, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected settings read")
+    };
+    assert_eq!(tag, "server.getSettings");
+    reply
+        .send_blocking(Ok(
+            json!({"projectSettingsFolded":true,"defaultProjectScripts":[]}),
+        ))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.action_name
+                .update(cx, |input, cx| input.set_value("Owned setup", window, cx));
+            app.action_command.update(cx, |input, cx| {
+                input.set_value("node setup.cjs", window, cx)
+            });
+            app.action_setup = true;
+            app.action_wait = true;
+            cx.notify();
+        })
+    });
+    let bounds = cx.debug_bounds("action-save").unwrap();
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    let connection::Command::Call { tag, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected latest settings read")
+    };
+    assert_eq!(tag, "server.getSettings");
+    reply.send_blocking(Ok(json!({"projectSettingsFolded":true,"defaultProjectScripts":[],"projectSettingsOverrides":{"p":{"defaultRuntimeMode":"approval-required"}}}))).unwrap();
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("expected settings update")
+    };
+    assert_eq!(tag, "server.updateSettings");
+    assert_eq!(
+        payload["patch"]["projectSettingsOverrides"]["p"]["defaultRuntimeMode"],
+        "approval-required"
+    );
+    let script = &payload["patch"]["projectSettingsOverrides"]["p"]["defaultProjectScripts"][0];
+    assert_eq!(script["name"], "Owned setup");
+    assert_eq!(script["async"], false);
+    reply
+        .send_blocking(Err("Owned server settings rejection".into()))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.status.contains("rejection")));
+    assert!(!app.read_with(cx, |app, _| app.action_busy));
+    assert_eq!(
+        app.read_with(cx, |app, cx| app
+            .action_command
+            .read(cx)
+            .value()
+            .to_string()),
+        "node setup.cjs"
+    );
+}

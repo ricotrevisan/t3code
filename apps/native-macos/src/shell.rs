@@ -9,6 +9,8 @@ pub struct Project {
     pub workspace_root: String,
     #[serde(default)]
     pub default_model_selection: Option<serde_json::Value>,
+    #[serde(default)]
+    pub scripts: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
