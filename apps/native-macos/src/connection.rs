@@ -349,6 +349,7 @@ where
             || tag.starts_with("vcs.")
             || tag.starts_with("projects.")
             || tag.starts_with("projectClone.")
+            || tag == "worktreeSetup.cancel"
             || (tag == "server.updateSettings"
                 && payload["patch"].as_object().is_some_and(|patch| {
                     patch.keys().all(|key| {

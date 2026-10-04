@@ -1179,3 +1179,27 @@ fn project_action_save_reads_latest_settings_and_preserves_form_on_rejection(
         "node setup.cjs"
     );
 }
+
+#[gpui::test]
+fn materialized_bootstrap_draft_attaches_history_once_before_turn_receipt(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            let thread = app.shell.threads[0].clone();
+            app.pending_threads.push(drafts::PendingThread {
+                thread,
+                created_at: commands::now(),
+                prepare_worktree: None,
+                run_setup_script: true,
+            });
+            app.pending_history_attached = false;
+            app.attach_created_pending(cx);
+            app.attach_created_pending(cx);
+        })
+    });
+    assert!(
+        matches!(requests.try_recv().unwrap(),connection::Command::SelectThread(Some(id)) if id=="t")
+    );
+    assert!(requests.try_recv().is_err());
+    assert!(app.read_with(cx, |app, _| app.pending_history_attached));
+}

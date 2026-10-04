@@ -91,6 +91,7 @@ struct NativeApp {
     run_setup_script: bool,
     setup_progress: Option<workspaces::SetupProgress>,
     setup_expanded: bool,
+    pending_history_attached: bool,
     new_thread_checkout: Option<(String, String, Option<String>)>,
     worktree_outcome: Option<Value>,
     worktrees_open: bool,
@@ -319,6 +320,7 @@ impl NativeApp {
             run_setup_script: true,
             setup_progress: None,
             setup_expanded: false,
+            pending_history_attached: false,
             new_thread_checkout: None,
             worktree_outcome: None,
             worktrees_open: false,
@@ -1151,6 +1153,7 @@ impl NativeApp {
         self.archived_shell = shell::Shell::default();
         self.detail = thread::ThreadDetail::default();
         self.selected_thread = None;
+        self.pending_history_attached = false;
         self.selected_project = None;
         self.confirm_project_removal = None;
         self.pending_actions = 0;
@@ -1339,6 +1342,7 @@ impl NativeApp {
                                         app.snooze_wake = None;
                                         app.clone_progress.clear();
                                         app.setup_progress = None;
+                                        app.pending_history_attached = false;
                                         app.status =
                                             "Reconnecting — history is being synchronized".into();
                                         Ok(())
@@ -1350,6 +1354,7 @@ impl NativeApp {
                                     connection::Update::Shell(item) => {
                                         let was_synchronized = app.shell.synchronized;
                                         let result = app.shell.apply(*item).map_err(str::to_owned);
+                                        app.attach_created_pending(cx);
                                         app.schedule_snooze_wake(cx);
                                         if app.shell.synchronized && !was_synchronized {
                                             app.perform("server.getConfig", json!({}), None, cx);
@@ -1441,6 +1446,7 @@ impl NativeApp {
                 .insert(previous.clone(), self.composer.read(cx).value().to_string());
         }
         self.selected_thread = Some(id.into());
+        self.pending_history_attached = false;
         self.confirm_delete = None;
         self.detail = thread::ThreadDetail::default();
         let text = self.drafts.get(id).cloned().unwrap_or_else(|| {
@@ -1494,7 +1500,9 @@ impl NativeApp {
         let pending = self
             .pending_threads
             .iter()
-            .any(|draft| draft.thread.id == id);
+            .any(|draft| draft.thread.id == id)
+            && !self.shell.threads.iter().any(|thread| thread.id == id);
+        self.pending_history_attached = !pending;
         self.setup_progress = None;
         if let Some(sender) = &self.commands {
             let _ = sender.try_send(connection::Command::Subscribe {
@@ -1515,6 +1523,31 @@ impl NativeApp {
             self.status = "Connection busy or closed; retry selection".into();
         }
         cx.notify();
+    }
+
+    fn attach_created_pending(&mut self, cx: &mut Context<Self>) {
+        if self.pending_history_attached {
+            return;
+        }
+        let Some(id) = self.selected_thread.as_ref() else {
+            return;
+        };
+        if !self
+            .pending_threads
+            .iter()
+            .any(|draft| &draft.thread.id == id)
+            || !self.shell.threads.iter().any(|thread| &thread.id == id)
+        {
+            return;
+        }
+        if let Some(sender) = &self.commands
+            && sender
+                .try_send(connection::Command::SelectThread(Some(id.clone())))
+                .is_ok()
+        {
+            self.pending_history_attached = true;
+            cx.notify();
+        }
     }
 
     fn project_actions(&mut self, mutation: Option<Value>, cx: &mut Context<Self>) {
@@ -2291,8 +2324,18 @@ impl Render for NativeApp {
             .iter()
             .any(|draft| Some(&draft.thread.id) == self.selected_thread.as_ref())
         {
-            conversation =
-                conversation.child("New thread draft · send a message to start the conversation");
+            let phase = self.selected_setup().map(|setup| setup.phase.clone());
+            conversation = conversation.child(match phase.as_deref() {
+                Some("running") => "Preparing worktree · your first message is waiting for setup",
+                Some("cancelled") => {
+                    "Setup cancelled · your draft and message are retained for retry"
+                }
+                Some("failed") => "Setup failed · your draft and message are retained for retry",
+                _ => "New thread draft · send a message to start the conversation",
+            });
+            if phase.is_some() {
+                conversation = conversation.child(self.composer.read(cx).value().to_string());
+            }
         } else if self.selected_thread.is_some() {
             conversation = conversation.child("Loading thread history…");
         } else {
