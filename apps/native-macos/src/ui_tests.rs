@@ -182,6 +182,14 @@ fn choosing_catalog_model_uses_instance_routing_and_preserves_unchanged_options(
         app.provider_catalog=serde_json::from_value(json!([{"instanceId":"codex","driver":"codex","enabled":true,"installed":true,"status":"ready","models":[{"slug":"gpt-5.4","name":"Current model"}]}])).unwrap();app.catalog_open=true;cx.notify();
     }));
     cx.run_until_parked();
+    let _ = cx.debug_bounds("model-catalog").unwrap();
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: gpui::point(px(1100.), px(50.)),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-400.))),
+        modifiers: Default::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
     let bounds = cx.debug_bounds("catalog-codex-0").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     assert!(!app.read_with(cx, |app, _| app.catalog_open));

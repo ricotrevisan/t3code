@@ -80,6 +80,7 @@ struct NativeApp {
     start_from_origin: bool,
     run_setup_script: bool,
     setup_progress: Option<workspaces::SetupProgress>,
+    setup_expanded: bool,
     new_thread_checkout: Option<(String, String, Option<String>)>,
     worktree_outcome: Option<Value>,
     worktrees_open: bool,
@@ -295,6 +296,7 @@ impl NativeApp {
             start_from_origin: true,
             run_setup_script: true,
             setup_progress: None,
+            setup_expanded: false,
             new_thread_checkout: None,
             worktree_outcome: None,
             worktrees_open: false,
@@ -640,6 +642,9 @@ impl NativeApp {
         }
         self.selected_thread = None;
         self.detail = thread::ThreadDetail::default();
+        self.worktree_path.update(cx, |input, cx| {
+            input.set_value(path.clone().unwrap_or_default(), window, cx)
+        });
         self.new_thread_checkout = Some((project, branch, path));
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -2035,6 +2040,8 @@ impl Render for NativeApp {
         }
         let mut conversation = div()
             .id("conversation")
+            .min_h(px(240.))
+            .flex_shrink_0()
             .flex()
             .flex_col()
             .flex_1()
@@ -2208,7 +2215,7 @@ impl Render for NativeApp {
                     .id("sidebar")
                     .flex()
                     .flex_col()
-                    .w(px(280.))
+                    .w(px(280.)).flex_shrink_0()
                     .h_full()
                     .overflow_y_scroll()
                     .p_3()
@@ -2299,7 +2306,7 @@ impl Render for NativeApp {
             )
             .child(
                 div()
-                    .id("native-workspace")
+                    .id("native-workspace").min_w_0()
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
@@ -2307,7 +2314,7 @@ impl Render for NativeApp {
                     .h_full()
                     .p_3()
                     .gap_3()
-                    .child(self.status.clone())
+                    .child(div().min_w_0().whitespace_normal().child(self.status.clone()))
                     .children(
                         self.storage_error
                             .clone()
@@ -2395,17 +2402,21 @@ impl Render for NativeApp {
                             ),
                     )
                     .when_some(self.selected_setup(),|view,setup| {
-                        let id=setup.thread_id.clone();view.child(div().flex().flex_col().gap_1()
-                            .child(format!("Worktree setup · {}{}{}",setup.phase,setup.branch.as_ref().map_or(String::new(),|branch|format!(" · {branch}")),setup.worktree_path.as_ref().map_or(String::new(),|path|format!(" · {path}"))))
-                            .children(setup.error.clone()).children(setup.stages.iter().map(|stage|div().flex().flex_col().child(format!("{} · {}{}",stage.id,stage.status,stage.percent.map_or(String::new(),|percent|format!(" {percent}%")))).children(stage.detail.clone()).children(stage.tail.clone())))
+                        let id=setup.thread_id.clone();let show=self.setup_expanded;
+                        view.child(div().w_full().min_w_0().whitespace_normal().flex().flex_col().gap_1()
+                            .child(format!("Worktree setup · {}{}",setup.phase,setup.branch.as_ref().map_or(String::new(),|branch|format!(" · {branch}"))))
+                            .child(Button::new("setup-details").label(if show{"Hide setup details"}else{"Show setup details"}).on_click(cx.listener(|app,_,_,cx|{app.setup_expanded= !app.setup_expanded;cx.notify();})))
+                            .when_some(setup.worktree_path.clone(),|view,path|view.child(Button::new("copy-worktree-path").label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()))))))
+                            .children(setup.error.clone())
+                            .when(show,|view|view.children(setup.stages.iter().map(|stage|div().w_full().min_w_0().whitespace_normal().flex().flex_col().child(format!("{} · {}{}",stage.id,stage.status,stage.percent.map_or(String::new(),|percent|format!(" {percent}%")))).children(stage.detail.clone()).children(stage.tail.clone()))))
                             .when(setup.phase=="running",|view|view.child(Button::new("setup-cancel").label("Cancel worktree setup").on_click(cx.listener(move|app,_,_,cx|app.perform("worktreeSetup.cancel",json!({"threadId":id}),None,cx)))))
                         )
                     })
                     .child(Button::new("worktrees").label("Branches and worktrees").on_click(cx.listener(|app,_,window,cx|app.execute_command(palette::Command::Worktrees,window,cx))))
                     .when(self.worktrees_open,|view|view.child(div().flex().flex_col().gap_2()
-                        .child(Button::new("prepare-worktree").label(if self.prepare_new_worktree{"Next new thread: new worktree"}else{"Next new thread: selected checkout"}).on_click(cx.listener(|app,_,_,cx|{app.prepare_new_worktree=!app.prepare_new_worktree;cx.notify();})))
-                        .child(Button::new("worktree-origin").label(if self.start_from_origin{"Base: fetch from origin"}else{"Base: local branch"}).on_click(cx.listener(|app,_,_,cx|{app.start_from_origin=!app.start_from_origin;cx.notify();})))
-                        .child(Button::new("worktree-setup-script").label(if self.run_setup_script{"Run setup script"}else{"Skip setup script"}).on_click(cx.listener(|app,_,_,cx|{app.run_setup_script=!app.run_setup_script;cx.notify();})))
+                        .child(Button::new("prepare-worktree").label(if self.prepare_new_worktree{"Next new thread: new worktree"}else{"Next new thread: selected checkout"}).on_click(cx.listener(|app,_,_,cx|{app.prepare_new_worktree= !app.prepare_new_worktree;cx.notify();})))
+                        .child(Button::new("worktree-origin").label(if self.start_from_origin{"Base: fetch from origin"}else{"Base: local branch"}).on_click(cx.listener(|app,_,_,cx|{app.start_from_origin= !app.start_from_origin;cx.notify();})))
+                        .child(Button::new("worktree-setup-script").label(if self.run_setup_script{"Run setup script"}else{"Skip setup script"}).on_click(cx.listener(|app,_,_,cx|{app.run_setup_script= !app.run_setup_script;cx.notify();})))
                         .child(Input::new(&self.worktree_ref)).child(Input::new(&self.worktree_branch)).child(Input::new(&self.worktree_path))
                         .child(div().flex().gap_2()
                             .child(Button::new("refs-refresh").label("Refresh branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",false,cx))))
@@ -2413,8 +2424,8 @@ impl Render for NativeApp {
                             .child(Button::new("ref-switch").label("Switch branch").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.switchRef",false,cx))))
                             .child(Button::new("worktree-remove").label("Remove worktree").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.removeWorktree",false,cx))))
                             .child(Button::new("worktrees-close").label("Close").on_click(cx.listener(|app,_,_,cx|{app.worktrees_open=false;cx.notify();}))))
-                        .children(self.refs.iter().map(|row| {let branch=row.name.clone();let path=row.worktree_path.clone();Button::new(gpui::SharedString::from(format!("choose-ref-{}",row.name))).label(format!("{}{}{}",if row.current{"● "}else{""},row.name,row.worktree_path.as_ref().map_or(String::new(),|path|format!(" · {path}")))).on_click(cx.listener(move|app,_,window,cx|app.choose_checkout(branch.clone(),path.clone(),window,cx))) }))
-                        .when_some(self.worktree_outcome.as_ref(),|view,result|view.child(if let Some(path)=result["worktree"]["path"].as_str() {format!("Created worktree {path} on {}",result["worktree"]["refName"].as_str().unwrap_or("branch"))}else{format!("Current branch: {}",result["refName"].as_str().unwrap_or("updated"))}))
+                        .children(self.refs.iter().map(|row| {let branch=row.name.clone();let path=row.worktree_path.clone();Button::new(gpui::SharedString::from(format!("choose-ref-{}",row.name))).label(format!("{}{}",if row.current{"● "}else{""},row.name)).tooltip(row.worktree_path.clone().unwrap_or_else(||"No worktree checkout".into())).on_click(cx.listener(move|app,_,window,cx|app.choose_checkout(branch.clone(),path.clone(),window,cx))) }))
+                        .when_some(self.worktree_outcome.as_ref(),|view,result|view.child(div().w_full().min_w_0().whitespace_normal().child(format!("Checkout updated: {}",result["worktree"]["refName"].as_str().or_else(||result["refName"].as_str()).unwrap_or("removed"))).when_some(result["worktree"]["path"].as_str(),|view,path|{let path=path.to_owned();view.child(Button::new("copy-created-worktree").label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone())))))})))
                         .when(self.refs_cursor.is_some(),|view|view.child(Button::new("refs-more").label("More branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",true,cx)))))
                     ))
                     .child(Button::new("clone-repository").label("Clone repository").on_click(cx.listener(|app,_,window,cx| app.execute_command(palette::Command::CloneProject,window,cx))))
@@ -2509,7 +2520,7 @@ impl Render for NativeApp {
                             .child(Input::new(&self.model)),
                     )
                     .child(Button::new("model-catalog").debug_selector(||"model-catalog".into()).label("Choose provider and model").on_click(cx.listener(|app,_,_,cx| { app.catalog_open = !app.catalog_open;cx.notify(); })))
-                    .when(self.catalog_open,|view|view.child(div().id("provider-model-catalog").max_h(px(200.)).overflow_y_scroll().flex().flex_col().gap_2()
+                    .when(self.catalog_open,|view|view.child(div().id("provider-model-catalog").flex_shrink_0().max_h(px(200.)).overflow_y_scroll().flex().flex_col().gap_2()
                         .child(Button::new("refresh-catalog").label("Reload server catalog").on_click(cx.listener(|app,_,_,cx|app.perform("server.getConfig",json!({}),None,cx))))
                         .children(self.provider_catalog.iter().map(|provider|div().flex().flex_col().gap_1()
                             .child(format!("{} · {} · {}",provider.label(),provider.instance_id,provider.explanation()))
