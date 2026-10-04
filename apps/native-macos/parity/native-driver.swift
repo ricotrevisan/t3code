@@ -86,6 +86,10 @@ case "type":
     guard let text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8), !text.isEmpty else { fail("type requires UTF-8 text on stdin") }
     let utf16 = Array(text.utf16)
     guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true), let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { fail("Could not create keyboard input") }
+    // CGEvent inherits modifier state from the event source. A previous synthetic
+    // Cmd+A must not turn Unicode text into a command-key chord.
+    down.flags = []
+    up.flags = []
     utf16.withUnsafeBufferPointer { buffer in
         down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: buffer.baseAddress!)
         up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: buffer.baseAddress!)
