@@ -24,6 +24,31 @@ pub fn resolve(settings: &Value, project: &str, legacy_scripts: &[Value]) -> Vec
     }
 }
 
+pub fn model_default(settings: Option<&Value>, project: &str, legacy: Option<&Value>) -> Value {
+    let Some(settings) = settings else {
+        return legacy.cloned().unwrap_or(Value::Null);
+    };
+    if let Some(value) = settings["projectSettingsOverrides"][project].get("defaultModelSelection")
+    {
+        return value.clone();
+    }
+    if settings["projectSettingsFolded"] != true
+        && let Some(value) = legacy
+    {
+        return value.clone();
+    }
+    settings["defaultModelSelection"].clone()
+}
+
+pub fn model_patch(settings: &Value, project: &str, selection: Value) -> Value {
+    let mut entry = settings["projectSettingsOverrides"][project]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    entry.insert("defaultModelSelection".into(), selection);
+    json!({"patch":{"projectSettingsOverrides":{project:entry}}})
+}
+
 pub fn patch(settings: &Value, project: &str, scripts: Option<Vec<Value>>) -> Value {
     let mut entry = settings["projectSettingsOverrides"][project]
         .as_object()
@@ -80,6 +105,34 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_defaults_resolve_null_inheritance_legacy_and_preserve_other_overrides() {
+        let settings = json!({"defaultModelSelection":{"instanceId":"codex","model":"global"},"projectSettingsFolded":true,"projectSettingsOverrides":{"p":{"defaultProjectScripts":[{"id":"owned"}],"defaultModelSelection":null}}});
+        let legacy = json!({"instanceId":"codex","model":"legacy"});
+        assert_eq!(
+            model_default(Some(&settings), "p", Some(&legacy)),
+            Value::Null
+        );
+        assert_eq!(
+            model_default(Some(&settings), "other", Some(&legacy))["model"],
+            "global"
+        );
+        let mut unfolded = settings.clone();
+        unfolded["projectSettingsFolded"] = false.into();
+        assert_eq!(
+            model_default(Some(&unfolded), "other", Some(&legacy)),
+            legacy
+        );
+        let patch = model_patch(&settings, "p", legacy.clone());
+        assert_eq!(
+            patch["patch"]["projectSettingsOverrides"]["p"]["defaultProjectScripts"],
+            settings["projectSettingsOverrides"]["p"]["defaultProjectScripts"]
+        );
+        assert_eq!(
+            patch["patch"]["projectSettingsOverrides"]["p"]["defaultModelSelection"],
+            legacy
+        );
+    }
     #[test]
     fn action_edit_preserves_preview_and_other_settings_and_replaces_setup() {
         let settings = json!({"projectSettingsFolded":true,"defaultProjectScripts":[{"id":"global"}],"projectSettingsOverrides":{"p":{"defaultRuntimeMode":"approval-required","defaultProjectScripts":[{"id":"a","name":"Old","command":"old","icon":"build","runOnWorktreeCreate":true},{"id":"b","name":"Preview","command":"serve","icon":"play","runOnWorktreeCreate":false,"previewUrl":"http://localhost:1234","autoOpenPreview":true}]}}});

@@ -2,6 +2,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     ProjectActions,
+    SaveProjectDefault,
+    ClearProjectDefault,
     Worktrees,
     CloneProject,
     Files,
@@ -36,6 +38,16 @@ pub struct Entry {
     pub needs_thread: bool,
 }
 pub const ENTRIES: &[Entry] = &[
+    Entry {
+        command: Command::SaveProjectDefault,
+        label: "Save selected model as project default",
+        needs_thread: false,
+    },
+    Entry {
+        command: Command::ClearProjectDefault,
+        label: "Clear project model default",
+        needs_thread: false,
+    },
     Entry {
         command: Command::ProjectActions,
         label: "Edit project actions and setup scripts",

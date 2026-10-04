@@ -1257,3 +1257,55 @@ fn cancelled_draft_checkout_can_change_without_losing_prompt_or_identity(cx: &mu
         app.read_with(cx, |app, _| app.pending_threads[0].thread.id.clone())
     );
 }
+
+#[gpui::test]
+fn project_default_changes_read_fresh_settings_and_new_draft_keeps_saved_options(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, cx| app.update_project_default(false, cx)));
+    cx.run_until_parked();
+    let connection::Command::Call { tag, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("settings read")
+    };
+    assert_eq!(tag, "server.getSettings");
+    let selection = json!({"instanceId":"codex","model":"gpt-5.4","options":[{"id":"reasoningEffort","value":"high"}]});
+    let settings = json!({"projectSettingsFolded":true,"projectSettingsOverrides":{"p":{"defaultProjectScripts":[{"id":"owned"}]}}});
+    reply.send_blocking(Ok(settings.clone())).unwrap();
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("settings write")
+    };
+    assert_eq!(tag, "server.updateSettings");
+    assert_eq!(
+        payload["patch"]["projectSettingsOverrides"]["p"]["defaultProjectScripts"],
+        settings["projectSettingsOverrides"]["p"]["defaultProjectScripts"]
+    );
+    let mut saved = settings;
+    saved["projectSettingsOverrides"]["p"]["defaultModelSelection"] = selection.clone();
+    reply.send_blocking(Ok(saved)).unwrap();
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.title.update(cx, |input, cx| {
+                input.set_value("Owned default draft", window, cx)
+            });
+            app.new_thread(window, cx);
+        })
+    });
+    assert_eq!(
+        app.read_with(cx, |app, _| app
+            .pending_threads
+            .last()
+            .unwrap()
+            .thread
+            .model_selection
+            .clone()),
+        selection
+    );
+}

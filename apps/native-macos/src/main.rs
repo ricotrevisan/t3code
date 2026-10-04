@@ -437,6 +437,8 @@ impl NativeApp {
             return;
         }
         match command {
+            Command::SaveProjectDefault => self.update_project_default(false, cx),
+            Command::ClearProjectDefault => self.update_project_default(true, cx),
             Command::ProjectActions => {
                 self.project_actions_open = true;
                 self.project_actions(None, cx);
@@ -603,7 +605,26 @@ impl NativeApp {
         };
         let project_id = project.id.clone();
         let cwd = project.workspace_root.clone();
-        let selection = json!({"instanceId":self.provider.read(cx).value().as_str(),"model":self.model.read(cx).value().as_str()});
+        let effective = project_actions::model_default(
+            self.project_settings.as_ref(),
+            &project.id,
+            project.default_model_selection.as_ref(),
+        );
+        let previous = &effective;
+        let instance = self.provider.read(cx).value();
+        let model = self.model.read(cx).value();
+        let selection = if instance.trim().is_empty() && model.trim().is_empty() {
+            previous.clone()
+        } else {
+            match commands::select_model(previous, &instance, &model) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    self.status = error.into();
+                    cx.notify();
+                    return;
+                }
+            }
+        };
         let title = self.title.read(cx).value().to_string();
         let mut command = match commands::create_thread(&project_id, &title, selection) {
             Ok(value) => value,
@@ -1143,6 +1164,35 @@ impl NativeApp {
         cx.notify();
     }
 
+    fn update_project_default(&mut self, clear: bool, cx: &mut Context<Self>) {
+        let selection = if clear {
+            None
+        } else {
+            let previous = self
+                .selected_thread
+                .as_ref()
+                .and_then(|id| self.shell.threads.iter().find(|thread| &thread.id == id))
+                .map(|thread| &thread.model_selection)
+                .unwrap_or(&Value::Null);
+            match commands::select_model(
+                previous,
+                &self.provider.read(cx).value(),
+                &self.model.read(cx).value(),
+            ) {
+                Ok(selection) => Some(selection),
+                Err(error) => {
+                    self.status = error.into();
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        self.project_actions(
+            Some(json!({"operation":"model-default","selection":selection})),
+            cx,
+        );
+    }
+
     fn update_project(&mut self, remove: bool, cx: &mut Context<Self>) {
         let Some(id) = self.selected_project.clone() else {
             self.status = "Select a project first".into();
@@ -1429,6 +1479,15 @@ impl NativeApp {
                                         app.schedule_snooze_wake(cx);
                                         if app.shell.synchronized && !was_synchronized {
                                             app.perform("server.getConfig", json!({}), None, cx);
+                                            if let Some(sender) = &app.commands {
+                                                let _ = sender.try_send(
+                                                    connection::Command::Subscribe {
+                                                        key: "server-config".into(),
+                                                        tag: "subscribeServerConfig".into(),
+                                                        payload: json!({}),
+                                                    },
+                                                );
+                                            }
                                             if app.clone_open
                                                 && let Some(sender) = &app.commands
                                             {
@@ -1447,7 +1506,27 @@ impl NativeApp {
                                         result
                                     }
                                     connection::Update::Subscription { key, item } => {
-                                        if key == "project-clones" && app.clone_open {
+                                        if key == "server-config" {
+                                            match item {
+                                                Ok(value) => {
+                                                    if value["type"] == "snapshot" {
+                                                        app.project_settings = Some(
+                                                            value["config"]["settings"].clone(),
+                                                        );
+                                                    } else if value["type"] == "settingsUpdated" {
+                                                        app.project_settings = Some(
+                                                            value["payload"]["settings"].clone(),
+                                                        );
+                                                    }
+                                                    Ok(())
+                                                }
+                                                Err(error) => {
+                                                    app.project_settings = None;
+                                                    app.status = error;
+                                                    Ok(())
+                                                }
+                                            }
+                                        } else if key == "project-clones" && app.clone_open {
                                             match item {
                                                 Ok(value) => workspaces::apply_clones(
                                                     &mut app.clone_progress,
@@ -1539,7 +1618,6 @@ impl NativeApp {
             if self.selected_project.as_ref() != Some(&thread.project_id) {
                 self.action_task = None;
                 self.action_busy = false;
-                self.project_settings = None;
                 self.action_edit_id = None;
                 self.confirm_action_delete = None;
             }
@@ -1691,6 +1769,18 @@ impl NativeApp {
                 let Some(change) = mutation else {
                     return Ok(settings);
                 };
+                if change["operation"] == "model-default" {
+                    return connection::call(
+                        &sender,
+                        "server.updateSettings",
+                        project_actions::model_patch(
+                            &settings,
+                            &project,
+                            change["selection"].clone(),
+                        ),
+                    )
+                    .await;
+                }
                 let current = project_actions::resolve(&settings, &project, &legacy);
                 let scripts = match change["operation"].as_str() {
                     Some("inherit") => None,
@@ -1828,6 +1918,9 @@ impl NativeApp {
                         }
                         if tag == "projectClone.start" {
                             app.selected_project = value["projectId"].as_str().map(str::to_owned);
+                        }
+                        if tag == "server.getSettings" {
+                            app.project_settings = Some(value.clone());
                         }
                         if tag == "server.getConfig" {
                             match serde_json::from_value::<providers::Config>(value.clone()) {
@@ -2254,6 +2347,11 @@ impl Render for NativeApp {
             let project_id = project.id.clone();
             let title = project.title.clone();
             let workspace = project.workspace_root.clone();
+            let default_selection = project_actions::model_default(
+                self.project_settings.as_ref(),
+                &project.id,
+                project.default_model_selection.as_ref(),
+            );
             let mut row = div().flex().flex_col().gap_2().child(
                 Button::new(gpui::SharedString::from(format!("project-{project_id}")))
                     .label(title.clone())
@@ -2263,9 +2361,28 @@ impl Render for NativeApp {
                     })
                     .on_click(cx.listener(move |app, _, window, cx| {
                         if app.selected_project.as_ref() != Some(&project_id) {
+                            app.provider.update(cx, |input, cx| {
+                                input.set_value(
+                                    default_selection["instanceId"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                            app.model.update(cx, |input, cx| {
+                                input.set_value(
+                                    default_selection["model"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    window,
+                                    cx,
+                                )
+                            });
                             app.action_task = None;
                             app.action_busy = false;
-                            app.project_settings = None;
                             app.action_edit_id = None;
                             app.confirm_action_delete = None;
                             if let Some(previous) = app.selected_thread.take() {
@@ -2770,6 +2887,8 @@ impl Render for NativeApp {
                                     .child(Button::new(gpui::SharedString::from(format!("action-edit-{index}"))).label("Edit action").on_click(cx.listener(move|app,_,window,cx|{app.action_edit_id=edit["id"].as_str().map(str::to_owned);app.action_setup=edit["runOnWorktreeCreate"]==true;app.action_wait=edit["async"]==false;app.action_name.update(cx,|input,cx|input.set_value(edit["name"].as_str().unwrap_or_default().to_owned(),window,cx));app.action_command.update(cx,|input,cx|input.set_value(edit["command"].as_str().unwrap_or_default().to_owned(),window,cx));cx.notify();})))
                                     .child(Button::new(gpui::SharedString::from(format!("action-delete-{index}"))).label(if confirm{"Confirm delete action"}else{"Delete action"}).disabled(self.action_busy).on_click(cx.listener(move|app,_,_,cx|{if app.confirm_action_delete.as_ref()==Some(&id){app.project_actions(Some(json!({"operation":"delete","id":id})),cx);}else{app.confirm_action_delete=Some(id.clone());cx.notify();}})))
                             }))
+                            .child(Button::new("project-default-save").label("Use selected provider and model for new threads").on_click(cx.listener(|app,_,_,cx|app.update_project_default(false,cx))))
+                            .child(Button::new("project-default-clear").label("Clear project model default").on_click(cx.listener(|app,_,_,cx|app.update_project_default(true,cx))))
                             .child(Button::new("actions-refresh").label("Refresh actions").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(None,cx))))
                             .child(Button::new("actions-inherit").label("Use environment action defaults").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"inherit"})),cx))))
                             .child(Button::new("actions-close").label("Close actions").on_click(cx.listener(|app,_,_,cx|{app.project_actions_open=false;cx.notify();}))))
