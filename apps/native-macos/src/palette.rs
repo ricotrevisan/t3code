@@ -1,6 +1,8 @@
 //! Native entry points share command identities with the chat controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    Files,
+    ContentSearch,
     AddProject,
     RenameProject,
     RemoveProject,
@@ -31,6 +33,16 @@ pub struct Entry {
     pub needs_thread: bool,
 }
 pub const ENTRIES: &[Entry] = &[
+    Entry {
+        command: Command::Files,
+        label: "Browse workspace files",
+        needs_thread: false,
+    },
+    Entry {
+        command: Command::ContentSearch,
+        label: "Search workspace contents",
+        needs_thread: false,
+    },
     Entry {
         command: Command::AddProject,
         label: "Add project",

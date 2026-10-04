@@ -17,6 +17,8 @@ use t3code_native_macos::{
 gpui::actions!(
     native,
     [
+        OpenFiles,
+        OpenContentSearch,
         TogglePalette,
         ClosePalette,
         PaletteNext,
@@ -78,6 +80,9 @@ struct NativeApp {
     file_busy: bool,
     file_environment: String,
     file_entries: Vec<files::Entry>,
+    content_query: Entity<InputState>,
+    content_options: files::SearchOptions,
+    content_results: Option<files::ContentResults>,
     file_listing_truncated: bool,
     file_listing_task: Option<Task<()>>,
     file_listing_epoch: u64,
@@ -109,6 +114,8 @@ impl NativeApp {
         });
         let file_path =
             cx.new(|cx| InputState::new(window, cx).placeholder("Workspace-relative file path"));
+        let content_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search workspace contents"));
         let file_contents = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -130,6 +137,13 @@ impl NativeApp {
                 app.search_threads(cx);
             }
         })];
+        subscriptions.push(
+            cx.subscribe_in(&content_query, window, |app, _, event, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    app.search_contents(cx);
+                }
+            }),
+        );
         subscriptions.push(
             cx.subscribe_in(&pairing, window, |app, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -232,6 +246,9 @@ impl NativeApp {
             file_busy: false,
             file_environment: String::new(),
             file_entries: vec![],
+            content_query,
+            content_options: files::SearchOptions::default(),
+            content_results: None,
             file_listing_truncated: false,
             file_listing_task: None,
             file_listing_epoch: 0,
@@ -306,6 +323,17 @@ impl NativeApp {
     ) {
         use palette::Command;
         match command {
+            Command::Files | Command::ContentSearch => {
+                self.files_open = true;
+                if command == Command::ContentSearch {
+                    self.content_query
+                        .update(cx, |input, cx| input.focus(window, cx));
+                } else {
+                    self.file_path
+                        .update(cx, |input, cx| input.focus(window, cx));
+                }
+                cx.notify();
+            }
             Command::AddProject => match commands::create_project(
                 &self.title.read(cx).value(),
                 &self.workspace.read(cx).value(),
@@ -415,6 +443,68 @@ impl NativeApp {
                             app.status = "Workspace entries loaded".into();
                         }
                         Err(_) => app.status = "Invalid workspace listing".into(),
+                    },
+                    Err(error) => app.status = error,
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn search_contents(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = self.commands.clone() else {
+            self.status = "Not connected".into();
+            cx.notify();
+            return;
+        };
+        let Some(project) = self
+            .selected_project
+            .as_ref()
+            .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
+        else {
+            self.status = "Select a project first".into();
+            cx.notify();
+            return;
+        };
+        let payload = match self.content_options.request(
+            &project.workspace_root,
+            self.content_query.read(cx).value().as_str(),
+        ) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+                return;
+            }
+        };
+        self.file_listing_epoch += 1;
+        let epoch = self.file_listing_epoch;
+        let generation = self.generation;
+        let project_id = self.selected_project.clone();
+        self.content_results = None;
+        self.file_listing_task = Some(cx.spawn(async move |entity, cx| {
+            let result = connection::call(&sender, "projects.searchContents", payload).await;
+            let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation
+                    || app.file_listing_epoch != epoch
+                    || app.selected_project != project_id
+                {
+                    return;
+                }
+                match result {
+                    Ok(value) => match serde_json::from_value::<files::ContentResults>(value) {
+                        Ok(results) => {
+                            app.status = results
+                                .regex_fallback_error
+                                .clone()
+                                .map(|error| {
+                                    format!("Regex failed; showing literal matches: {error}")
+                                })
+                                .unwrap_or_else(|| "Workspace content results loaded".into());
+                            app.content_results = Some(results);
+                        }
+                        Err(_) => app.status = "Invalid workspace content results".into(),
                     },
                     Err(error) => app.status = error,
                 }
@@ -1261,6 +1351,7 @@ impl Render for NativeApp {
                         app.file_entries.clear();
                         app.file_listing_task = None;
                         app.file_listing_epoch += 1;
+                        app.content_results = None;
                         app.title
                             .update(cx, |input, cx| input.set_value(title.clone(), window, cx));
                         app.workspace.update(cx, |input, cx| {
@@ -1435,6 +1526,8 @@ impl Render for NativeApp {
             .relative()
             .key_context("NativeApp")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|app, _: &OpenFiles, window, cx| app.execute_command(palette::Command::Files,window,cx)))
+            .on_action(cx.listener(|app, _: &OpenContentSearch, window, cx| app.execute_command(palette::Command::ContentSearch,window,cx)))
             .on_action(
                 cx.listener(|app, _: &TogglePalette, window, cx| app.toggle_palette(window, cx)),
             )
@@ -1555,6 +1648,8 @@ impl Render for NativeApp {
             )
             .child(
                 div()
+                    .id("native-workspace")
+                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -1663,6 +1758,23 @@ impl Render for NativeApp {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
+                                .child(Input::new(&self.content_query))
+                                .child(div().flex().gap_2()
+                                    .child(Button::new("content-case").label(if self.content_options.case_sensitive { "Case sensitive ✓" } else { "Case sensitive" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.case_sensitive = !app.content_options.case_sensitive; cx.notify(); })))
+                                    .child(Button::new("content-word").label(if self.content_options.whole_word { "Whole word ✓" } else { "Whole word" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.whole_word = !app.content_options.whole_word; cx.notify(); })))
+                                    .child(Button::new("content-regex").label(if self.content_options.use_regex { "Regex ✓" } else { "Regex" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.use_regex = !app.content_options.use_regex; cx.notify(); })))
+                                    .child(Button::new("search-contents").debug_selector(|| "search-contents".into()).label("Search contents").on_click(cx.listener(|app,_,_,cx| app.search_contents(cx)))))
+                                .children(self.content_results.as_ref().map(|results| div().flex().flex_col().gap_1()
+                                    .when(results.truncated, |view| view.child("Content results truncated; refine the search"))
+                                    .when(results.matches.is_empty(), |view| view.child("No content matches"))
+                                    .child(div().id("content-result-list").max_h(px(160.)).overflow_y_scroll().flex().flex_col().children(results.matches.iter().enumerate().map(|(index,hit)| {
+                                        let path = hit.path.clone();
+                                        Button::new(gpui::SharedString::from(format!("content-hit-{index}"))).label(format!("{}:{}  {}",hit.path,hit.line_number,hit.line_content)).on_click(cx.listener(move|app,_,window,cx| {
+                                            app.file_path.update(cx,|input,cx| input.set_value(path.clone(),window,cx));
+                                            app.file_operation(false,window,cx);
+                                        }))
+                                    })))
+                                ))
                                 .child(Input::new(&self.file_path))
                             .child(div().flex().gap_2()
                                 .child(Button::new("list-files").debug_selector(||"list-files".into()).label("Browse directory").on_click(cx.listener(|app,_,_,cx|app.list_files(false,cx))))
@@ -1772,6 +1884,8 @@ impl Render for NativeApp {
 fn bind_native_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", QuitNative, None),
+        KeyBinding::new("cmd-p", OpenFiles, Some("NativeApp")),
+        KeyBinding::new("cmd-shift-f", OpenContentSearch, Some("NativeApp")),
         KeyBinding::new("cmd-k", TogglePalette, Some("NativeApp")),
         KeyBinding::new("cmd-s", StashPrompt, Some("NativeApp")),
         KeyBinding::new("cmd-n", NewThread, Some("NativeApp")),
@@ -1817,7 +1931,11 @@ fn main() {
             },
             gpui::Menu {
                 name: "View".into(),
-                items: vec![gpui::MenuItem::action("Commands", TogglePalette)],
+                items: vec![
+                    gpui::MenuItem::action("Commands", TogglePalette),
+                    gpui::MenuItem::action("Workspace files", OpenFiles),
+                    gpui::MenuItem::action("Search contents", OpenContentSearch),
+                ],
             },
         ]);
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);

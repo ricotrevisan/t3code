@@ -78,3 +78,34 @@ mod tests {
         assert!(!editor.dirty("text"));
     }
 }
+
+#[derive(Default)]
+pub struct SearchOptions {
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub use_regex: bool,
+}
+impl SearchOptions {
+    pub fn request(&self, cwd: &str, query: &str) -> Result<serde_json::Value, &'static str> {
+        if query.is_empty() || query.chars().map(char::len_utf16).sum::<usize>() > 256 {
+            return Err("Content query must contain 1–256 characters");
+        }
+        Ok(
+            serde_json::json!({"cwd":cwd,"query":query,"limit":100,"caseSensitive":self.case_sensitive,"wholeWord":self.whole_word,"useRegex":self.use_regex}),
+        )
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentMatch {
+    pub path: String,
+    pub line_number: usize,
+    pub line_content: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentResults {
+    pub matches: Vec<ContentMatch>,
+    pub truncated: bool,
+    pub regex_fallback_error: Option<String>,
+}

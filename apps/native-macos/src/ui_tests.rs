@@ -630,3 +630,45 @@ fn thread_selection_keeps_independent_drafts(cx: &mut TestAppContext) {
         "Draft for second thread"
     );
 }
+
+#[gpui::test]
+fn content_search_preserves_spaces_reports_regex_fallback_and_ignores_stale_results(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.content_query
+                .update(cx, |input, cx| input.set_value(" foo ", window, cx));
+            app.content_options.use_regex = true;
+            app.search_contents(cx);
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("content request")
+    };
+    assert_eq!(tag, "projects.searchContents");
+    assert_eq!(payload["query"], " foo ");
+    assert_eq!(payload["useRegex"], true);
+    reply.send_blocking(Ok(json!({"matches":[{"path":"notes.txt","lineNumber":2,"lineContent":" foo ","matchRanges":[{"start":0,"end":5}]}],"truncated":true,"regexFallbackError":"invalid pattern"}))).unwrap();
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.status.contains("showing literal matches")));
+    assert!(app.read_with(cx, |app, _| app.content_results.as_ref().unwrap().truncated));
+    cx.update(|_, cx| app.update(cx, |app, cx| app.search_contents(cx)));
+    cx.run_until_parked();
+    let connection::Command::Call { reply, .. } = requests.try_recv().unwrap() else {
+        panic!("second content request")
+    };
+    cx.update(|_, cx| app.update(cx, |app, _| app.generation += 1));
+    reply
+        .send_blocking(Ok(json!({"matches":[],"truncated":false})))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.content_results.is_none()));
+}
