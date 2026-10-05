@@ -4,6 +4,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState, Position, Textarea, TextareaState},
     text::TextView,
+    TitleBar,
 };
 use gpui_kit::{
     App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyBinding, Subscription, Task, Window,
@@ -2449,8 +2450,6 @@ impl Render for NativeApp {
         let sidebar = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
         let sidebar_foreground = cx.theme().sidebar_foreground;
-        let title_bar = cx.theme().title_bar;
-        let title_bar_border = cx.theme().title_bar_border;
         let danger = cx.theme().danger;
         let selection = cx.theme().selection;
         let popover = cx.theme().popover;
@@ -2809,16 +2808,7 @@ impl Render for NativeApp {
                 }))
         });
 
-        let title_bar_row = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .flex_shrink_0()
-            .h(px(38.))
-            .px_3()
-            .bg(title_bar)
-            .border_b_1()
-            .border_color(title_bar_border)
+        let title_bar_row = TitleBar::new()
             .child(
                 div()
                     .flex()
@@ -3502,7 +3492,7 @@ fn main() {
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
+                ..TitleBar::window_options()
             },
             cx,
             |window, cx| cx.new(|cx| NativeApp::new(window, cx, true)),
