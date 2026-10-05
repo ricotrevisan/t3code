@@ -12,8 +12,8 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
-    auth, commands, connection, credentials, drafts, files, palette, project_actions, providers,
-    shell, sidebar, thread, workspaces,
+    auth, commands, connection, conversation, credentials, drafts, files, palette, project_actions,
+    providers, shell, sidebar, thread, workspaces,
 };
 
 gpui_kit::actions!(
@@ -2447,6 +2447,11 @@ impl Render for NativeApp {
         let muted_foreground = cx.theme().muted_foreground;
         let border = cx.theme().border;
         let group_box = cx.theme().group_box;
+        let muted = cx.theme().muted;
+        let secondary = cx.theme().secondary;
+        let warning = cx.theme().warning;
+        let blue = cx.theme().blue;
+        let green = cx.theme().green;
         let sidebar = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
         let sidebar_foreground = cx.theme().sidebar_foreground;
@@ -2637,11 +2642,37 @@ impl Render for NativeApp {
             .gap_2()
             .p_3();
         if let Some(detail) = &self.detail.thread {
+            let title = detail["title"].as_str().unwrap_or("Thread").to_owned();
+            let branch = detail["branch"].as_str().unwrap_or("").to_owned();
             conversation = conversation.child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(detail["title"].as_str().unwrap_or("Thread").to_owned()),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pb_1()
+                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .when(!branch.is_empty(), |view| {
+                        view.child(
+                            div()
+                                .px_2()
+                                .rounded_sm()
+                                .bg(muted)
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(branch),
+                        )
+                    }),
             );
+
+            if let Some((label, state)) = conversation::turn_summary(&detail["latestTurn"]) {
+                let color = if state.is_danger() {
+                    danger
+                } else {
+                    muted_foreground
+                };
+                conversation = conversation.child(div().text_xs().text_color(color).child(label));
+            }
+
             if let Some(messages) = detail["messages"].as_array() {
                 for message in messages {
                     let id = gpui_kit::SharedString::from(format!(
@@ -2649,61 +2680,161 @@ impl Render for NativeApp {
                         message["id"].as_str().unwrap_or("unknown")
                     ));
                     let text = message["text"].as_str().unwrap_or("").to_owned();
-                    conversation = conversation.child(
-                        div()
+                    let role = message["role"].as_str().unwrap_or("message");
+                    let label = conversation::role_label(role);
+                    let created = message["createdAt"].as_str().and_then(conversation::clock_time);
+                    let meta = match (created, message["streaming"] == true) {
+                        (Some(time), true) => format!("{label} · {time} · streaming"),
+                        (Some(time), false) => format!("{label} · {time}"),
+                        (None, true) => format!("{label} · streaming"),
+                        (None, false) => label.to_owned(),
+                    };
+                    let body = div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_2()
+                        .rounded_md()
+                        .child(div().text_xs().text_color(muted_foreground).child(meta))
+                        .child(TextView::markdown(id, text));
+                    let row = match role {
+                        "user" => div().flex().justify_end().child(body.max_w(px(720.)).bg(secondary)),
+                        "reasoning" => {
+                            div().flex().justify_center().child(body.max_w(px(720.)).bg(muted))
+                        }
+                        "system" => div()
                             .flex()
-                            .flex_col()
-                            .gap_1()
-                            .p_2()
-                            .rounded_md()
-                            .bg(group_box)
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted_foreground)
-                                    .child(format!(
-                                        "{}{}",
-                                        message["role"].as_str().unwrap_or("message"),
-                                        if message["streaming"] == true {
-                                            " · streaming"
-                                        } else {
-                                            ""
-                                        }
-                                    )),
-                            )
-                            .child(TextView::markdown(id, text)),
-                    );
+                            .justify_center()
+                            .child(body.text_color(muted_foreground)),
+                        _ => body.bg(group_box),
+                    };
+                    conversation = conversation.child(row);
                 }
             }
+
             if let Some(activities) = detail["activities"].as_array() {
-                for activity in activities {
-                    if activity["kind"] == "worktree-setup" {
-                        // The setup card renders the live stages and terminal output.
+                let visible: Vec<&Value> = activities
+                    .iter()
+                    .filter(|activity| activity["kind"] != "worktree-setup")
+                    .collect();
+                if !visible.is_empty() {
+                    let mut log = div().flex().flex_col().gap_1().pt_1();
+                    for activity in visible {
+                        let color = match activity["tone"].as_str().unwrap_or("info") {
+                            "error" => danger,
+                            "approval" => warning,
+                            "tool" => muted_foreground,
+                            _ => blue,
+                        };
+                        log = log.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color))
+                                .child(activity["summary"].as_str().unwrap_or("").to_owned()),
+                        );
+                    }
+                    conversation = conversation.child(log);
+                }
+            }
+
+            if let Some(plans) = detail["proposedPlans"].as_array() {
+                for plan in plans {
+                    let markdown = plan["planMarkdown"].as_str().unwrap_or("").to_owned();
+                    if markdown.is_empty() {
                         continue;
                     }
+                    let id = gpui_kit::SharedString::from(format!(
+                        "plan-{}",
+                        plan["id"].as_str().unwrap_or("unknown")
+                    ));
+                    let implemented = !plan["implementedAt"].is_null();
                     conversation = conversation.child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .text_color(muted_foreground)
-                            .child(format!(
-                                "{} · {}",
-                                activity["tone"].as_str().unwrap_or("activity"),
-                                activity["summary"].as_str().unwrap_or("")
-                            ))
-                            .child(activity["payload"].to_string()),
+                            .p_3()
+                            .rounded_md()
+                            .bg(group_box)
+                            .border_1()
+                            .border_color(border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(muted_foreground)
+                                    .child("PROPOSED PLAN")
+                                    .when(implemented, |view| {
+                                        view.child(
+                                            div().px_2().rounded_sm().bg(muted).child("implemented"),
+                                        )
+                                    }),
+                            )
+                            .child(TextView::markdown(id, markdown)),
                     );
                 }
             }
-            if let Some(session) = detail.get("session").filter(|s| !s.is_null()) {
-                conversation = conversation.child(
-                    div().text_color(muted_foreground).child(format!(
-                        "Session: {} · {}",
-                        session["status"].as_str().unwrap_or("unknown"),
-                        session["lastError"].as_str().unwrap_or("")
-                    )),
-                );
+
+            if let Some(checkpoint) = detail["checkpoints"].as_array().and_then(|list| list.last()) {
+                let files = checkpoint["files"].as_array().cloned().unwrap_or_default();
+                if !files.is_empty() {
+                    let (additions, deletions) = conversation::diff_totals(&files);
+                    let mut card = div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_3()
+                        .rounded_md()
+                        .bg(group_box)
+                        .border_1()
+                        .border_color(border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(muted_foreground)
+                                .child("CHANGES")
+                                .child(format!("{} files", files.len()))
+                                .child(div().text_color(green).child(format!("+{additions}")))
+                                .child(div().text_color(danger).child(format!("-{deletions}"))),
+                        );
+                    for file in files.iter().take(8) {
+                        card = card.child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(file["path"].as_str().unwrap_or("").to_owned()),
+                                )
+                                .child(format!(
+                                    "+{} -{}",
+                                    file["additions"].as_u64().unwrap_or(0),
+                                    file["deletions"].as_u64().unwrap_or(0)
+                                )),
+                        );
+                    }
+                    conversation = conversation.child(card);
+                }
+            }
+
+            if let Some(error) = detail["session"]["lastError"].as_str() {
+                conversation = conversation.child(div().text_xs().text_color(danger).child(error.to_owned()));
             }
         } else if self
             .pending_threads
@@ -2723,9 +2854,28 @@ impl Render for NativeApp {
                 conversation = conversation.child(self.composer.read(cx).value().to_string());
             }
         } else if self.selected_thread.is_some() {
-            conversation = conversation.child("Loading thread history…");
+            conversation = conversation.child(
+                div().text_color(muted_foreground).child("Loading thread history…"),
+            );
         } else {
-            conversation = conversation.child("Select a thread or create a new one");
+            conversation = conversation.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .h(px(360.))
+                    .text_color(muted_foreground)
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(foreground)
+                            .child("Select a thread"),
+                    )
+                    .child("Choose a thread in the sidebar, or start a new one with ⌘N"),
+            );
         }
 
         let mut search_results = div().flex().flex_col().gap_1();

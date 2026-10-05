@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod commands;
 pub mod connection;
+pub mod conversation;
 pub mod credentials;
 pub mod dpop;
 pub mod drafts;
