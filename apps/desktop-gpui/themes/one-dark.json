@@ -94,7 +94,19 @@
         "base.magenta": "#c678ddff",
         "base.magenta.light": "#D398EBff",
         "base.cyan": "#56b6c2ff",
-        "base.cyan.light": "#6ED5DEff"
+        "base.cyan.light": "#6ED5DEff",
+        "accordion.background": "#2f343eff",
+        "chart.1": "#61afefff",
+        "chart.2": "#98c379ff",
+        "chart.3": "#e5c07bff",
+        "chart.4": "#c678ddff",
+        "chart.5": "#56b6c2ff",
+        "chart.bullish": "#98c379ff",
+        "chart.bearish": "#e06c75ff",
+        "chart.grid": "#363c46ff",
+        "description_list_label.background": "#2f343eff",
+        "description_list_label.foreground": "#a9afbcff",
+        "tab_bar.segmented.background": "#2e343eff"
       },
       "highlight": {
         "editor.foreground": "#acb2beff",
