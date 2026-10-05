@@ -1,12 +1,12 @@
-use gpui::{
-    App, Application, Bounds, Context, Entity, FocusHandle, KeyBinding, Subscription, Task, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
-};
-use gpui_component::{
-    Disableable, Root,
+use gpui_kit::component::{
+    Disableable,
     button::Button,
-    input::{Input, InputEvent, InputState, Position},
+    input::{Input, InputEvent, InputState, Position, Textarea, TextareaState},
     text::TextView,
+};
+use gpui_kit::{
+    App, Bounds, Context, Entity, FocusHandle, KeyBinding, Subscription, Task, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, rgb, size,
 };
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
@@ -14,7 +14,7 @@ use t3code_desktop_gpui::{
     shell, sidebar, thread, workspaces,
 };
 
-gpui::actions!(
+gpui_kit::actions!(
     native,
     [
         ContentSubmit,
@@ -71,7 +71,7 @@ struct NativeApp {
     vault: credentials::Vault,
     credential_task: Option<Task<()>>,
     pending_actions: usize,
-    composer: Entity<InputState>,
+    composer: Entity<TextareaState>,
     title: Entity<InputState>,
     workspace: Entity<InputState>,
     provider: Entity<InputState>,
@@ -115,7 +115,7 @@ struct NativeApp {
     clone_progress: Vec<workspaces::CloneProgress>,
     files_open: bool,
     file_path: Entity<InputState>,
-    file_contents: Entity<InputState>,
+    file_contents: Entity<TextareaState>,
     file_editor: files::Editor,
     file_epoch: u64,
     file_busy: bool,
@@ -126,7 +126,7 @@ struct NativeApp {
     content_results: Option<files::ContentResults>,
     content_request_query: String,
     content_index: usize,
-    content_scroll: gpui::ScrollHandle,
+    content_scroll: gpui_kit::ScrollHandle,
     file_listing_truncated: bool,
     file_listing_task: Option<Task<()>>,
     file_listing_epoch: u64,
@@ -141,8 +141,7 @@ struct NativeApp {
 impl NativeApp {
     fn new(window: &mut Window, cx: &mut Context<Self>, auto_connect: bool) -> Self {
         let composer = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(3, 10)
                 .placeholder("What should we work on?")
         });
@@ -162,11 +161,7 @@ impl NativeApp {
             cx.new(|cx| single_line_input(window, cx).placeholder("Repository clone URL"));
         let content_query =
             cx.new(|cx| single_line_input(window, cx).placeholder("Search workspace contents"));
-        let file_contents = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
-                .auto_grow(8, 20)
-        });
+        let file_contents = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 20));
         let palette_query =
             cx.new(|cx| single_line_input(window, cx).placeholder("Search commands…"));
         let title =
@@ -243,7 +238,13 @@ impl NativeApp {
                         app.schedule_draft_save(cx);
                     }
                 }
-                if matches!(event, InputEvent::PressEnter { secondary: true }) {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: true,
+                        ..
+                    }
+                ) {
                     app.send_prompt(window, cx);
                 }
             }),
@@ -363,7 +364,7 @@ impl NativeApp {
             content_results: None,
             content_request_query: String::new(),
             content_index: 0,
-            content_scroll: gpui::ScrollHandle::new(),
+            content_scroll: gpui_kit::ScrollHandle::new(),
             file_listing_truncated: false,
             file_listing_task: None,
             file_listing_epoch: 0,
@@ -409,7 +410,7 @@ impl NativeApp {
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette_open = false;
         if let Some(focus) = self.previous_focus.take() {
-            window.focus(&focus);
+            window.focus(&focus, cx);
         }
         cx.notify();
     }
@@ -1876,7 +1877,7 @@ impl NativeApp {
         &mut self,
         tag: &str,
         payload: Value,
-        sent_prompt: Option<(String, gpui::AnyWindowHandle)>,
+        sent_prompt: Option<(String, gpui_kit::AnyWindowHandle)>,
         cx: &mut Context<Self>,
     ) {
         let Some(sender) = self.commands.clone() else {
@@ -2106,7 +2107,7 @@ impl NativeApp {
     fn schedule_snooze_wake(&mut self, cx: &mut Context<Self>) {
         self.snooze_wake = sidebar::expiry(&self.shell.threads, chrono::Utc::now()).map(|delay| {
             cx.spawn(async move |entity, cx| {
-                gpui::Timer::after(delay).await;
+                cx.background_executor().timer(delay).await;
                 let _ = entity.update(cx, |app, cx| {
                     app.schedule_snooze_wake(cx);
                     cx.notify();
@@ -2154,7 +2155,9 @@ impl NativeApp {
 
     fn schedule_draft_save(&mut self, cx: &mut Context<Self>) {
         self.draft_save = Some(cx.spawn(async move |entity, cx| {
-            gpui::Timer::after(std::time::Duration::from_millis(200)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
             let write = entity.update(cx, |app, _| {
                 app.draft_store.as_ref().map(|store| store.write_snapshot())
             });
@@ -2433,7 +2436,7 @@ impl Drop for NativeApp {
 }
 
 impl Render for NativeApp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut projects = Vec::new();
         for project in &self.shell.projects {
             let project_id = project.id.clone();
@@ -2445,7 +2448,7 @@ impl Render for NativeApp {
                 project.default_model_selection.as_ref(),
             );
             let mut row = div().flex().flex_col().gap_2().child(
-                Button::new(gpui::SharedString::from(format!("project-{project_id}")))
+                Button::new(gpui_kit::SharedString::from(format!("project-{project_id}")))
                     .label(title.clone())
                     .debug_selector({
                         let id = project_id.clone();
@@ -2535,7 +2538,7 @@ impl Render for NativeApp {
             }) {
                 let id = draft.thread.id.clone();
                 row = row.child(
-                    Button::new(gpui::SharedString::from(format!("draft-{id}")))
+                    Button::new(gpui_kit::SharedString::from(format!("draft-{id}")))
                         .label(format!("{} · unsent", draft.thread.title))
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.select_thread(&id, window, cx)
@@ -2567,7 +2570,7 @@ impl Render for NativeApp {
                     }
                 );
                 row = row.child(
-                    Button::new(gpui::SharedString::from(format!("thread-{id}")))
+                    Button::new(gpui_kit::SharedString::from(format!("thread-{id}")))
                         .label(label)
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.select_thread(&id, window, cx)
@@ -2591,7 +2594,7 @@ impl Render for NativeApp {
                 conversation.child(detail["title"].as_str().unwrap_or("Thread").to_owned());
             if let Some(messages) = detail["messages"].as_array() {
                 for message in messages {
-                    let id = gpui::SharedString::from(format!(
+                    let id = gpui_kit::SharedString::from(format!(
                         "message-{}",
                         message["id"].as_str().unwrap_or("unknown")
                     ));
@@ -2610,7 +2613,7 @@ impl Render for NativeApp {
                                     ""
                                 }
                             ))
-                            .child(TextView::markdown(id, text, window, cx)),
+                            .child(TextView::markdown(id, text)),
                     );
                 }
             }
@@ -2668,7 +2671,7 @@ impl Render for NativeApp {
             if let Some(id) = result["threadId"].as_str() {
                 let id = id.to_owned();
                 search_results = search_results.child(
-                    Button::new(gpui::SharedString::from(format!("search-{id}")))
+                    Button::new(gpui_kit::SharedString::from(format!("search-{id}")))
                         .label(result["snippet"].as_str().unwrap_or("Match").to_owned())
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.select_thread(&id, window, cx)
@@ -2710,7 +2713,7 @@ impl Render for NativeApp {
                     })
                     .children(entries.into_iter().enumerate().map(|(index, entry)| {
                         let command = entry.command;
-                        Button::new(gpui::SharedString::from(format!("palette-{index}")))
+                        Button::new(gpui_kit::SharedString::from(format!("palette-{index}")))
                             .debug_selector(move || format!("palette-{index}"))
                             .label(format!(
                                 "{}{}",
@@ -2958,7 +2961,7 @@ impl Render for NativeApp {
                         view.child(div().w_full().min_w_0().whitespace_normal().flex().flex_col().gap_1()
                             .child(format!("Worktree setup · {}{}",setup.phase,setup.branch.as_ref().map_or(String::new(),|branch|format!(" · {branch}"))))
                             .child(Button::new("setup-details").label(if show{"Hide setup details"}else{"Show setup details"}).on_click(cx.listener(|app,_,_,cx|{app.setup_expanded= !app.setup_expanded;cx.notify();})))
-                            .when_some(setup.worktree_path.clone(),|view,path|view.child(Button::new("copy-worktree-path").label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()))))))
+                            .when_some(setup.worktree_path.clone(),|view,path|view.child(Button::new("copy-worktree-path").label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()))))))
                             .children(setup.error.clone())
                             .when(show,|view|view.children(setup.stages.iter().map(|stage|div().w_full().min_w_0().whitespace_normal().flex().flex_col().child(format!("{} · {}{}",stage.id,stage.status,stage.percent.map_or(String::new(),|percent|format!(" {percent}%")))).children(stage.detail.clone()).children(stage.tail.clone()))))
                             .when(setup.phase=="running",|view|view.child(Button::new("setup-cancel").label("Cancel worktree setup").on_click(cx.listener(move|app,_,_,cx|app.perform("worktreeSetup.cancel",json!({"threadId":id}),None,cx)))))
@@ -2977,8 +2980,8 @@ impl Render for NativeApp {
                             .children(scripts.into_iter().enumerate().map(|(index,script)| {
                                 let edit=script.clone();let id=script["id"].as_str().unwrap_or_default().to_owned();let confirm=self.confirm_action_delete.as_ref()==Some(&id);
                                 div().flex().flex_col().min_w_0().whitespace_normal().child(format!("{} · {}{}",script["name"].as_str().unwrap_or_default(),script["command"].as_str().unwrap_or_default(),if script["runOnWorktreeCreate"]==true{" · worktree setup"}else{""}))
-                                    .child(Button::new(gpui::SharedString::from(format!("action-edit-{index}"))).label("Edit action").on_click(cx.listener(move|app,_,window,cx|{app.action_edit_id=edit["id"].as_str().map(str::to_owned);app.action_setup=edit["runOnWorktreeCreate"]==true;app.action_wait=edit["async"]==false;app.action_name.update(cx,|input,cx|input.set_value(edit["name"].as_str().unwrap_or_default().to_owned(),window,cx));app.action_command.update(cx,|input,cx|input.set_value(edit["command"].as_str().unwrap_or_default().to_owned(),window,cx));cx.notify();})))
-                                    .child(Button::new(gpui::SharedString::from(format!("action-delete-{index}"))).label(if confirm{"Confirm delete action"}else{"Delete action"}).disabled(self.action_busy).on_click(cx.listener(move|app,_,_,cx|{if app.confirm_action_delete.as_ref()==Some(&id){app.project_actions(Some(json!({"operation":"delete","id":id})),cx);}else{app.confirm_action_delete=Some(id.clone());cx.notify();}})))
+                                    .child(Button::new(gpui_kit::SharedString::from(format!("action-edit-{index}"))).label("Edit action").on_click(cx.listener(move|app,_,window,cx|{app.action_edit_id=edit["id"].as_str().map(str::to_owned);app.action_setup=edit["runOnWorktreeCreate"]==true;app.action_wait=edit["async"]==false;app.action_name.update(cx,|input,cx|input.set_value(edit["name"].as_str().unwrap_or_default().to_owned(),window,cx));app.action_command.update(cx,|input,cx|input.set_value(edit["command"].as_str().unwrap_or_default().to_owned(),window,cx));cx.notify();})))
+                                    .child(Button::new(gpui_kit::SharedString::from(format!("action-delete-{index}"))).label(if confirm{"Confirm delete action"}else{"Delete action"}).disabled(self.action_busy).on_click(cx.listener(move|app,_,_,cx|{if app.confirm_action_delete.as_ref()==Some(&id){app.project_actions(Some(json!({"operation":"delete","id":id})),cx);}else{app.confirm_action_delete=Some(id.clone());cx.notify();}})))
                             }))
                             .child(Button::new("project-default-save").label("Use selected provider and model for new threads").on_click(cx.listener(|app,_,_,cx|app.update_project_default(false,cx))))
                             .child(Button::new("project-default-inherit").label("Use environment model default").on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"model-inherit"})),cx))))
@@ -3000,8 +3003,8 @@ impl Render for NativeApp {
                             .child(Button::new("ref-switch").label("Switch branch").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.switchRef",false,cx))))
                             .child(Button::new("worktree-remove").label("Remove worktree").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.removeWorktree",false,cx))))
                             .child(Button::new("worktrees-close").label("Close").on_click(cx.listener(|app,_,_,cx|{app.worktrees_open=false;cx.notify();}))))
-                        .children(self.refs.iter().map(|row| {let branch=row.name.clone();let path=row.worktree_path.clone();Button::new(gpui::SharedString::from(format!("choose-ref-{}",row.name))).label(format!("{}{}",if row.current{"● "}else{""},row.name)).tooltip(row.worktree_path.clone().unwrap_or_else(||"No worktree checkout".into())).on_click(cx.listener(move|app,_,window,cx|app.choose_checkout(branch.clone(),path.clone(),window,cx))) }))
-                        .when_some(self.worktree_outcome.as_ref(),|view,result|view.child(div().w_full().min_w_0().whitespace_normal().child(format!("Checkout updated: {}",result["worktree"]["refName"].as_str().or_else(||result["refName"].as_str()).unwrap_or("removed"))).when_some(result["worktree"]["path"].as_str(),|view,path|{let path=path.to_owned();view.child(Button::new("copy-created-worktree").label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone())))))})))
+                        .children(self.refs.iter().map(|row| {let branch=row.name.clone();let path=row.worktree_path.clone();Button::new(gpui_kit::SharedString::from(format!("choose-ref-{}",row.name))).label(format!("{}{}",if row.current{"● "}else{""},row.name)).tooltip(row.worktree_path.clone().unwrap_or_else(||"No worktree checkout".into())).on_click(cx.listener(move|app,_,window,cx|app.choose_checkout(branch.clone(),path.clone(),window,cx))) }))
+                        .when_some(self.worktree_outcome.as_ref(),|view,result|view.child(div().w_full().min_w_0().whitespace_normal().child(format!("Checkout updated: {}",result["worktree"]["refName"].as_str().or_else(||result["refName"].as_str()).unwrap_or("removed"))).when_some(result["worktree"]["path"].as_str(),|view,path|{let path=path.to_owned();view.child(Button::new("copy-created-worktree").label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone())))))})))
                         .when(self.refs_cursor.is_some(),|view|view.child(Button::new("refs-more").label("More branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",true,cx)))))
                     ))
                     .child(Button::new("clone-repository").label("Clone repository").on_click(cx.listener(|app,_,window,cx| app.execute_command(palette::Command::CloneProject,window,cx))))
@@ -3013,8 +3016,8 @@ impl Render for NativeApp {
                             let cancel_id = row.project_id.clone();let retry_id=cancel_id.clone();
                             div().flex().flex_col().gap_1().child(format!("{} · {} · {}{}",row.destination_path,row.phase,row.stage,row.percent.map_or(String::new(),|percent| format!(" {percent}%"))))
                                 .children(row.detail.clone()).children(row.error.clone())
-                                .when(row.phase == "running",|view|view.child(Button::new(gpui::SharedString::from(format!("clone-cancel-{cancel_id}"))).label("Cancel clone").on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.cancel",json!({"projectId":cancel_id}),None,cx)))))
-                                .when(row.phase == "failed" || row.phase == "cancelled",|view|view.child(Button::new(gpui::SharedString::from(format!("clone-retry-{retry_id}"))).label("Retry clone").on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.retry",json!({"projectId":retry_id}),None,cx)))))
+                                .when(row.phase == "running",|view|view.child(Button::new(gpui_kit::SharedString::from(format!("clone-cancel-{cancel_id}"))).label("Cancel clone").on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.cancel",json!({"projectId":cancel_id}),None,cx)))))
+                                .when(row.phase == "failed" || row.phase == "cancelled",|view|view.child(Button::new(gpui_kit::SharedString::from(format!("clone-retry-{retry_id}"))).label("Retry clone").on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.retry",json!({"projectId":retry_id}),None,cx)))))
                         }))
                     ))
                     .child(
@@ -3042,7 +3045,7 @@ impl Render for NativeApp {
                                     .when(results.truncated, |view| view.child("Content results truncated; refine the search"))
                                     .when(results.matches.is_empty(), |view| view.child("No content matches"))
                                     .child(div().id("content-result-list").track_scroll(&self.content_scroll).max_h(px(160.)).overflow_y_scroll().flex().flex_col().children(results.matches.iter().enumerate().map(|(index,hit)| {
-                                        Button::new(gpui::SharedString::from(format!("content-hit-{index}"))).debug_selector(move||format!("content-hit-{index}")).label(format!("{}{}:{}  {}",if index == self.content_index { "› " } else { "" },hit.path,hit.line_number,"")).child(gpui::StyledText::new(hit.line_content.clone()).with_highlights(hit.byte_ranges().into_iter().map(|range| (range,gpui::HighlightStyle { background_color:Some(rgb(0x454b78).into()),..Default::default() })))).on_click(cx.listener(move|app,_,window,cx| app.open_content_hit(index,window,cx)))
+                                        Button::new(gpui_kit::SharedString::from(format!("content-hit-{index}"))).debug_selector(move||format!("content-hit-{index}")).label(format!("{}{}:{}  {}",if index == self.content_index { "› " } else { "" },hit.path,hit.line_number,"")).child(gpui_kit::StyledText::new(hit.line_content.clone()).with_highlights(hit.byte_ranges().into_iter().map(|range| (range,gpui_kit::HighlightStyle { background_color:Some(rgb(0x454b78).into()),..Default::default() })))).on_click(cx.listener(move|app,_,window,cx| app.open_content_hit(index,window,cx)))
                                     })))
                                 ))
                                 .child(Input::new(&self.file_path))
@@ -3052,7 +3055,7 @@ impl Render for NativeApp {
                             .when(self.file_listing_truncated,|view|view.child("Results truncated; refine the path or search"))
                             .child(div().id("file-entry-list").max_h(px(160.)).overflow_y_scroll().flex().flex_col().gap_1().children(self.file_entries.iter().enumerate().map(|(index,entry)| {
                                 let path=entry.path.clone();let directory=entry.kind=="directory";
-                                Button::new(gpui::SharedString::from(format!("file-entry-{index}"))).debug_selector(move||format!("file-entry-{index}")).label(format!("{}{}",entry.path,if directory { "/" } else { "" }))
+                                Button::new(gpui_kit::SharedString::from(format!("file-entry-{index}"))).debug_selector(move||format!("file-entry-{index}")).label(format!("{}{}",entry.path,if directory { "/" } else { "" }))
                                     .on_click(cx.listener(move|app,_,window,cx| {
                                         app.file_path.update(cx,|input,cx|input.set_value(path.clone(),window,cx));
                                         if directory { app.list_files(false,cx); } else { app.file_operation(false,window,cx); }
@@ -3084,7 +3087,7 @@ impl Render for NativeApp {
                                 if app.file_busy { app.status="Wait for the pending file operation before discarding".into();cx.notify();return; }
                                 let text=app.file_editor.saved.clone();app.file_contents.update(cx,|input,cx|input.set_value(text,window,cx));cx.notify();
                             })))
-                            .child(Input::new(&self.file_contents)),
+                            .child(Textarea::new(&self.file_contents)),
                         )
                     })
                     .child(conversation)
@@ -3102,7 +3105,7 @@ impl Render for NativeApp {
                             .child(format!("{} · {} · {}",provider.label(),provider.instance_id,provider.explanation()))
                             .children(provider.models.iter().enumerate().map(|(index,model)| {
                                 let instance=provider.instance_id.clone();let slug=model.slug.clone();let enabled=provider.selectable();
-                                Button::new(gpui::SharedString::from(format!("catalog-{}-{index}",provider.instance_id))).debug_selector({ let id=format!("catalog-{}-{index}",provider.instance_id);move||id.clone() }).disabled(!enabled).label(model.name.clone()).on_click(cx.listener(move|app,_,window,cx|app.pick_model(&instance,&slug,window,cx)))
+                                Button::new(gpui_kit::SharedString::from(format!("catalog-{}-{index}",provider.instance_id))).debug_selector({ let id=format!("catalog-{}-{index}",provider.instance_id);move||id.clone() }).disabled(!enabled).label(model.name.clone()).on_click(cx.listener(move|app,_,window,cx|app.pick_model(&instance,&slug,window,cx)))
                             })))))
                     )
                     .children(self.provider_catalog.iter().find(|provider|provider.instance_id==self.provider.read(cx).value().as_str()).and_then(|provider|provider.models.iter().find(|model|model.slug==self.model.read(cx).value().as_str())).and_then(|model|model.capabilities["optionDescriptors"].as_array()).map(|options|div().flex().flex_col().gap_1().children(options.iter().enumerate().map(|(index,option)| {
@@ -3112,10 +3115,10 @@ impl Render for NativeApp {
                         let choices=if option["type"]=="boolean" {vec![json!({"id":false,"label":"Off"}),json!({"id":true,"label":"On"})]} else {option["options"].as_array().cloned().unwrap_or_default()};
                         div().flex().flex_wrap().gap_1().child(option["label"].as_str().unwrap_or_default().to_owned()).children(choices.into_iter().enumerate().map(|(choice_index,choice)| {
                             let id=id.clone();let value=choice["id"].clone();
-                            Button::new(gpui::SharedString::from(format!("model-option-{index}-{choice_index}"))).debug_selector(move||format!("model-option-{index}-{choice_index}")).label(format!("{}{}",choice["label"].as_str().unwrap_or_default(),if selected.as_ref()==Some(&value){" ✓"}else{""})).on_click(cx.listener(move|app,_,_,cx|app.choose_model_option(&id,value.clone(),cx)))
+                            Button::new(gpui_kit::SharedString::from(format!("model-option-{index}-{choice_index}"))).debug_selector(move||format!("model-option-{index}-{choice_index}")).label(format!("{}{}",choice["label"].as_str().unwrap_or_default(),if selected.as_ref()==Some(&value){" ✓"}else{""})).on_click(cx.listener(move|app,_,_,cx|app.choose_model_option(&id,value.clone(),cx)))
                         }))
                     }))))
-                    .child(Input::new(&self.composer))
+                    .child(Textarea::new(&self.composer))
                     .child(
                         div()
                             .flex()
@@ -3206,47 +3209,48 @@ fn bind_native_keys(cx: &mut App) {
 }
 
 fn main() {
-    Application::new().run(move |cx: &mut App| {
-        gpui_component::init(cx);
+    gpui_kit::application().run(move |cx: &mut App| {
+        gpui_kit::init(cx);
         bind_native_keys(cx);
         cx.on_action(|_: &QuitNative, cx| cx.quit());
         cx.set_menus(vec![
-            gpui::Menu {
+            gpui_kit::Menu {
                 name: "T3 Code Native".into(),
-                items: vec![gpui::MenuItem::action("Quit", QuitNative)],
+                disabled: false,
+                items: vec![gpui_kit::MenuItem::action("Quit", QuitNative)],
             },
-            gpui::Menu {
+            gpui_kit::Menu {
                 name: "Thread".into(),
+                disabled: false,
                 items: vec![
-                    gpui::MenuItem::action("New thread", NewThread),
-                    gpui::MenuItem::action("Toggle settlement", ToggleSettle),
-                    gpui::MenuItem::action("Toggle pin", TogglePin),
-                    gpui::MenuItem::action("Stash prompt", StashPrompt),
+                    gpui_kit::MenuItem::action("New thread", NewThread),
+                    gpui_kit::MenuItem::action("Toggle settlement", ToggleSettle),
+                    gpui_kit::MenuItem::action("Toggle pin", TogglePin),
+                    gpui_kit::MenuItem::action("Stash prompt", StashPrompt),
                 ],
             },
-            gpui::Menu {
+            gpui_kit::Menu {
                 name: "View".into(),
+                disabled: false,
                 items: vec![
-                    gpui::MenuItem::action("Commands", TogglePalette),
-                    gpui::MenuItem::action("Workspace files", OpenFiles),
-                    gpui::MenuItem::action("Search contents", OpenContentSearch),
+                    gpui_kit::MenuItem::action("Commands", TogglePalette),
+                    gpui_kit::MenuItem::action("Workspace files", OpenFiles),
+                    gpui_kit::MenuItem::action("Search contents", OpenContentSearch),
                 ],
             },
         ]);
-        gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(900.)), cx);
-        cx.open_window(
+        gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| {
-                let view = cx.new(|cx| NativeApp::new(window, cx, true));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
+            cx,
+            |window, cx| cx.new(|cx| NativeApp::new(window, cx, true)),
         )
         .expect("could not open native window");
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
             }

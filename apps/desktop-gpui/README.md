@@ -7,9 +7,10 @@ from [GPUI Kit](https://gpui-kit.com) components.
 
 ## Build and run
 
-Requires macOS and Xcode developer tools. GPUI is pinned to 0.2.2, with compatible
-GPUI Component 0.5.1 controls. Runtime Metal shader compilation avoids requiring
-Xcode's separately downloaded offline Metal toolchain.
+Requires macOS and Xcode developer tools. The interface is built with
+[GPUI Kit](https://gpui-kit.com) (`gpui-kit` 0.7.1), which bundles GPUI, GPUI Base,
+the component library and default icon assets. Runtime Metal shader compilation
+avoids requiring Xcode's separately downloaded offline Metal toolchain.
 
 ```sh
 cargo build --manifest-path apps/desktop-gpui/Cargo.toml

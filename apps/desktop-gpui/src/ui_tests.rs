@@ -1,6 +1,7 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
 use super::*;
-use gpui::{AppContext, TestAppContext, VisualTestContext};
+use gpui_kit::component::Root;
+use gpui_kit::{AppContext, TestAppContext, VisualTestContext};
 
 fn harness(
     cx: &mut TestAppContext,
@@ -10,7 +11,7 @@ fn harness(
     async_channel::Receiver<connection::Command>,
 ) {
     cx.update(|cx| {
-        gpui_component::init(cx);
+        gpui_kit::init(cx);
         bind_native_keys(cx);
     });
     let mut app = None;
@@ -40,7 +41,7 @@ fn harness(
     (app, cx, requests)
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");
@@ -68,7 +69,7 @@ fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mu
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn palette_arrows_choose_reverse_action_and_pin_shortcut_tracks_server_state(
     cx: &mut TestAppContext,
 ) {
@@ -115,7 +116,7 @@ fn palette_arrows_choose_reverse_action_and_pin_shortcut_tracks_server_state(
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn palette_deletion_still_requires_confirmation_and_shortcut_stash_preserves_text(
     cx: &mut TestAppContext,
 ) {
@@ -150,7 +151,7 @@ fn palette_deletion_still_requires_confirmation_and_shortcut_stash_preserves_tex
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn model_change_restriction_cannot_be_bypassed_by_manual_ids(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window,cx|app.update(cx,|app,cx| {
@@ -172,7 +173,7 @@ fn model_change_restriction_cannot_be_bypassed_by_manual_ids(cx: &mut TestAppCon
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn choosing_catalog_model_uses_instance_routing_and_preserves_unchanged_options(
     cx: &mut TestAppContext,
 ) {
@@ -183,11 +184,11 @@ fn choosing_catalog_model_uses_instance_routing_and_preserves_unchanged_options(
     }));
     cx.run_until_parked();
     let _ = cx.debug_bounds("model-catalog").unwrap();
-    cx.simulate_event(gpui::ScrollWheelEvent {
-        position: gpui::point(px(1100.), px(50.)),
-        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-400.))),
+    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: gpui_kit::point(px(1100.), px(50.)),
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-400.))),
         modifiers: Default::default(),
-        touch_phase: gpui::TouchPhase::Moved,
+        touch_phase: gpui_kit::TouchPhase::Moved,
     });
     cx.run_until_parked();
     let bounds = cx.debug_bounds("catalog-codex-0").unwrap();
@@ -215,7 +216,7 @@ fn choosing_catalog_model_uses_instance_routing_and_preserves_unchanged_options(
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn workspace_browse_and_path_search_use_server_and_ignore_other_project_results(
     cx: &mut TestAppContext,
 ) {
@@ -271,7 +272,7 @@ fn workspace_browse_and_path_search_use_server_and_ignore_other_project_results(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn loaded_file_editor_accepts_real_input_dispatch(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
@@ -302,7 +303,7 @@ fn loaded_file_editor_accepts_real_input_dispatch(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn file_save_uses_loaded_target_preserves_later_edits_and_failed_reads(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
@@ -368,7 +369,7 @@ fn file_save_uses_loaded_target_preserves_later_edits_and_failed_reads(cx: &mut 
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn project_removal_requires_confirmation_and_rejection_preserves_navigation(
     cx: &mut TestAppContext,
 ) {
@@ -398,7 +399,7 @@ fn project_removal_requires_confirmation_and_rejection_preserves_navigation(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn changing_server_cannot_reuse_another_origins_access_credential(cx: &mut TestAppContext) {
     let (app, cx, _) = harness(cx);
     cx.update(|window, cx| {
@@ -420,7 +421,7 @@ fn changing_server_cannot_reuse_another_origins_access_credential(cx: &mut TestA
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn unicode_multiline_prompt_clears_only_after_accepted_receipt(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_input("Hello 🌍\n世界");
@@ -450,7 +451,7 @@ fn unicode_multiline_prompt_clears_only_after_accepted_receipt(cx: &mut TestAppC
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn rejected_send_preserves_user_prompt(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_input("Do not lose this prompt");
@@ -474,7 +475,7 @@ fn rejected_send_preserves_user_prompt(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn editing_while_send_is_pending_does_not_get_erased(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_input("First prompt");
@@ -497,7 +498,7 @@ fn editing_while_send_is_pending_does_not_get_erased(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn delete_requires_confirmation_before_any_request(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     let bounds = cx.debug_bounds("delete").unwrap();
@@ -518,10 +519,10 @@ fn delete_requires_confirmation_before_any_request(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn clipboard_roundtrip_preserves_multiline_unicode(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
-    cx.write_to_clipboard(gpui::ClipboardItem::new_string("Hello 🌍\n世界".into()));
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("Hello 🌍\n世界".into()));
     cx.simulate_keystrokes("cmd-v");
     assert_eq!(
         app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
@@ -539,7 +540,7 @@ fn clipboard_roundtrip_preserves_multiline_unicode(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn stashing_and_restoring_preserves_prompt_without_overwriting_edits(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     cx.simulate_input("Saved prompt");
@@ -574,7 +575,7 @@ fn stashing_and_restoring_preserves_prompt_without_overwriting_edits(cx: &mut Te
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn snoozed_and_settled_views_have_a_way_back_to_active(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     let bounds = cx.debug_bounds("snoozed-view").unwrap();
@@ -589,7 +590,7 @@ fn snoozed_and_settled_views_have_a_way_back_to_active(cx: &mut TestAppContext) 
     assert!(requests.try_recv().is_err());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn custom_snooze_rejects_invalid_times_and_normalizes_offsets(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|_, cx| app.update(cx, |app, cx| app.snooze_custom(cx)));
@@ -612,7 +613,7 @@ fn custom_snooze_rejects_invalid_times_and_normalizes_offsets(cx: &mut TestAppCo
     cx.run_until_parked();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn thread_selection_keeps_independent_drafts(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     cx.simulate_input("Draft for first thread");
@@ -643,7 +644,7 @@ fn thread_selection_keeps_independent_drafts(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn content_search_preserves_spaces_reports_regex_fallback_and_ignores_stale_results(
     cx: &mut TestAppContext,
 ) {
@@ -685,7 +686,7 @@ fn content_search_preserves_spaces_reports_regex_fallback_and_ignores_stale_resu
     assert!(app.read_with(cx, |app, _| app.content_results.is_none()));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn content_results_keyboard_open_unicode_match_at_correct_line_and_column(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-shift-f");
@@ -727,7 +728,7 @@ fn content_results_keyboard_open_unicode_match_at_correct_line_and_column(cx: &m
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn clone_validates_destination_and_keeps_failed_form_for_retry(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");
@@ -799,7 +800,7 @@ fn clone_validates_destination_and_keeps_failed_form_for_retry(cx: &mut TestAppC
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn workspace_reads_follow_selected_thread_worktree_and_reject_other_project_detail(
     cx: &mut TestAppContext,
 ) {
@@ -842,7 +843,7 @@ fn workspace_reads_follow_selected_thread_worktree_and_reject_other_project_deta
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn worktree_removal_requires_confirmation_and_dirty_rejection_preserves_choice(
     cx: &mut TestAppContext,
 ) {
@@ -886,7 +887,7 @@ fn worktree_removal_requires_confirmation_and_dirty_rejection_preserves_choice(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn checkout_choice_preserves_draft_and_creates_new_thread_in_chosen_worktree(
     cx: &mut TestAppContext,
 ) {
@@ -962,7 +963,7 @@ fn checkout_choice_preserves_draft_and_creates_new_thread_in_chosen_worktree(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn first_turn_bootstrap_keeps_failed_draft_and_subscribes_history_only_after_acceptance(
     cx: &mut TestAppContext,
 ) {
@@ -1040,7 +1041,7 @@ fn first_turn_bootstrap_keeps_failed_draft_and_subscribes_history_only_after_acc
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn unsent_thread_rename_and_discard_are_local_and_preserve_other_draft(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_input("Existing draft");
@@ -1075,7 +1076,7 @@ fn unsent_thread_rename_and_discard_are_local_and_preserve_other_draft(cx: &mut 
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn changing_project_clears_thread_scope_and_preserves_its_draft(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_input("retained previous thread draft");
@@ -1091,7 +1092,7 @@ fn changing_project_clears_thread_scope_and_preserves_its_draft(cx: &mut TestApp
         })
     });
     let bounds = cx.debug_bounds("project-other").unwrap();
-    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    cx.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
     assert_eq!(
         app.read_with(cx, |app, _| app.selected_project.clone()),
         Some("other".into())
@@ -1111,7 +1112,7 @@ fn changing_project_clears_thread_scope_and_preserves_its_draft(cx: &mut TestApp
     ));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn project_action_save_reads_latest_settings_and_preserves_form_on_rejection(
     cx: &mut TestAppContext,
 ) {
@@ -1142,7 +1143,7 @@ fn project_action_save_reads_latest_settings_and_preserves_form_on_rejection(
         })
     });
     let bounds = cx.debug_bounds("action-save").unwrap();
-    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    cx.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
     let connection::Command::Call { tag, reply, .. } = requests.try_recv().unwrap() else {
         panic!("expected latest settings read")
     };
@@ -1181,7 +1182,7 @@ fn project_action_save_reads_latest_settings_and_preserves_form_on_rejection(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn materialized_bootstrap_draft_attaches_history_once_before_turn_receipt(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|_, cx| {
@@ -1219,7 +1220,7 @@ fn materialized_bootstrap_draft_attaches_history_once_before_turn_receipt(cx: &m
     assert_eq!(app.read_with(cx, |app, _| app.pending_threads.len()), 1);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn cancelled_draft_checkout_can_change_without_losing_prompt_or_identity(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
@@ -1258,7 +1259,7 @@ fn cancelled_draft_checkout_can_change_without_losing_prompt_or_identity(cx: &mu
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn project_default_changes_read_fresh_settings_and_new_draft_keeps_saved_options(
     cx: &mut TestAppContext,
 ) {
@@ -1310,11 +1311,11 @@ fn project_default_changes_read_fresh_settings_and_new_draft_keeps_saved_options
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn native_single_line_insertion_rejects_newlines_without_losing_previous_value(
     cx: &mut TestAppContext,
 ) {
-    use gpui::EntityInputHandler;
+    use gpui_kit::EntityInputHandler;
     let (app, cx, _) = harness(cx);
     let provider = app.read_with(cx, |app, _| app.provider.clone());
     cx.update(|window, cx| {
@@ -1329,7 +1330,7 @@ fn native_single_line_insertion_rejects_newlines_without_losing_previous_value(
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn catalog_options_reach_emitted_turn_and_invalid_choices_preserve_selection(
     cx: &mut TestAppContext,
 ) {
