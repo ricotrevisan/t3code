@@ -1,3 +1,4 @@
+import { ProjectViewPrototype, useProjectViewPrototype } from "./sidebar/ProjectViewPrototype";
 import { requestThreadCleanup } from "./ThreadCleanupDialog";
 import { readEnvironmentSupportsCleanupReview } from "../state/entities";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
@@ -2192,6 +2193,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 });
 
 export default function Sidebar() {
+  const projectViewPrototype = useProjectViewPrototype();
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
@@ -4919,7 +4921,27 @@ export default function Sidebar() {
               </p>
             )
           ) : null}
-          {!isSearchingThreads ? (
+          {!isSearchingThreads && threadView === "project" && projectViewPrototype.variant ? (
+            <ProjectViewPrototype
+              variant={projectViewPrototype.variant}
+              changeVariant={projectViewPrototype.changeVariant}
+              projects={projectGroups.map((project) => ({
+                key: `project:${project.projectKey}`,
+                label: project.displayName,
+                threads: (
+                  navigationGroups.find((group) => group.key === `project:${project.projectKey}`)
+                    ?.threads ?? []
+                ).map((thread) => ({
+                  key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+                  title: thread.title,
+                  running: isThreadActivelyRunning(thread),
+                  selected:
+                    scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
+                    routeThreadKey,
+                })),
+              }))}
+            />
+          ) : !isSearchingThreads ? (
             <TooltipProvider
               key="sidebar-thread-tooltips-150"
               delay={150}
