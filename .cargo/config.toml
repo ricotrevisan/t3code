@@ -1,0 +1,6 @@
+# GPUI debug render trees are deep. `cargo test` runs each case on a libtest
+# thread with a 2 MiB stack, which overflows on the full desktop-gpui view;
+# the app itself runs on the macOS main thread (8 MiB). Raise the floor for
+# processes Cargo runs so `cargo test` matches the app's headroom.
+[env]
+RUST_MIN_STACK = "8388608"

@@ -82,6 +82,7 @@ struct NativeApp {
     model_override: Option<Value>,
     provider_catalog: Vec<providers::Provider>,
     catalog_open: bool,
+    connection_expanded: bool,
     project_actions_open: bool,
     project_settings: Option<Value>,
     action_name: Entity<InputState>,
@@ -314,6 +315,7 @@ impl NativeApp {
             model_override: None,
             provider_catalog: vec![],
             catalog_open: false,
+            connection_expanded: false,
             project_actions_open: false,
             project_settings: None,
             action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
@@ -2478,6 +2480,7 @@ impl Render for NativeApp {
             .unwrap_or_else(|| "No thread selected".to_owned());
 
         let mut projects = Vec::new();
+        let now = chrono::Utc::now();
         for project in &self.shell.projects {
             let project_id = project.id.clone();
             let title = project.title.clone();
@@ -2488,93 +2491,136 @@ impl Render for NativeApp {
                 project.default_model_selection.as_ref(),
             );
             let project_selected = self.selected_project.as_ref() == Some(&project_id);
-            let mut row = div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    Button::new(gpui_kit::SharedString::from(format!("project-{project_id}")))
-                        .label(title.clone())
-                        .ghost()
-                        .selected(project_selected)
-                        .debug_selector({
-                            let id = project_id.clone();
-                            move || format!("project-{id}")
-                        })
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            if app.selected_project.as_ref() != Some(&project_id) {
-                                app.model_override = None;
-                                app.provider.update(cx, |input, cx| {
-                                    input.set_value(
-                                        default_selection["instanceId"]
-                                            .as_str()
-                                            .unwrap_or_default()
-                                            .to_owned(),
-                                        window,
-                                        cx,
+            let name = sidebar::project_name(&title, &workspace).to_owned();
+            let monogram = name
+                .chars()
+                .next()
+                .map(|letter| letter.to_uppercase().to_string())
+                .unwrap_or_default();
+            let mut group = div().flex().flex_col().gap_1().child(
+                Button::new(gpui_kit::SharedString::from(format!("project-{project_id}")))
+                    .ghost()
+                    .selected(project_selected)
+                    .debug_selector({
+                        let id = project_id.clone();
+                        move || format!("project-{id}")
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .w_full()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(20.))
+                                    .h(px(20.))
+                                    .rounded_sm()
+                                    .bg(muted)
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(monogram),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .truncate()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(name.clone()),
                                     )
-                                });
-                                app.model.update(cx, |input, cx| {
-                                    input.set_value(
-                                        default_selection["model"]
-                                            .as_str()
-                                            .unwrap_or_default()
-                                            .to_owned(),
-                                        window,
-                                        cx,
-                                    )
-                                });
-                                app.action_task = None;
-                                app.action_busy = false;
-                                app.action_edit_id = None;
-                                app.confirm_action_delete = None;
-                                if let Some(previous) = app.selected_thread.take() {
-                                    app.drafts.insert(
-                                        previous.clone(),
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(muted_foreground)
+                                            .child(workspace.clone()),
+                                    ),
+                            ),
+                    )
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        if app.selected_project.as_ref() != Some(&project_id) {
+                            app.model_override = None;
+                            app.provider.update(cx, |input, cx| {
+                                input.set_value(
+                                    default_selection["instanceId"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                            app.model.update(cx, |input, cx| {
+                                input.set_value(
+                                    default_selection["model"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                            app.action_task = None;
+                            app.action_busy = false;
+                            app.action_edit_id = None;
+                            app.confirm_action_delete = None;
+                            if let Some(previous) = app.selected_thread.take() {
+                                app.drafts.insert(
+                                    previous.clone(),
+                                    app.composer.read(cx).value().to_string(),
+                                );
+                                if let Some(store) = &mut app.draft_store {
+                                    store.set(
+                                        &app.environment_scope,
+                                        &previous,
                                         app.composer.read(cx).value().to_string(),
                                     );
-                                    if let Some(store) = &mut app.draft_store {
-                                        store.set(
-                                            &app.environment_scope,
-                                            &previous,
-                                            app.composer.read(cx).value().to_string(),
-                                        );
-                                    }
-                                    app.schedule_draft_save(cx);
                                 }
-                                app.detail = thread::ThreadDetail::default();
-                                app.setup_progress = None;
-                                app.confirm_delete = None;
-                                app.composer
-                                    .update(cx, |input, cx| input.set_value("", window, cx));
-                                if let Some(sender) = &app.commands {
-                                    let _ = sender.try_send(connection::Command::Unsubscribe(
-                                        "worktree-setup".into(),
-                                    ));
-                                    let _ = sender.try_send(connection::Command::SelectThread(None));
-                                }
+                                app.schedule_draft_save(cx);
                             }
-                            app.selected_project = Some(project_id.clone());
-                            app.worktree_task = None;
-                            app.worktree_busy = false;
-                            app.worktree_epoch += 1;
-                            app.refs.clear();
-                            app.worktree_outcome = None;
-                            app.new_thread_checkout = None;
-                            app.confirm_worktree_removal = None;
-                            app.confirm_project_removal = None;
-                            app.file_entries.clear();
-                            app.file_listing_task = None;
-                            app.file_listing_epoch += 1;
-                            app.content_results = None;
-                            app.title
-                                .update(cx, |input, cx| input.set_value(title.clone(), window, cx));
-                            app.workspace.update(cx, |input, cx| {
-                                input.set_value(workspace.clone(), window, cx)
-                            });
-                            cx.notify();
-                        })),
-                );
+                            app.detail = thread::ThreadDetail::default();
+                            app.setup_progress = None;
+                            app.confirm_delete = None;
+                            app.composer
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                            if let Some(sender) = &app.commands {
+                                let _ = sender.try_send(connection::Command::Unsubscribe(
+                                    "worktree-setup".into(),
+                                ));
+                                let _ = sender.try_send(connection::Command::SelectThread(None));
+                            }
+                        }
+                        app.selected_project = Some(project_id.clone());
+                        app.worktree_task = None;
+                        app.worktree_busy = false;
+                        app.worktree_epoch += 1;
+                        app.refs.clear();
+                        app.worktree_outcome = None;
+                        app.new_thread_checkout = None;
+                        app.confirm_worktree_removal = None;
+                        app.confirm_project_removal = None;
+                        app.file_entries.clear();
+                        app.file_listing_task = None;
+                        app.file_listing_epoch += 1;
+                        app.content_results = None;
+                        app.title
+                            .update(cx, |input, cx| input.set_value(title.clone(), window, cx));
+                        app.workspace.update(cx, |input, cx| {
+                            input.set_value(workspace.clone(), window, cx)
+                        });
+                        cx.notify();
+                    })),
+            );
             for draft in self.pending_threads.iter().filter(|draft| {
                 draft.thread.project_id == project.id
                     && !self
@@ -2584,11 +2630,29 @@ impl Render for NativeApp {
                         .any(|thread| thread.id == draft.thread.id)
             }) {
                 let id = draft.thread.id.clone();
-                row = row.child(div().pl_4().child(
+                group = group.child(div().pl_4().child(
                     Button::new(gpui_kit::SharedString::from(format!("draft-{id}")))
-                        .label(format!("{} · unsent", draft.thread.title))
                         .ghost()
                         .selected(self.selected_thread.as_ref() == Some(&id))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .min_w_0()
+                                .w_full()
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .child(draft.thread.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(warning)
+                                        .child("unsent"),
+                                ),
+                        )
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.select_thread(&id, window, cx)
                         })),
@@ -2599,36 +2663,70 @@ impl Render for NativeApp {
             } else {
                 &self.shell.threads
             };
-            for thread in threads.iter().filter(|t| {
-                t.project_id == project.id
-                    && sidebar::belongs(t, self.sidebar_view, chrono::Utc::now())
-            }) {
+            for thread in threads
+                .iter()
+                .filter(|t| t.project_id == project.id && sidebar::belongs(t, self.sidebar_view, now))
+            {
                 let id = thread.id.clone();
-                let label = format!(
-                    "{}{}{}",
-                    if thread.pinned_at.is_some() {
-                        "📌 "
-                    } else {
-                        ""
-                    },
-                    thread.title,
-                    if sidebar::snoozed(thread, chrono::Utc::now()) {
-                        " · snoozed"
-                    } else {
-                        ""
-                    }
-                );
-                row = row.child(div().pl_4().child(
+                let badges = sidebar::badges(thread, now);
+                let meta = sidebar::thread_meta(thread);
+                group = group.child(div().pl_4().child(
                     Button::new(gpui_kit::SharedString::from(format!("thread-{id}")))
-                        .label(label)
                         .ghost()
                         .selected(self.selected_thread.as_ref() == Some(&id))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .w_full()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .truncate()
+                                                .child(thread.title.clone()),
+                                        )
+                                        .when_some(meta, |view, meta| {
+                                            view.child(
+                                                div()
+                                                    .w_full()
+                                                    .truncate()
+                                                    .text_xs()
+                                                    .text_color(muted_foreground)
+                                                    .child(meta),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    div().flex().items_center().gap_1().children(
+                                        badges.into_iter().map(|badge| {
+                                            let color = match badge {
+                                                sidebar::Badge::Pinned => blue,
+                                                sidebar::Badge::Snoozed => warning,
+                                                sidebar::Badge::Settled => green,
+                                            };
+                                            div()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .text_color(color)
+                                                .child(badge.label())
+                                        }),
+                                    ),
+                                ),
+                        )
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.select_thread(&id, window, cx)
                         })),
                 ));
             }
-            projects.push(row);
+            projects.push(group);
         }
 
         let mut conversation = div()
@@ -2980,14 +3078,6 @@ impl Render for NativeApp {
                     .items_center()
                     .gap_3()
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted_foreground)
-                            .max_w(px(360.))
-                            .truncate()
-                            .child(self.status.clone()),
-                    )
-                    .child(
                         Button::new("commands")
                             .debug_selector(|| "commands".into())
                             .label("Commands ⌘K")
@@ -3050,92 +3140,36 @@ impl Render for NativeApp {
                             .w(px(288.))
                             .flex_shrink_0()
                             .h_full()
-                            .overflow_y_scroll()
-                            .p_3()
-                            .gap_2()
                             .bg(sidebar)
                             .text_color(sidebar_foreground)
                             .border_r_1()
                             .border_color(sidebar_border)
                             .child(
                                 div()
-                                    .px_1()
-                                    .pb_1()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(muted_foreground)
-                                    .child("CONNECTION"),
-                            )
-                            .child(Input::new(&self.server))
-                            .child(Input::new(&self.pairing))
-                            .child(
-                                div().flex().flex_wrap().gap_2()
-                                    .child(
-                                        Button::new("pair")
-                                            .debug_selector(|| "pair".into())
-                                            .label("Pair and connect")
-                                            .primary()
-                                            .on_click(cx.listener(|app, _, window, cx| app.pair(window, cx))),
-                                    )
-                                    .child(
-                                        Button::new("remember-credential")
-                                            .debug_selector(|| "remember-credential".into())
-                                            .label("Remember in Keychain")
-                                            .ghost()
-                                            .on_click(cx.listener(|app, _, _, cx| app.remember_credential(cx))),
-                                    )
-                                    .child(
-                                        Button::new("load-credential")
-                                            .debug_selector(|| "load-credential".into())
-                                            .label("Connect remembered")
-                                            .ghost()
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.credential_operation(credentials::Operation::Load, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("forget-credential")
-                                            .debug_selector(|| "forget-credential".into())
-                                            .label("Forget credential")
-                                            .ghost()
-                                            .on_click(cx.listener(|app, _, _, cx| app.forget_credential(cx))),
-                                    )
-                                    .child(
-                                        Button::new("connect")
-                                            .label("Connect / retry")
-                                            .secondary()
-                                            .on_click(cx.listener(|app, _, _, cx| app.connect(cx))),
-                                    )
-                                    .child(
-                                        Button::new("disconnect")
-                                            .label("Disconnect")
-                                            .ghost()
-                                            .on_click(cx.listener(|app, _, _, cx| app.disconnect(cx))),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .px_1()
-                                    .pt_2()
-                                    .pb_1()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(muted_foreground)
-                                    .child("THREADS"),
-                            )
-                            .child(
-                                div().flex().gap_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .p_2()
                                     .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
                                     .child(
                                         Button::new("search")
                                             .label("Search")
-                                            .secondary()
+                                            .ghost()
+                                            .small()
                                             .on_click(cx.listener(|app, _, _, cx| app.search_threads(cx))),
+                                    )
+                                    .child(
+                                        Button::new("new-thread")
+                                            .label("New")
+                                            .primary()
+                                            .small()
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.execute_command(palette::Command::NewThread, window, cx)
+                                            })),
                                     ),
                             )
-                            .child(search_results)
                             .child(
-                                div().flex().flex_wrap().gap_1().children(
+                                div().flex().flex_wrap().gap_1().px_2().pb_2().children(
                                     [
                                         ("active-view", "Active", sidebar::View::Active),
                                         ("settled-view", "Settled", sidebar::View::Settled),
@@ -3165,7 +3199,124 @@ impl Render for NativeApp {
                                     }),
                                 ),
                             )
-                            .child(div().flex().flex_col().gap_1().children(projects)),
+                            .child(
+                                div()
+                                    .id("sidebar-list")
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .px_2()
+                                    .pb_2()
+                                    .child(search_results)
+                                    .when(self.shell.projects.is_empty(), |view| {
+                                        view.child(
+                                            div()
+                                                .p_3()
+                                                .text_sm()
+                                                .text_color(muted_foreground)
+                                                .child("No projects yet"),
+                                        )
+                                    })
+                                    .children(projects),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_2()
+                                    .border_t_1()
+                                    .border_color(sidebar_border)
+                                    .child(
+                                        Button::new("connection-toggle")
+                                            .ghost()
+                                            .selected(self.connection_expanded)
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .w_full()
+                                                    .child(
+                                                        div()
+                                                            .w(px(8.))
+                                                            .h(px(8.))
+                                                            .rounded_full()
+                                                            .bg(if self.commands.is_some() {
+                                                                green
+                                                            } else {
+                                                                muted_foreground
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .child(self.status.clone()),
+                                                    )
+                                                    .child(div().text_color(muted_foreground).child(
+                                                        if self.connection_expanded { "▾" } else { "▸" },
+                                                    )),
+                                            )
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.connection_expanded = !app.connection_expanded;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .when(self.connection_expanded, |view| {
+                                        view.child(Input::new(&self.server))
+                                            .child(Input::new(&self.pairing))
+                                            .child(
+                                                div().flex().flex_wrap().gap_2()
+                                                    .child(
+                                                        Button::new("pair")
+                                                            .debug_selector(|| "pair".into())
+                                                            .label("Pair and connect")
+                                                            .primary()
+                                                            .on_click(cx.listener(|app, _, window, cx| app.pair(window, cx))),
+                                                    )
+                                                    .child(
+                                                        Button::new("remember-credential")
+                                                            .debug_selector(|| "remember-credential".into())
+                                                            .label("Remember in Keychain")
+                                                            .ghost()
+                                                            .on_click(cx.listener(|app, _, _, cx| app.remember_credential(cx))),
+                                                    )
+                                                    .child(
+                                                        Button::new("load-credential")
+                                                            .debug_selector(|| "load-credential".into())
+                                                            .label("Connect remembered")
+                                                            .ghost()
+                                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                                app.credential_operation(credentials::Operation::Load, cx)
+                                                            })),
+                                                    )
+                                                    .child(
+                                                        Button::new("forget-credential")
+                                                            .debug_selector(|| "forget-credential".into())
+                                                            .label("Forget credential")
+                                                            .ghost()
+                                                            .on_click(cx.listener(|app, _, _, cx| app.forget_credential(cx))),
+                                                    )
+                                                    .child(
+                                                        Button::new("connect")
+                                                            .label("Connect / retry")
+                                                            .secondary()
+                                                            .on_click(cx.listener(|app, _, _, cx| app.connect(cx))),
+                                                    )
+                                                    .child(
+                                                        Button::new("disconnect")
+                                                            .label("Disconnect")
+                                                            .ghost()
+                                                            .on_click(cx.listener(|app, _, _, cx| app.disconnect(cx))),
+                                                    ),
+                                            )
+                                    }),
+                            ),
                     )
                     // Workspace
                     .child(

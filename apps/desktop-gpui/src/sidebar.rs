@@ -48,6 +48,63 @@ pub fn expiry(threads: &[Thread], now: DateTime<Utc>) -> Option<std::time::Durat
         .and_then(|until| (until.with_timezone(&Utc) - now).to_std().ok())
 }
 
+/// A short status marker a thread row shows beside its title.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Badge {
+    Pinned,
+    Snoozed,
+    Settled,
+}
+
+impl Badge {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pinned => "Pinned",
+            Self::Snoozed => "Snoozed",
+            Self::Settled => "Settled",
+        }
+    }
+}
+
+/// Every status marker the row for `thread` should show, in display order.
+pub fn badges(thread: &Thread, now: DateTime<Utc>) -> Vec<Badge> {
+    let mut badges = Vec::new();
+    if thread.pinned_at.is_some() {
+        badges.push(Badge::Pinned);
+    }
+    if snoozed(thread, now) {
+        badges.push(Badge::Snoozed);
+    }
+    if thread.settled_override.as_deref() == Some("settled") {
+        badges.push(Badge::Settled);
+    }
+    badges
+}
+
+/// The sidebar name for a project: its workspace directory name, falling back
+/// to the title when the path has no usable segment.
+pub fn project_name<'a>(title: &'a str, workspace_root: &'a str) -> &'a str {
+    workspace_root
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(title)
+}
+
+/// Secondary metadata for a thread row: its branch, else its selected model.
+pub fn thread_meta(thread: &Thread) -> Option<String> {
+    if let Some(branch) = thread.branch.as_deref().filter(|branch| !branch.is_empty()) {
+        return Some(branch.to_owned());
+    }
+    let instance = thread.model_selection["instanceId"].as_str()?;
+    let model = thread.model_selection["model"].as_str().unwrap_or("");
+    Some(if model.is_empty() {
+        instance.to_owned()
+    } else {
+        format!("{instance} · {model}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +144,41 @@ mod tests {
         assert!(!belongs(&thread, View::Active, now));
         thread.archived_at = None;
         assert!(belongs(&thread, View::Active, now));
+    }
+
+    #[test]
+    fn rows_expose_only_live_status_markers() {
+        let now = Utc::now();
+        let mut thread = thread();
+        assert!(badges(&thread, now).is_empty());
+        thread.pinned_at = Some(now.to_rfc3339());
+        thread.snoozed_until = Some((now + chrono::Duration::hours(1)).to_rfc3339());
+        thread.settled_override = Some("settled".into());
+        assert_eq!(
+            badges(&thread, now),
+            vec![Badge::Pinned, Badge::Snoozed, Badge::Settled]
+        );
+        // An expired snooze drops its marker without a server mutation.
+        thread.snoozed_until = Some((now - chrono::Duration::hours(1)).to_rfc3339());
+        assert_eq!(badges(&thread, now), vec![Badge::Pinned, Badge::Settled]);
+    }
+
+    #[test]
+    fn project_name_falls_back_to_the_title() {
+        assert_eq!(project_name("Fixture", "/tmp/fixture/"), "fixture");
+        assert_eq!(project_name("My Project", "/"), "My Project");
+        assert_eq!(project_name("My Project", ""), "My Project");
+    }
+
+    #[test]
+    fn thread_meta_prefers_branch_and_falls_back_to_model() {
+        let mut thread = thread();
+        thread.model_selection = json!({"instanceId": "codex", "model": "gpt-5.4"});
+        assert_eq!(thread_meta(&thread).as_deref(), Some("codex · gpt-5.4"));
+        thread.branch = Some("t3code/feature".into());
+        assert_eq!(thread_meta(&thread).as_deref(), Some("t3code/feature"));
+        thread.branch = None;
+        thread.model_selection = json!({});
+        assert_eq!(thread_meta(&thread), None);
     }
 }
