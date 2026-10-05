@@ -3,7 +3,9 @@
 Experimental Rust/GPUI desktop client for this maintained fork. Development stays
 on `t3code/port-t3code-to-rust-gpui`; it is not a replacement for the shipping app.
 It uses [GPUI](https://gpui.rs), the UI framework from Zed, and builds its interface
-from [GPUI Kit](https://gpui-kit.com) components.
+from [GPUI Kit](https://gpui-kit.com) components. The interface follows Zed's
+design language and installs Zed's `One Dark` palette from
+`themes/one-dark.json` via `src/theme.rs`.
 
 ## Build and run
 

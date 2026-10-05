@@ -1,12 +1,13 @@
+use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    Disableable,
-    button::Button,
+    ActiveTheme as _, Disableable, Sizable,
+    button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState, Position, Textarea, TextareaState},
     text::TextView,
 };
 use gpui_kit::{
-    App, Bounds, Context, Entity, FocusHandle, KeyBinding, Subscription, Task, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyBinding, Subscription, Task, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
@@ -36,6 +37,7 @@ gpui_kit::actions!(
 
 #[cfg(test)]
 mod ui_tests;
+mod theme;
 
 fn single_line_input(window: &mut Window, cx: &mut Context<InputState>) -> InputState {
     // GPUI's single-line shaper panics if native text insertion includes a newline.
@@ -2437,6 +2439,40 @@ impl Drop for NativeApp {
 
 impl Render for NativeApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Zed's One Dark surfaces, resolved once so the element tree reads as
+        // one palette instead of a field of literals.
+        let background = cx.theme().background;
+        let foreground = cx.theme().foreground;
+        let muted_foreground = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let group_box = cx.theme().group_box;
+        let sidebar = cx.theme().sidebar;
+        let sidebar_border = cx.theme().sidebar_border;
+        let sidebar_foreground = cx.theme().sidebar_foreground;
+        let title_bar = cx.theme().title_bar;
+        let title_bar_border = cx.theme().title_bar_border;
+        let danger = cx.theme().danger;
+        let selection = cx.theme().selection;
+        let popover = cx.theme().popover;
+
+        let active_thread_title = self
+            .detail
+            .thread
+            .as_ref()
+            .and_then(|detail| detail["title"].as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.selected_thread.as_ref().and_then(|id| {
+                    self.shell
+                        .threads
+                        .iter()
+                        .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                        .find(|thread| &thread.id == id)
+                        .map(|thread| thread.title.clone())
+                })
+            })
+            .unwrap_or_else(|| "No thread selected".to_owned());
+
         let mut projects = Vec::new();
         for project in &self.shell.projects {
             let project_id = project.id.clone();
@@ -2447,87 +2483,94 @@ impl Render for NativeApp {
                 &project.id,
                 project.default_model_selection.as_ref(),
             );
-            let mut row = div().flex().flex_col().gap_2().child(
-                Button::new(gpui_kit::SharedString::from(format!("project-{project_id}")))
-                    .label(title.clone())
-                    .debug_selector({
-                        let id = project_id.clone();
-                        move || format!("project-{id}")
-                    })
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        if app.selected_project.as_ref() != Some(&project_id) {
-                            app.model_override = None;
-                            app.provider.update(cx, |input, cx| {
-                                input.set_value(
-                                    default_selection["instanceId"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .to_owned(),
-                                    window,
-                                    cx,
-                                )
-                            });
-                            app.model.update(cx, |input, cx| {
-                                input.set_value(
-                                    default_selection["model"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .to_owned(),
-                                    window,
-                                    cx,
-                                )
-                            });
-                            app.action_task = None;
-                            app.action_busy = false;
-                            app.action_edit_id = None;
-                            app.confirm_action_delete = None;
-                            if let Some(previous) = app.selected_thread.take() {
-                                app.drafts.insert(
-                                    previous.clone(),
-                                    app.composer.read(cx).value().to_string(),
-                                );
-                                if let Some(store) = &mut app.draft_store {
-                                    store.set(
-                                        &app.environment_scope,
-                                        &previous,
+            let project_selected = self.selected_project.as_ref() == Some(&project_id);
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    Button::new(gpui_kit::SharedString::from(format!("project-{project_id}")))
+                        .label(title.clone())
+                        .ghost()
+                        .selected(project_selected)
+                        .debug_selector({
+                            let id = project_id.clone();
+                            move || format!("project-{id}")
+                        })
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            if app.selected_project.as_ref() != Some(&project_id) {
+                                app.model_override = None;
+                                app.provider.update(cx, |input, cx| {
+                                    input.set_value(
+                                        default_selection["instanceId"]
+                                            .as_str()
+                                            .unwrap_or_default()
+                                            .to_owned(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                                app.model.update(cx, |input, cx| {
+                                    input.set_value(
+                                        default_selection["model"]
+                                            .as_str()
+                                            .unwrap_or_default()
+                                            .to_owned(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                                app.action_task = None;
+                                app.action_busy = false;
+                                app.action_edit_id = None;
+                                app.confirm_action_delete = None;
+                                if let Some(previous) = app.selected_thread.take() {
+                                    app.drafts.insert(
+                                        previous.clone(),
                                         app.composer.read(cx).value().to_string(),
                                     );
+                                    if let Some(store) = &mut app.draft_store {
+                                        store.set(
+                                            &app.environment_scope,
+                                            &previous,
+                                            app.composer.read(cx).value().to_string(),
+                                        );
+                                    }
+                                    app.schedule_draft_save(cx);
                                 }
-                                app.schedule_draft_save(cx);
+                                app.detail = thread::ThreadDetail::default();
+                                app.setup_progress = None;
+                                app.confirm_delete = None;
+                                app.composer
+                                    .update(cx, |input, cx| input.set_value("", window, cx));
+                                if let Some(sender) = &app.commands {
+                                    let _ = sender.try_send(connection::Command::Unsubscribe(
+                                        "worktree-setup".into(),
+                                    ));
+                                    let _ = sender.try_send(connection::Command::SelectThread(None));
+                                }
                             }
-                            app.detail = thread::ThreadDetail::default();
-                            app.setup_progress = None;
-                            app.confirm_delete = None;
-                            app.composer
-                                .update(cx, |input, cx| input.set_value("", window, cx));
-                            if let Some(sender) = &app.commands {
-                                let _ = sender.try_send(connection::Command::Unsubscribe(
-                                    "worktree-setup".into(),
-                                ));
-                                let _ = sender.try_send(connection::Command::SelectThread(None));
-                            }
-                        }
-                        app.selected_project = Some(project_id.clone());
-                        app.worktree_task = None;
-                        app.worktree_busy = false;
-                        app.worktree_epoch += 1;
-                        app.refs.clear();
-                        app.worktree_outcome = None;
-                        app.new_thread_checkout = None;
-                        app.confirm_worktree_removal = None;
-                        app.confirm_project_removal = None;
-                        app.file_entries.clear();
-                        app.file_listing_task = None;
-                        app.file_listing_epoch += 1;
-                        app.content_results = None;
-                        app.title
-                            .update(cx, |input, cx| input.set_value(title.clone(), window, cx));
-                        app.workspace.update(cx, |input, cx| {
-                            input.set_value(workspace.clone(), window, cx)
-                        });
-                        cx.notify();
-                    })),
-            );
+                            app.selected_project = Some(project_id.clone());
+                            app.worktree_task = None;
+                            app.worktree_busy = false;
+                            app.worktree_epoch += 1;
+                            app.refs.clear();
+                            app.worktree_outcome = None;
+                            app.new_thread_checkout = None;
+                            app.confirm_worktree_removal = None;
+                            app.confirm_project_removal = None;
+                            app.file_entries.clear();
+                            app.file_listing_task = None;
+                            app.file_listing_epoch += 1;
+                            app.content_results = None;
+                            app.title
+                                .update(cx, |input, cx| input.set_value(title.clone(), window, cx));
+                            app.workspace.update(cx, |input, cx| {
+                                input.set_value(workspace.clone(), window, cx)
+                            });
+                            cx.notify();
+                        })),
+                );
             for draft in self.pending_threads.iter().filter(|draft| {
                 draft.thread.project_id == project.id
                     && !self
@@ -2537,13 +2580,15 @@ impl Render for NativeApp {
                         .any(|thread| thread.id == draft.thread.id)
             }) {
                 let id = draft.thread.id.clone();
-                row = row.child(
+                row = row.child(div().pl_4().child(
                     Button::new(gpui_kit::SharedString::from(format!("draft-{id}")))
                         .label(format!("{} · unsent", draft.thread.title))
+                        .ghost()
+                        .selected(self.selected_thread.as_ref() == Some(&id))
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.select_thread(&id, window, cx)
                         })),
-                );
+                ));
             }
             let threads = if self.sidebar_view == sidebar::View::Archived {
                 &self.archived_shell.threads
@@ -2569,29 +2614,35 @@ impl Render for NativeApp {
                         ""
                     }
                 );
-                row = row.child(
+                row = row.child(div().pl_4().child(
                     Button::new(gpui_kit::SharedString::from(format!("thread-{id}")))
                         .label(label)
+                        .ghost()
+                        .selected(self.selected_thread.as_ref() == Some(&id))
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.select_thread(&id, window, cx)
                         })),
-                );
+                ));
             }
             projects.push(row);
         }
+
         let mut conversation = div()
             .id("conversation")
-            .min_h(px(240.))
+            .min_h(px(140.))
             .flex_shrink_0()
             .flex()
             .flex_col()
             .flex_1()
             .overflow_y_scroll()
-            .gap_4()
-            .p_4();
+            .gap_2()
+            .p_3();
         if let Some(detail) = &self.detail.thread {
-            conversation =
-                conversation.child(detail["title"].as_str().unwrap_or("Thread").to_owned());
+            conversation = conversation.child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(detail["title"].as_str().unwrap_or("Thread").to_owned()),
+            );
             if let Some(messages) = detail["messages"].as_array() {
                 for message in messages {
                     let id = gpui_kit::SharedString::from(format!(
@@ -2603,16 +2654,24 @@ impl Render for NativeApp {
                         div()
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .child(format!(
-                                "{}{}",
-                                message["role"].as_str().unwrap_or("message"),
-                                if message["streaming"] == true {
-                                    " · streaming"
-                                } else {
-                                    ""
-                                }
-                            ))
+                            .gap_1()
+                            .p_2()
+                            .rounded_md()
+                            .bg(group_box)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child(format!(
+                                        "{}{}",
+                                        message["role"].as_str().unwrap_or("message"),
+                                        if message["streaming"] == true {
+                                            " · streaming"
+                                        } else {
+                                            ""
+                                        }
+                                    )),
+                            )
                             .child(TextView::markdown(id, text)),
                     );
                 }
@@ -2628,6 +2687,7 @@ impl Render for NativeApp {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .text_color(muted_foreground)
                             .child(format!(
                                 "{} · {}",
                                 activity["tone"].as_str().unwrap_or("activity"),
@@ -2638,11 +2698,13 @@ impl Render for NativeApp {
                 }
             }
             if let Some(session) = detail.get("session").filter(|s| !s.is_null()) {
-                conversation = conversation.child(format!(
-                    "Session: {} · {}",
-                    session["status"].as_str().unwrap_or("unknown"),
-                    session["lastError"].as_str().unwrap_or("")
-                ));
+                conversation = conversation.child(
+                    div().text_color(muted_foreground).child(format!(
+                        "Session: {} · {}",
+                        session["status"].as_str().unwrap_or("unknown"),
+                        session["lastError"].as_str().unwrap_or("")
+                    )),
+                );
             }
         } else if self
             .pending_threads
@@ -2666,70 +2728,137 @@ impl Render for NativeApp {
         } else {
             conversation = conversation.child("Select a thread or create a new one");
         }
-        let mut search_results = div().flex().flex_col().gap_2();
+
+        let mut search_results = div().flex().flex_col().gap_1();
         for result in &self.search_results {
             if let Some(id) = result["threadId"].as_str() {
                 let id = id.to_owned();
                 search_results = search_results.child(
                     Button::new(gpui_kit::SharedString::from(format!("search-{id}")))
                         .label(result["snippet"].as_str().unwrap_or("Match").to_owned())
+                        .ghost()
                         .on_click(cx.listener(move |app, _, window, cx| {
                             app.select_thread(&id, window, cx)
                         })),
                 );
             }
         }
-        let palette =
-            self.palette_open.then(|| {
-                let entries = palette::matching(
-                    &self.palette_query.read(cx).value(),
-                    self.selected_thread.is_some(),
-                );
-                div()
-                    .id("command-palette")
-                    .key_context("NativePalette")
-                    .absolute()
-                    .top(px(60.))
-                    .left(px(300.))
-                    .w(px(650.))
-                    .max_h(px(600.))
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_4()
-                    .bg(rgb(0x242831))
-                    .border_1()
-                    .border_color(rgb(0x525866))
-                    .shadow_lg()
-                    .child(div().flex().justify_between().child("Commands").child(
-                        Button::new("close-palette").label("Close").on_click(
+
+        let palette = self.palette_open.then(|| {
+            let entries = palette::matching(
+                &self.palette_query.read(cx).value(),
+                self.selected_thread.is_some(),
+            );
+            div()
+                .id("command-palette")
+                .key_context("NativePalette")
+                .absolute()
+                .top(px(72.))
+                .left(px(320.))
+                .w(px(640.))
+                .max_h(px(600.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded_lg()
+                .bg(popover)
+                .border_1()
+                .border_color(border)
+                .shadow_lg()
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .text_sm()
+                        .text_color(muted_foreground)
+                        .child("Commands")
+                        .child(Button::new("close-palette").label("Close").ghost().small().on_click(
                             cx.listener(|app, _, window, cx| app.close_palette(window, cx)),
-                        ),
-                    ))
-                    .child(Input::new(&self.palette_query))
-                    .when(entries.is_empty(), |view| {
-                        view.child("No matching commands")
-                    })
-                    .children(entries.into_iter().enumerate().map(|(index, entry)| {
-                        let command = entry.command;
-                        Button::new(gpui_kit::SharedString::from(format!("palette-{index}")))
-                            .debug_selector(move || format!("palette-{index}"))
-                            .label(format!(
-                                "{}{}",
-                                if index == self.palette_index {
-                                    "› "
-                                } else {
-                                    ""
-                                },
-                                entry.label
-                            ))
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.close_palette(window, cx);
-                                app.execute_command(command, window, cx);
-                            }))
-                    }))
-            });
+                        )),
+                )
+                .child(Input::new(&self.palette_query))
+                .when(entries.is_empty(), |view| {
+                    view.child(
+                        div()
+                            .text_color(muted_foreground)
+                            .child("No matching commands"),
+                    )
+                })
+                .children(entries.into_iter().enumerate().map(|(index, entry)| {
+                    let command = entry.command;
+                    Button::new(gpui_kit::SharedString::from(format!("palette-{index}")))
+                        .debug_selector(move || format!("palette-{index}"))
+                        .ghost()
+                        .selected(index == self.palette_index)
+                        .label(format!(
+                            "{}{}",
+                            if index == self.palette_index {
+                                "› "
+                            } else {
+                                ""
+                            },
+                            entry.label
+                        ))
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.close_palette(window, cx);
+                            app.execute_command(command, window, cx);
+                        }))
+                }))
+        });
+
+        let title_bar_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .flex_shrink_0()
+            .h(px(38.))
+            .px_3()
+            .bg(title_bar)
+            .border_b_1()
+            .border_color(title_bar_border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .min_w_0()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("T3 Code"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_foreground)
+                            .truncate()
+                            .child(active_thread_title),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_foreground)
+                            .max_w(px(360.))
+                            .truncate()
+                            .child(self.status.clone()),
+                    )
+                    .child(
+                        Button::new("commands")
+                            .debug_selector(|| "commands".into())
+                            .label("Commands ⌘K")
+                            .ghost()
+                            .small()
+                            .on_click(
+                                cx.listener(|app, _, window, cx| app.toggle_palette(window, cx)),
+                            ),
+                    ),
+            );
+
         div()
             .relative()
             .key_context("NativeApp")
@@ -2762,403 +2891,532 @@ impl Render for NativeApp {
                 cx.listener(|app, _: &TogglePin, _, cx| app.toggle_thread_property(true, cx)),
             )
             .flex()
+            .flex_col()
             .size_full()
-            .bg(rgb(0x16181d))
-            .text_color(rgb(0xe5e7eb))
+            .bg(background)
+            .text_color(foreground)
+            .child(title_bar_row)
             .child(
                 div()
-                    .id("sidebar")
                     .flex()
-                    .flex_col()
-                    .w(px(280.)).flex_shrink_0()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .p_3()
-                    .gap_3()
-                    .child("T3 Code · Native")
-                    .child(
-                        Button::new("commands")
-                            .debug_selector(|| "commands".into())
-                            .label("Commands ⌘K")
-                            .on_click(
-                                cx.listener(|app, _, window, cx| app.toggle_palette(window, cx)),
-                            ),
-                    )
-                    .child(Input::new(&self.server))
-                    .child(Input::new(&self.pairing))
-                    .child(
-                        Button::new("pair")
-                            .debug_selector(|| "pair".into())
-                            .label("Pair and connect")
-                            .on_click(cx.listener(|app, _, window, cx| app.pair(window, cx))),
-                    )
-                    .child(
-                        Button::new("remember-credential")
-                            .debug_selector(|| "remember-credential".into())
-                            .label("Remember in Keychain")
-                            .on_click(cx.listener(|app, _, _, cx| app.remember_credential(cx))),
-                    )
-                    .child(
-                        Button::new("load-credential")
-                            .debug_selector(|| "load-credential".into())
-                            .label("Connect remembered")
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.credential_operation(credentials::Operation::Load, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("forget-credential")
-                            .debug_selector(|| "forget-credential".into())
-                            .label("Forget credential")
-                            .on_click(cx.listener(|app, _, _, cx| app.forget_credential(cx))),
-                    )
-                    .child(
-                        Button::new("connect")
-                            .label("Connect / retry")
-                            .on_click(cx.listener(|app, _, _, cx| app.connect(cx))),
-                    )
-                    .child(
-                        Button::new("disconnect")
-                            .label("Disconnect")
-                            .on_click(cx.listener(|app, _, _, cx| app.disconnect(cx))),
-                    )
-                    .child(Input::new(&self.search))
-                    .child(
-                        Button::new("search")
-                            .label("Search history")
-                            .on_click(cx.listener(|app, _, _, cx| app.search_threads(cx))),
-                    )
-                    .child(search_results)
-                    .child(
-                        div().flex().flex_wrap().gap_2().children(
-                            [
-                                ("active-view", "Active", sidebar::View::Active),
-                                ("settled-view", "Settled", sidebar::View::Settled),
-                                ("snoozed-view", "Snoozed", sidebar::View::Snoozed),
-                                ("archived-view", "Archived", sidebar::View::Archived),
-                            ]
-                            .into_iter()
-                            .map(|(id, label, view)| {
-                                Button::new(id)
-                                    .debug_selector(move || id.into())
-                                    .label(label)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.sidebar_view = view;
-                                        if view == sidebar::View::Archived {
-                                            app.perform(
-                                                "orchestration.getArchivedShellSnapshot",
-                                                json!({}),
-                                                None,
-                                                cx,
-                                            );
-                                        }
-                                        cx.notify();
-                                    }))
-                            }),
-                        ),
-                    )
-                    .children(projects),
-            )
-            .child(
-                div()
-                    .id("native-workspace").min_w_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
                     .flex_1()
-                    .h_full()
-                    .p_3()
-                    .gap_3()
-                    .child(div().min_w_0().whitespace_normal().child(self.status.clone()))
-                    .children(
-                        self.storage_error
-                            .clone()
-                            .map(|error| div().text_color(rgb(0xfca5a5)).child(error)),
-                    )
+                    .min_h_0()
+                    // Sidebar
                     .child(
                         div()
+                            .id("sidebar")
                             .flex()
+                            .flex_col()
+                            .w(px(288.))
+                            .flex_shrink_0()
+                            .h_full()
+                            .overflow_y_scroll()
+                            .p_3()
                             .gap_2()
-                            .child(Input::new(&self.title))
-                            .child(Input::new(&self.workspace)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(Button::new("add-project").label("Add project").on_click(
-                                cx.listener(|app, _, window, cx| {
-                                    app.execute_command(palette::Command::AddProject, window, cx)
-                                }),
-                            ))
+                            .bg(sidebar)
+                            .text_color(sidebar_foreground)
+                            .border_r_1()
+                            .border_color(sidebar_border)
                             .child(
-                                Button::new("rename-project")
-                                    .debug_selector(|| "rename-project".into())
-                                    .label("Rename project")
-                                    .on_click(
-                                        cx.listener(|app, _, _, cx| app.update_project(false, cx)),
-                                    ),
+                                div()
+                                    .px_1()
+                                    .pb_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(muted_foreground)
+                                    .child("CONNECTION"),
                             )
+                            .child(Input::new(&self.server))
+                            .child(Input::new(&self.pairing))
                             .child(
-                                Button::new("remove-project")
-                                    .debug_selector(|| "remove-project".into())
-                                    .label("Remove project")
-                                    .on_click(
-                                        cx.listener(|app, _, _, cx| app.update_project(true, cx)),
-                                    ),
-                            )
-                            .child(Button::new("new-thread").label("New thread").on_click(
-                                cx.listener(|app, _, window, cx| {
-                                    app.execute_command(palette::Command::NewThread, window, cx)
-                                }),
-                            ))
-                            .child(
-                                Button::new("rename")
-                                    .debug_selector(|| "rename".into())
-                                    .label("Rename thread")
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.lifecycle("thread.meta.update", cx)
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div().flex().flex_wrap().gap_2().children(
-                            [
-                                ("archive", "Archive", "thread.archive"),
-                                ("unarchive", "Unarchive", "thread.unarchive"),
-                                ("settle", "Settle", "thread.settle"),
-                                ("unsettle", "Unsettle", "thread.unsettle"),
-                                ("snooze", "Snooze 1h", "thread.snooze"),
-                                ("unsnooze", "Unsnooze", "thread.unsnooze"),
-                                ("pin", "Pin", "thread.pin"),
-                                ("unpin", "Unpin", "thread.unpin"),
-                                ("delete", "Delete thread", "thread.delete"),
-                            ]
-                            .into_iter()
-                            .map(|(id, label, kind)| {
-                                Button::new(id)
-                                    .debug_selector(move || id.into())
-                                    .label(label)
-                                    .on_click(
-                                        cx.listener(move |app, _, window, cx| {if kind=="thread.delete" && app.pending_threads.iter().any(|draft|Some(&draft.thread.id)==app.selected_thread.as_ref()){app.discard_pending(window,cx);}else{app.lifecycle(kind,cx);}}),
+                                div().flex().flex_wrap().gap_2()
+                                    .child(
+                                        Button::new("pair")
+                                            .debug_selector(|| "pair".into())
+                                            .label("Pair and connect")
+                                            .primary()
+                                            .on_click(cx.listener(|app, _, window, cx| app.pair(window, cx))),
                                     )
-                            }),
-                        ),
+                                    .child(
+                                        Button::new("remember-credential")
+                                            .debug_selector(|| "remember-credential".into())
+                                            .label("Remember in Keychain")
+                                            .ghost()
+                                            .on_click(cx.listener(|app, _, _, cx| app.remember_credential(cx))),
+                                    )
+                                    .child(
+                                        Button::new("load-credential")
+                                            .debug_selector(|| "load-credential".into())
+                                            .label("Connect remembered")
+                                            .ghost()
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.credential_operation(credentials::Operation::Load, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("forget-credential")
+                                            .debug_selector(|| "forget-credential".into())
+                                            .label("Forget credential")
+                                            .ghost()
+                                            .on_click(cx.listener(|app, _, _, cx| app.forget_credential(cx))),
+                                    )
+                                    .child(
+                                        Button::new("connect")
+                                            .label("Connect / retry")
+                                            .secondary()
+                                            .on_click(cx.listener(|app, _, _, cx| app.connect(cx))),
+                                    )
+                                    .child(
+                                        Button::new("disconnect")
+                                            .label("Disconnect")
+                                            .ghost()
+                                            .on_click(cx.listener(|app, _, _, cx| app.disconnect(cx))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px_1()
+                                    .pt_2()
+                                    .pb_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(muted_foreground)
+                                    .child("THREADS"),
+                            )
+                            .child(
+                                div().flex().gap_2()
+                                    .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
+                                    .child(
+                                        Button::new("search")
+                                            .label("Search")
+                                            .secondary()
+                                            .on_click(cx.listener(|app, _, _, cx| app.search_threads(cx))),
+                                    ),
+                            )
+                            .child(search_results)
+                            .child(
+                                div().flex().flex_wrap().gap_1().children(
+                                    [
+                                        ("active-view", "Active", sidebar::View::Active),
+                                        ("settled-view", "Settled", sidebar::View::Settled),
+                                        ("snoozed-view", "Snoozed", sidebar::View::Snoozed),
+                                        ("archived-view", "Archived", sidebar::View::Archived),
+                                    ]
+                                    .into_iter()
+                                    .map(|(id, label, view)| {
+                                        Button::new(id)
+                                            .debug_selector(move || id.into())
+                                            .label(label)
+                                            .ghost()
+                                            .small()
+                                            .selected(self.sidebar_view == view)
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.sidebar_view = view;
+                                                if view == sidebar::View::Archived {
+                                                    app.perform(
+                                                        "orchestration.getArchivedShellSnapshot",
+                                                        json!({}),
+                                                        None,
+                                                        cx,
+                                                    );
+                                                }
+                                                cx.notify();
+                                            }))
+                                    }),
+                                ),
+                            )
+                            .child(div().flex().flex_col().gap_1().children(projects)),
                     )
+                    // Workspace
                     .child(
                         div()
+                            .id("native-workspace")
+                            .min_w_0()
+                            .overflow_y_scroll()
                             .flex()
+                            .flex_col()
+                            .flex_1()
+                            .h_full()
+                            .p_3()
                             .gap_2()
-                            .child(Input::new(&self.custom_snooze))
+                            .children(
+                                self.storage_error
+                                    .clone()
+                                    .map(|error| div().text_color(danger).child(error)),
+                            )
                             .child(
-                                Button::new("custom-snooze")
-                                    .label("Custom snooze")
-                                    .on_click(cx.listener(|app, _, _, cx| app.snooze_custom(cx))),
-                            ),
-                    )
-                    .when_some(self.selected_setup(),|view,setup| {
-                        let id=setup.thread_id.clone();let show=self.setup_expanded;
-                        view.child(div().w_full().min_w_0().whitespace_normal().flex().flex_col().gap_1()
-                            .child(format!("Worktree setup · {}{}",setup.phase,setup.branch.as_ref().map_or(String::new(),|branch|format!(" · {branch}"))))
-                            .child(Button::new("setup-details").label(if show{"Hide setup details"}else{"Show setup details"}).on_click(cx.listener(|app,_,_,cx|{app.setup_expanded= !app.setup_expanded;cx.notify();})))
-                            .when_some(setup.worktree_path.clone(),|view,path|view.child(Button::new("copy-worktree-path").label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()))))))
-                            .children(setup.error.clone())
-                            .when(show,|view|view.children(setup.stages.iter().map(|stage|div().w_full().min_w_0().whitespace_normal().flex().flex_col().child(format!("{} · {}{}",stage.id,stage.status,stage.percent.map_or(String::new(),|percent|format!(" {percent}%")))).children(stage.detail.clone()).children(stage.tail.clone()))))
-                            .when(setup.phase=="running",|view|view.child(Button::new("setup-cancel").label("Cancel worktree setup").on_click(cx.listener(move|app,_,_,cx|app.perform("worktreeSetup.cancel",json!({"threadId":id}),None,cx)))))
-                        )
-                    })
-                    .child(Button::new("project-actions").label("Project actions").on_click(cx.listener(|app,_,_,cx|{app.project_actions_open=true;app.project_actions(None,cx);})))
-                    .when(self.project_actions_open,|view| {
-                        let scripts=self.selected_project.as_ref().and_then(|id|self.project_settings.as_ref().map(|settings|project_actions::resolve(settings,id,self.shell.projects.iter().find(|p|&p.id==id).map(|p|p.scripts.as_slice()).unwrap_or_default()))).unwrap_or_default();
-                        view.child(div().flex().flex_col().gap_2().min_w_0()
-                            .child("Actions for the selected project on this environment")
-                            .child(Input::new(&self.action_name)).child(Input::new(&self.action_command))
-                            .child(Button::new("action-setup").label(if self.action_setup{"Runs on worktree creation"}else{"Run manually"}).on_click(cx.listener(|app,_,_,cx|{app.action_setup= !app.action_setup;cx.notify();})))
-                            .child(Button::new("action-wait").label(if self.action_wait{"Wait before starting agent"}else{"Start agent while setup runs"}).on_click(cx.listener(|app,_,_,cx|{app.action_wait= !app.action_wait;cx.notify();})))
-                            .child(Button::new("action-save").debug_selector(||"action-save".into()).label("Save action").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.save_project_action(cx))))
-                            .child(Button::new("action-new").label("New action").on_click(cx.listener(|app,_,window,cx|{app.action_edit_id=None;app.confirm_action_delete=None;app.action_setup=false;app.action_wait=false;app.action_name.update(cx,|input,cx|input.set_value("",window,cx));app.action_command.update(cx,|input,cx|input.set_value("",window,cx));cx.notify();})))
-                            .children(scripts.into_iter().enumerate().map(|(index,script)| {
-                                let edit=script.clone();let id=script["id"].as_str().unwrap_or_default().to_owned();let confirm=self.confirm_action_delete.as_ref()==Some(&id);
-                                div().flex().flex_col().min_w_0().whitespace_normal().child(format!("{} · {}{}",script["name"].as_str().unwrap_or_default(),script["command"].as_str().unwrap_or_default(),if script["runOnWorktreeCreate"]==true{" · worktree setup"}else{""}))
-                                    .child(Button::new(gpui_kit::SharedString::from(format!("action-edit-{index}"))).label("Edit action").on_click(cx.listener(move|app,_,window,cx|{app.action_edit_id=edit["id"].as_str().map(str::to_owned);app.action_setup=edit["runOnWorktreeCreate"]==true;app.action_wait=edit["async"]==false;app.action_name.update(cx,|input,cx|input.set_value(edit["name"].as_str().unwrap_or_default().to_owned(),window,cx));app.action_command.update(cx,|input,cx|input.set_value(edit["command"].as_str().unwrap_or_default().to_owned(),window,cx));cx.notify();})))
-                                    .child(Button::new(gpui_kit::SharedString::from(format!("action-delete-{index}"))).label(if confirm{"Confirm delete action"}else{"Delete action"}).disabled(self.action_busy).on_click(cx.listener(move|app,_,_,cx|{if app.confirm_action_delete.as_ref()==Some(&id){app.project_actions(Some(json!({"operation":"delete","id":id})),cx);}else{app.confirm_action_delete=Some(id.clone());cx.notify();}})))
-                            }))
-                            .child(Button::new("project-default-save").label("Use selected provider and model for new threads").on_click(cx.listener(|app,_,_,cx|app.update_project_default(false,cx))))
-                            .child(Button::new("project-default-inherit").label("Use environment model default").on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"model-inherit"})),cx))))
-                            .child(Button::new("project-default-clear").label("Clear project model default").on_click(cx.listener(|app,_,_,cx|app.update_project_default(true,cx))))
-                            .child(Button::new("actions-refresh").label("Refresh actions").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(None,cx))))
-                            .child(Button::new("actions-inherit").label("Use environment action defaults").disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"inherit"})),cx))))
-                            .child(Button::new("actions-close").label("Close actions").on_click(cx.listener(|app,_,_,cx|{app.project_actions_open=false;cx.notify();}))))
-                    })
-                    .child(Button::new("worktrees").label("Branches and worktrees").on_click(cx.listener(|app,_,window,cx|app.execute_command(palette::Command::Worktrees,window,cx))))
-                    .when(self.worktrees_open,|view|view.child(div().flex().flex_col().gap_2()
-                        .child(Button::new("prepare-worktree").label(if self.prepare_new_worktree{"Next new thread: new worktree"}else{"Next new thread: selected checkout"}).on_click(cx.listener(|app,_,_,cx|{app.prepare_new_worktree= !app.prepare_new_worktree;cx.notify();})))
-                        .child(Button::new("worktree-origin").label(if self.start_from_origin{"Base: fetch from origin"}else{"Base: local branch"}).on_click(cx.listener(|app,_,_,cx|{app.start_from_origin= !app.start_from_origin;cx.notify();})))
-                        .child(Button::new("worktree-setup-script").label(if self.run_setup_script{"Run setup script"}else{"Skip setup script"}).on_click(cx.listener(|app,_,_,cx|{app.run_setup_script= !app.run_setup_script;cx.notify();})))
-                        .child(Input::new(&self.worktree_ref)).child(Input::new(&self.worktree_branch)).child(Input::new(&self.worktree_path))
-                        .child(Button::new("draft-checkout-update").debug_selector(||"draft-checkout-update".into()).label("Update selected draft checkout").on_click(cx.listener(|app,_,_,cx|app.update_draft_checkout(cx))))
-                        .child(div().flex().gap_2()
-                            .child(Button::new("refs-refresh").label("Refresh branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",false,cx))))
-                            .child(Button::new("worktree-create").label("Create worktree").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.createWorktree",false,cx))))
-                            .child(Button::new("ref-switch").label("Switch branch").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.switchRef",false,cx))))
-                            .child(Button::new("worktree-remove").label("Remove worktree").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.removeWorktree",false,cx))))
-                            .child(Button::new("worktrees-close").label("Close").on_click(cx.listener(|app,_,_,cx|{app.worktrees_open=false;cx.notify();}))))
-                        .children(self.refs.iter().map(|row| {let branch=row.name.clone();let path=row.worktree_path.clone();Button::new(gpui_kit::SharedString::from(format!("choose-ref-{}",row.name))).label(format!("{}{}",if row.current{"● "}else{""},row.name)).tooltip(row.worktree_path.clone().unwrap_or_else(||"No worktree checkout".into())).on_click(cx.listener(move|app,_,window,cx|app.choose_checkout(branch.clone(),path.clone(),window,cx))) }))
-                        .when_some(self.worktree_outcome.as_ref(),|view,result|view.child(div().w_full().min_w_0().whitespace_normal().child(format!("Checkout updated: {}",result["worktree"]["refName"].as_str().or_else(||result["refName"].as_str()).unwrap_or("removed"))).when_some(result["worktree"]["path"].as_str(),|view,path|{let path=path.to_owned();view.child(Button::new("copy-created-worktree").label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone())))))})))
-                        .when(self.refs_cursor.is_some(),|view|view.child(Button::new("refs-more").label("More branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",true,cx)))))
-                    ))
-                    .child(Button::new("clone-repository").label("Clone repository").on_click(cx.listener(|app,_,window,cx| app.execute_command(palette::Command::CloneProject,window,cx))))
-                    .when(self.clone_open,|view| view.child(div().flex().flex_col().gap_2()
-                        .child(Button::new("clone-close").label("Close clone panel").on_click(cx.listener(|app,_,_,cx| { app.clone_open = false; if let Some(sender) = &app.commands { let _ = sender.try_send(connection::Command::Unsubscribe("project-clones".into())); } cx.notify(); })))
-                        .child(Input::new(&self.clone_remote))
-                        .child(Button::new("clone-start").debug_selector(|| "clone-start".into()).label("Start clone to project directory").on_click(cx.listener(|app,_,_,cx|app.clone_project(cx))))
-                        .children(self.clone_progress.iter().map(|row| {
-                            let cancel_id = row.project_id.clone();let retry_id=cancel_id.clone();
-                            div().flex().flex_col().gap_1().child(format!("{} · {} · {}{}",row.destination_path,row.phase,row.stage,row.percent.map_or(String::new(),|percent| format!(" {percent}%"))))
-                                .children(row.detail.clone()).children(row.error.clone())
-                                .when(row.phase == "running",|view|view.child(Button::new(gpui_kit::SharedString::from(format!("clone-cancel-{cancel_id}"))).label("Cancel clone").on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.cancel",json!({"projectId":cancel_id}),None,cx)))))
-                                .when(row.phase == "failed" || row.phase == "cancelled",|view|view.child(Button::new(gpui_kit::SharedString::from(format!("clone-retry-{retry_id}"))).label("Retry clone").on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.retry",json!({"projectId":retry_id}),None,cx)))))
-                        }))
-                    ))
-                    .child(
-                        Button::new("files")
-                            .debug_selector(|| "files".into())
-                            .label("Workspace file editor")
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.files_open = !app.files_open;
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.files_open, |view| {
-                        view.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(div().key_context("NativeContentSearch").child(Input::new(&self.content_query)))
-                                .child(div().flex().gap_2()
-                                    .child(Button::new("content-case").label(if self.content_options.case_sensitive { "Case sensitive ✓" } else { "Case sensitive" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.case_sensitive = !app.content_options.case_sensitive; app.search_contents(cx); })))
-                                    .child(Button::new("content-word").label(if self.content_options.whole_word { "Whole word ✓" } else { "Whole word" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.whole_word = !app.content_options.whole_word; app.search_contents(cx); })))
-                                    .child(Button::new("content-regex").label(if self.content_options.use_regex { "Regex ✓" } else { "Regex" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.use_regex = !app.content_options.use_regex; app.search_contents(cx); })))
-                                    .child(Button::new("search-contents").debug_selector(|| "search-contents".into()).label("Search contents").on_click(cx.listener(|app,_,_,cx| app.search_contents(cx)))))
-                                .children(self.content_results.as_ref().map(|results| div().flex().flex_col().gap_1()
-                                    .when(results.truncated, |view| view.child("Content results truncated; refine the search"))
-                                    .when(results.matches.is_empty(), |view| view.child("No content matches"))
-                                    .child(div().id("content-result-list").track_scroll(&self.content_scroll).max_h(px(160.)).overflow_y_scroll().flex().flex_col().children(results.matches.iter().enumerate().map(|(index,hit)| {
-                                        Button::new(gpui_kit::SharedString::from(format!("content-hit-{index}"))).debug_selector(move||format!("content-hit-{index}")).label(format!("{}{}:{}  {}",if index == self.content_index { "› " } else { "" },hit.path,hit.line_number,"")).child(gpui_kit::StyledText::new(hit.line_content.clone()).with_highlights(hit.byte_ranges().into_iter().map(|range| (range,gpui_kit::HighlightStyle { background_color:Some(rgb(0x454b78).into()),..Default::default() })))).on_click(cx.listener(move|app,_,window,cx| app.open_content_hit(index,window,cx)))
-                                    })))
-                                ))
-                                .child(Input::new(&self.file_path))
-                            .child(div().flex().gap_2()
-                                .child(Button::new("list-files").debug_selector(||"list-files".into()).label("Browse directory").on_click(cx.listener(|app,_,_,cx|app.list_files(false,cx))))
-                                .child(Button::new("search-files").debug_selector(||"search-files".into()).label("Search file paths").on_click(cx.listener(|app,_,_,cx|app.list_files(true,cx)))))
-                            .when(self.file_listing_truncated,|view|view.child("Results truncated; refine the path or search"))
-                            .child(div().id("file-entry-list").max_h(px(160.)).overflow_y_scroll().flex().flex_col().gap_1().children(self.file_entries.iter().enumerate().map(|(index,entry)| {
-                                let path=entry.path.clone();let directory=entry.kind=="directory";
-                                Button::new(gpui_kit::SharedString::from(format!("file-entry-{index}"))).debug_selector(move||format!("file-entry-{index}")).label(format!("{}{}",entry.path,if directory { "/" } else { "" }))
-                                    .on_click(cx.listener(move|app,_,window,cx| {
-                                        app.file_path.update(cx,|input,cx|input.set_value(path.clone(),window,cx));
-                                        if directory { app.list_files(false,cx); } else { app.file_operation(false,window,cx); }
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(group_box)
+                                    .border_1()
+                                    .border_color(border)
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(muted_foreground)
+                                            .child("PROJECT"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(Input::new(&self.title))
+                                            .child(Input::new(&self.workspace)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .child(Button::new("add-project").label("Add project").primary().on_click(
+                                                cx.listener(|app, _, window, cx| {
+                                                    app.execute_command(palette::Command::AddProject, window, cx)
+                                                }),
+                                            ))
+                                            .child(
+                                                Button::new("rename-project")
+                                                    .debug_selector(|| "rename-project".into())
+                                                    .label("Rename project")
+                                                    .ghost()
+                                                    .on_click(
+                                                        cx.listener(|app, _, _, cx| app.update_project(false, cx)),
+                                                    ),
+                                            )
+                                            .child(
+                                                Button::new("remove-project")
+                                                    .debug_selector(|| "remove-project".into())
+                                                    .label("Remove project")
+                                                    .danger()
+                                                    .outline()
+                                                    .on_click(
+                                                        cx.listener(|app, _, _, cx| app.update_project(true, cx)),
+                                                    ),
+                                            )
+                                            .child(Button::new("new-thread").label("New thread").secondary().on_click(
+                                                cx.listener(|app, _, window, cx| {
+                                                    app.execute_command(palette::Command::NewThread, window, cx)
+                                                }),
+                                            ))
+                                            .child(
+                                                Button::new("rename")
+                                                    .debug_selector(|| "rename".into())
+                                                    .label("Rename thread")
+                                                    .ghost()
+                                                    .on_click(cx.listener(|app, _, _, cx| {
+                                                        app.lifecycle("thread.meta.update", cx)
+                                                    })),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(group_box)
+                                    .border_1()
+                                    .border_color(border)
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(muted_foreground)
+                                            .child("THREAD"),
+                                    )
+                                    .child(
+                                        div().flex().flex_wrap().gap_2().children(
+                                            [
+                                                ("archive", "Archive", "thread.archive"),
+                                                ("unarchive", "Unarchive", "thread.unarchive"),
+                                                ("settle", "Settle", "thread.settle"),
+                                                ("unsettle", "Unsettle", "thread.unsettle"),
+                                                ("snooze", "Snooze 1h", "thread.snooze"),
+                                                ("unsnooze", "Unsnooze", "thread.unsnooze"),
+                                                ("pin", "Pin", "thread.pin"),
+                                                ("unpin", "Unpin", "thread.unpin"),
+                                                ("delete", "Delete thread", "thread.delete"),
+                                            ]
+                                            .into_iter()
+                                            .map(|(id, label, kind)| {
+                                                Button::new(id)
+                                                    .debug_selector(move || id.into())
+                                                    .label(label)
+                                                    .ghost()
+                                                    .on_click(
+                                                        cx.listener(move |app, _, window, cx| {if kind=="thread.delete" && app.pending_threads.iter().any(|draft|Some(&draft.thread.id)==app.selected_thread.as_ref()){app.discard_pending(window,cx);}else{app.lifecycle(kind,cx);}}),
+                                                    )
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(Input::new(&self.custom_snooze))
+                                            .child(
+                                                Button::new("custom-snooze")
+                                                    .label("Custom snooze")
+                                                    .secondary()
+                                                    .on_click(cx.listener(|app, _, _, cx| app.snooze_custom(cx))),
+                                            ),
+                                    ),
+                            )
+                            .when_some(self.selected_setup(),|view,setup| {
+                                let id=setup.thread_id.clone();let show=self.setup_expanded;
+                                view.child(div().w_full().min_w_0().whitespace_normal().flex().flex_col().gap_1().p_2().rounded_md().bg(group_box).border_1().border_color(border)
+                                    .child(format!("Worktree setup · {}{}",setup.phase,setup.branch.as_ref().map_or(String::new(),|branch|format!(" · {branch}"))))
+                                    .child(Button::new("setup-details").ghost().label(if show{"Hide setup details"}else{"Show setup details"}).on_click(cx.listener(|app,_,_,cx|{app.setup_expanded= !app.setup_expanded;cx.notify();})))
+                                    .when_some(setup.worktree_path.clone(),|view,path|view.child(Button::new("copy-worktree-path").ghost().label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()))))))
+                                    .children(setup.error.clone())
+                                    .when(show,|view|view.children(setup.stages.iter().map(|stage|div().w_full().min_w_0().whitespace_normal().flex().flex_col().text_color(muted_foreground).child(format!("{} · {}{}",stage.id,stage.status,stage.percent.map_or(String::new(),|percent|format!(" {percent}%")))).children(stage.detail.clone()).children(stage.tail.clone()))))
+                                    .when(setup.phase=="running",|view|view.child(Button::new("setup-cancel").danger().outline().label("Cancel worktree setup").on_click(cx.listener(move|app,_,_,cx|app.perform("worktreeSetup.cancel",json!({"threadId":id}),None,cx)))))
+                                )
+                            })
+                            .child(Button::new("project-actions").label("Project actions").secondary().on_click(cx.listener(|app,_,_,cx|{app.project_actions_open=true;app.project_actions(None,cx);})))
+                            .when(self.project_actions_open,|view| {
+                                let scripts=self.selected_project.as_ref().and_then(|id|self.project_settings.as_ref().map(|settings|project_actions::resolve(settings,id,self.shell.projects.iter().find(|p|&p.id==id).map(|p|p.scripts.as_slice()).unwrap_or_default()))).unwrap_or_default();
+                                view.child(div().flex().flex_col().gap_2().min_w_0().p_2().rounded_md().bg(group_box).border_1().border_color(border)
+                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted_foreground).child("PROJECT ACTIONS"))
+                                    .child("Actions for the selected project on this environment")
+                                    .child(Input::new(&self.action_name)).child(Input::new(&self.action_command))
+                                    .child(Button::new("action-setup").ghost().selected(self.action_setup).label(if self.action_setup{"Runs on worktree creation"}else{"Run manually"}).on_click(cx.listener(|app,_,_,cx|{app.action_setup= !app.action_setup;cx.notify();})))
+                                    .child(Button::new("action-wait").ghost().selected(self.action_wait).label(if self.action_wait{"Wait before starting agent"}else{"Start agent while setup runs"}).on_click(cx.listener(|app,_,_,cx|{app.action_wait= !app.action_wait;cx.notify();})))
+                                    .child(Button::new("action-save").debug_selector(||"action-save".into()).label("Save action").primary().disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.save_project_action(cx))))
+                                    .child(Button::new("action-new").label("New action").secondary().on_click(cx.listener(|app,_,window,cx|{app.action_edit_id=None;app.confirm_action_delete=None;app.action_setup=false;app.action_wait=false;app.action_name.update(cx,|input,cx|input.set_value("",window,cx));app.action_command.update(cx,|input,cx|input.set_value("",window,cx));cx.notify();})))
+                                    .children(scripts.into_iter().enumerate().map(|(index,script)| {
+                                        let edit=script.clone();let id=script["id"].as_str().unwrap_or_default().to_owned();let confirm=self.confirm_action_delete.as_ref()==Some(&id);
+                                        div().flex().flex_col().gap_1().min_w_0().whitespace_normal().child(format!("{} · {}{}",script["name"].as_str().unwrap_or_default(),script["command"].as_str().unwrap_or_default(),if script["runOnWorktreeCreate"]==true{" · worktree setup"}else{""}))
+                                            .child(Button::new(gpui_kit::SharedString::from(format!("action-edit-{index}"))).label("Edit action").ghost().on_click(cx.listener(move|app,_,window,cx|{app.action_edit_id=edit["id"].as_str().map(str::to_owned);app.action_setup=edit["runOnWorktreeCreate"]==true;app.action_wait=edit["async"]==false;app.action_name.update(cx,|input,cx|input.set_value(edit["name"].as_str().unwrap_or_default().to_owned(),window,cx));app.action_command.update(cx,|input,cx|input.set_value(edit["command"].as_str().unwrap_or_default().to_owned(),window,cx));cx.notify();})))
+                                            .child(Button::new(gpui_kit::SharedString::from(format!("action-delete-{index}"))).label(if confirm{"Confirm delete action"}else{"Delete action"}).danger().outline().disabled(self.action_busy).on_click(cx.listener(move|app,_,_,cx|{if app.confirm_action_delete.as_ref()==Some(&id){app.project_actions(Some(json!({"operation":"delete","id":id})),cx);}else{app.confirm_action_delete=Some(id.clone());cx.notify();}})))
                                     }))
-                            })))
-                                .child(
+                                    .child(Button::new("project-default-save").label("Use selected provider and model for new threads").secondary().on_click(cx.listener(|app,_,_,cx|app.update_project_default(false,cx))))
+                                    .child(Button::new("project-default-inherit").label("Use environment model default").ghost().on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"model-inherit"})),cx))))
+                                    .child(Button::new("project-default-clear").label("Clear project model default").ghost().on_click(cx.listener(|app,_,_,cx|app.update_project_default(true,cx))))
+                                    .child(Button::new("actions-refresh").label("Refresh actions").secondary().disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(None,cx))))
+                                    .child(Button::new("actions-inherit").label("Use environment action defaults").secondary().disabled(self.action_busy).on_click(cx.listener(|app,_,_,cx|app.project_actions(Some(json!({"operation":"inherit"})),cx))))
+                                    .child(Button::new("actions-close").label("Close actions").ghost().on_click(cx.listener(|app,_,_,cx|{app.project_actions_open=false;cx.notify();}))))
+                            })
+                            .child(Button::new("worktrees").label("Branches and worktrees").secondary().on_click(cx.listener(|app,_,window,cx|app.execute_command(palette::Command::Worktrees,window,cx))))
+                            .when(self.worktrees_open,|view|view.child(div().flex().flex_col().gap_2().p_2().rounded_md().bg(group_box).border_1().border_color(border)
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted_foreground).child("BRANCHES"))
+                                .child(Button::new("prepare-worktree").ghost().selected(self.prepare_new_worktree).label(if self.prepare_new_worktree{"Next new thread: new worktree"}else{"Next new thread: selected checkout"}).on_click(cx.listener(|app,_,_,cx|{app.prepare_new_worktree= !app.prepare_new_worktree;cx.notify();})))
+                                .child(Button::new("worktree-origin").ghost().selected(self.start_from_origin).label(if self.start_from_origin{"Base: fetch from origin"}else{"Base: local branch"}).on_click(cx.listener(|app,_,_,cx|{app.start_from_origin= !app.start_from_origin;cx.notify();})))
+                                .child(Button::new("worktree-setup-script").ghost().selected(self.run_setup_script).label(if self.run_setup_script{"Run setup script"}else{"Skip setup script"}).on_click(cx.listener(|app,_,_,cx|{app.run_setup_script= !app.run_setup_script;cx.notify();})))
+                                .child(Input::new(&self.worktree_ref)).child(Input::new(&self.worktree_branch)).child(Input::new(&self.worktree_path))
+                                .child(Button::new("draft-checkout-update").debug_selector(||"draft-checkout-update".into()).label("Update selected draft checkout").secondary().on_click(cx.listener(|app,_,_,cx|app.update_draft_checkout(cx))))
+                                .child(div().flex().flex_wrap().gap_2()
+                                    .child(Button::new("refs-refresh").label("Refresh branches").secondary().on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",false,cx))))
+                                    .child(Button::new("worktree-create").label("Create worktree").primary().on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.createWorktree",false,cx))))
+                                    .child(Button::new("ref-switch").label("Switch branch").secondary().on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.switchRef",false,cx))))
+                                    .child(Button::new("worktree-remove").label("Remove worktree").danger().outline().on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.removeWorktree",false,cx))))
+                                    .child(Button::new("worktrees-close").label("Close").ghost().on_click(cx.listener(|app,_,_,cx|{app.worktrees_open=false;cx.notify();}))))
+                                .children(self.refs.iter().map(|row| {let branch=row.name.clone();let path=row.worktree_path.clone();Button::new(gpui_kit::SharedString::from(format!("choose-ref-{}",row.name))).ghost().selected(row.current).label(format!("{}{}",if row.current{"● "}else{""},row.name)).tooltip(row.worktree_path.clone().unwrap_or_else(||"No worktree checkout".into())).on_click(cx.listener(move|app,_,window,cx|app.choose_checkout(branch.clone(),path.clone(),window,cx))) }))
+                                .when_some(self.worktree_outcome.as_ref(),|view,result|view.child(div().w_full().min_w_0().whitespace_normal().child(format!("Checkout updated: {}",result["worktree"]["refName"].as_str().or_else(||result["refName"].as_str()).unwrap_or("removed"))).when_some(result["worktree"]["path"].as_str(),|view,path|{let path=path.to_owned();view.child(Button::new("copy-created-worktree").ghost().label("Copy worktree path").tooltip(path.clone()).on_click(cx.listener(move|_,_,_,cx|cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone())))))})))
+                                .when(self.refs_cursor.is_some(),|view|view.child(Button::new("refs-more").ghost().label("More branches").on_click(cx.listener(|app,_,_,cx|app.worktree_operation("vcs.listRefs",true,cx)))))
+                            ))
+                            .child(Button::new("clone-repository").label("Clone repository").secondary().on_click(cx.listener(|app,_,window,cx| app.execute_command(palette::Command::CloneProject,window,cx))))
+                            .when(self.clone_open,|view| view.child(div().flex().flex_col().gap_2().p_2().rounded_md().bg(group_box).border_1().border_color(border)
+                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted_foreground).child("CLONE"))
+                                .child(Button::new("clone-close").label("Close clone panel").ghost().on_click(cx.listener(|app,_,_,cx| { app.clone_open = false; if let Some(sender) = &app.commands { let _ = sender.try_send(connection::Command::Unsubscribe("project-clones".into())); } cx.notify(); })))
+                                .child(Input::new(&self.clone_remote))
+                                .child(Button::new("clone-start").debug_selector(|| "clone-start".into()).label("Start clone to project directory").primary().on_click(cx.listener(|app,_,_,cx|app.clone_project(cx))))
+                                .children(self.clone_progress.iter().map(|row| {
+                                    let cancel_id = row.project_id.clone();let retry_id=cancel_id.clone();
+                                    div().flex().flex_col().gap_1().child(format!("{} · {} · {}{}",row.destination_path,row.phase,row.stage,row.percent.map_or(String::new(),|percent| format!(" {percent}%"))))
+                                        .children(row.detail.clone()).children(row.error.clone())
+                                        .when(row.phase == "running",|view|view.child(Button::new(gpui_kit::SharedString::from(format!("clone-cancel-{cancel_id}"))).label("Cancel clone").danger().outline().on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.cancel",json!({"projectId":cancel_id}),None,cx)))))
+                                        .when(row.phase == "failed" || row.phase == "cancelled",|view|view.child(Button::new(gpui_kit::SharedString::from(format!("clone-retry-{retry_id}"))).label("Retry clone").secondary().on_click(cx.listener(move|app,_,_,cx| app.perform("projectClone.retry",json!({"projectId":retry_id}),None,cx)))))
+                                }))
+                            ))
+                            .child(
+                                Button::new("files")
+                                    .debug_selector(|| "files".into())
+                                    .label("Workspace file editor")
+                                    .secondary()
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.files_open = !app.files_open;
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(self.files_open, |view| {
+                                view.child(
                                     div()
                                         .flex()
+                                        .flex_col()
                                         .gap_2()
+                                        .p_2()
+                                        .rounded_md()
+                                        .bg(group_box)
+                                        .border_1()
+                                        .border_color(border)
+                                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted_foreground).child("FILES"))
+                                        .child(div().key_context("NativeContentSearch").child(Input::new(&self.content_query)))
+                                        .child(div().flex().flex_wrap().gap_2()
+                                            .child(Button::new("content-case").ghost().selected(self.content_options.case_sensitive).label(if self.content_options.case_sensitive { "Case sensitive ✓" } else { "Case sensitive" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.case_sensitive = !app.content_options.case_sensitive; app.search_contents(cx); })))
+                                            .child(Button::new("content-word").ghost().selected(self.content_options.whole_word).label(if self.content_options.whole_word { "Whole word ✓" } else { "Whole word" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.whole_word = !app.content_options.whole_word; app.search_contents(cx); })))
+                                            .child(Button::new("content-regex").ghost().selected(self.content_options.use_regex).label(if self.content_options.use_regex { "Regex ✓" } else { "Regex" }).on_click(cx.listener(|app,_,_,cx| { app.content_options.use_regex = !app.content_options.use_regex; app.search_contents(cx); })))
+                                            .child(Button::new("search-contents").debug_selector(|| "search-contents".into()).label("Search contents").primary().on_click(cx.listener(|app,_,_,cx| app.search_contents(cx)))))
+                                        .children(self.content_results.as_ref().map(|results| div().flex().flex_col().gap_1()
+                                            .when(results.truncated, |view| view.child("Content results truncated; refine the search"))
+                                            .when(results.matches.is_empty(), |view| view.child("No content matches"))
+                                            .child(div().id("content-result-list").track_scroll(&self.content_scroll).max_h(px(160.)).overflow_y_scroll().flex().flex_col().children(results.matches.iter().enumerate().map(|(index,hit)| {
+                                                Button::new(gpui_kit::SharedString::from(format!("content-hit-{index}"))).debug_selector(move||format!("content-hit-{index}")).ghost().selected(index == self.content_index).label(format!("{}{}:{}  {}",if index == self.content_index { "› " } else { "" },hit.path,hit.line_number,"")).child(gpui_kit::StyledText::new(hit.line_content.clone()).with_highlights(hit.byte_ranges().into_iter().map(|range| (range,gpui_kit::HighlightStyle { background_color:Some(selection),..Default::default() })))).on_click(cx.listener(move|app,_,window,cx| app.open_content_hit(index,window,cx)))
+                                            })))
+                                        ))
+                                        .child(Input::new(&self.file_path))
+                                        .child(div().flex().flex_wrap().gap_2()
+                                            .child(Button::new("list-files").debug_selector(||"list-files".into()).label("Browse directory").secondary().on_click(cx.listener(|app,_,_,cx|app.list_files(false,cx))))
+                                            .child(Button::new("search-files").debug_selector(||"search-files".into()).label("Search file paths").secondary().on_click(cx.listener(|app,_,_,cx|app.list_files(true,cx)))))
+                                        .when(self.file_listing_truncated,|view|view.child("Results truncated; refine the path or search"))
+                                        .child(div().id("file-entry-list").max_h(px(160.)).overflow_y_scroll().flex().flex_col().gap_1().children(self.file_entries.iter().enumerate().map(|(index,entry)| {
+                                            let path=entry.path.clone();let directory=entry.kind=="directory";
+                                            Button::new(gpui_kit::SharedString::from(format!("file-entry-{index}"))).debug_selector(move||format!("file-entry-{index}")).ghost().label(format!("{}{}",entry.path,if directory { "/" } else { "" }))
+                                                .on_click(cx.listener(move|app,_,window,cx| {
+                                                    app.file_path.update(cx,|input,cx|input.set_value(path.clone(),window,cx));
+                                                    if directory { app.list_files(false,cx); } else { app.file_operation(false,window,cx); }
+                                                }))
+                                        })))
                                         .child(
-                                            Button::new("read-file")
-                                                .debug_selector(|| "read-file".into())
-                                                .label("Read file")
-                                                .on_click(cx.listener(|app, _, window, cx| {
-                                                    app.file_operation(false, window, cx)
-                                                })),
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new("read-file")
+                                                        .debug_selector(|| "read-file".into())
+                                                        .label("Read file")
+                                                        .secondary()
+                                                        .on_click(cx.listener(|app, _, window, cx| {
+                                                            app.file_operation(false, window, cx)
+                                                        })),
+                                                )
+                                                .child(
+                                                    Button::new("save-file")
+                                                        .debug_selector(|| "save-file".into())
+                                                        .label("Save file")
+                                                        .primary()
+                                                        .on_click(cx.listener(|app, _, window, cx| {
+                                                            app.file_operation(true, window, cx)
+                                                        })),
+                                                ),
                                         )
-                                        .child(
-                                            Button::new("save-file")
-                                                .debug_selector(|| "save-file".into())
-                                                .label("Save file")
-                                                .on_click(cx.listener(|app, _, window, cx| {
-                                                    app.file_operation(true, window, cx)
-                                                })),
-                                        ),
+                                        .children(self.file_editor.target.as_ref().map(|target|format!("Loaded: {} / {}{}",target.cwd,target.path,if self.file_editor.writable() { "" } else { " (read-only)" })))
+                                        .child(Button::new("discard-file-edits").debug_selector(||"discard-file-edits".into()).label("Discard unsaved file edits").ghost().on_click(cx.listener(|app,_,window,cx| {
+                                            if app.file_busy { app.status="Wait for the pending file operation before discarding".into();cx.notify();return; }
+                                            let text=app.file_editor.saved.clone();app.file_contents.update(cx,|input,cx|input.set_value(text,window,cx));cx.notify();
+                                        })))
+                                        .child(Textarea::new(&self.file_contents)),
                                 )
-                                .children(self.file_editor.target.as_ref().map(|target|format!("Loaded: {} / {}{}",target.cwd,target.path,if self.file_editor.writable() { "" } else { " (read-only)" })))
-                            .child(Button::new("discard-file-edits").debug_selector(||"discard-file-edits".into()).label("Discard unsaved file edits").on_click(cx.listener(|app,_,window,cx| {
-                                if app.file_busy { app.status="Wait for the pending file operation before discarding".into();cx.notify();return; }
-                                let text=app.file_editor.saved.clone();app.file_contents.update(cx,|input,cx|input.set_value(text,window,cx));cx.notify();
-                            })))
-                            .child(Textarea::new(&self.file_contents)),
-                        )
-                    })
-                    .child(conversation)
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(Input::new(&self.provider))
-                            .child(Input::new(&self.model)),
-                    )
-                    .child(Button::new("model-catalog").debug_selector(||"model-catalog".into()).label("Choose provider and model").on_click(cx.listener(|app,_,_,cx| { app.catalog_open = !app.catalog_open;cx.notify(); })))
-                    .when(self.catalog_open,|view|view.child(div().id("provider-model-catalog").flex_shrink_0().max_h(px(200.)).overflow_y_scroll().flex().flex_col().gap_2()
-                        .child(Button::new("refresh-catalog").label("Reload server catalog").on_click(cx.listener(|app,_,_,cx|app.perform("server.getConfig",json!({}),None,cx))))
-                        .children(self.provider_catalog.iter().map(|provider|div().flex().flex_col().gap_1()
-                            .child(format!("{} · {} · {}",provider.label(),provider.instance_id,provider.explanation()))
-                            .children(provider.models.iter().enumerate().map(|(index,model)| {
-                                let instance=provider.instance_id.clone();let slug=model.slug.clone();let enabled=provider.selectable();
-                                Button::new(gpui_kit::SharedString::from(format!("catalog-{}-{index}",provider.instance_id))).debug_selector({ let id=format!("catalog-{}-{index}",provider.instance_id);move||id.clone() }).disabled(!enabled).label(model.name.clone()).on_click(cx.listener(move|app,_,window,cx|app.pick_model(&instance,&slug,window,cx)))
-                            })))))
-                    )
-                    .children(self.provider_catalog.iter().find(|provider|provider.instance_id==self.provider.read(cx).value().as_str()).and_then(|provider|provider.models.iter().find(|model|model.slug==self.model.read(cx).value().as_str())).and_then(|model|model.capabilities["optionDescriptors"].as_array()).map(|options|div().flex().flex_col().gap_1().children(options.iter().enumerate().map(|(index,option)| {
-                        let id=option["id"].as_str().unwrap_or_default().to_owned();
-                        let previous=self.selected_thread.as_ref().and_then(|id|self.shell.threads.iter().chain(self.pending_threads.iter().map(|draft|&draft.thread)).find(|thread|&thread.id==id)).map(|thread|&thread.model_selection).unwrap_or(&Value::Null);
-                        let selected=self.model_selection(previous,cx).ok().and_then(|selection|selection["options"].as_array().and_then(|options|options.iter().find(|option|option["id"]==id)).map(|option|option["value"].clone())).or_else(||option.get("currentValue").cloned()).or_else(||option["options"].as_array().and_then(|choices|choices.iter().find(|choice|choice["isDefault"]==true)).map(|choice|choice["id"].clone()));
-                        let choices=if option["type"]=="boolean" {vec![json!({"id":false,"label":"Off"}),json!({"id":true,"label":"On"})]} else {option["options"].as_array().cloned().unwrap_or_default()};
-                        div().flex().flex_wrap().gap_1().child(option["label"].as_str().unwrap_or_default().to_owned()).children(choices.into_iter().enumerate().map(|(choice_index,choice)| {
-                            let id=id.clone();let value=choice["id"].clone();
-                            Button::new(gpui_kit::SharedString::from(format!("model-option-{index}-{choice_index}"))).debug_selector(move||format!("model-option-{index}-{choice_index}")).label(format!("{}{}",choice["label"].as_str().unwrap_or_default(),if selected.as_ref()==Some(&value){" ✓"}else{""})).on_click(cx.listener(move|app,_,_,cx|app.choose_model_option(&id,value.clone(),cx)))
-                        }))
-                    }))))
-                    .child(Textarea::new(&self.composer))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
+                            })
+                            .child(conversation)
                             .child(
-                                Button::new("send")
-                                    .debug_selector(|| "send".into())
-                                    .label("Send")
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        app.send_prompt(window, cx)
-                                    })),
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(group_box)
+                                    .border_1()
+                                    .border_color(border)
+                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted_foreground).child("MODEL"))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .child(Input::new(&self.provider))
+                                            .child(Input::new(&self.model)),
+                                    )
+                                    .child(Button::new("model-catalog").debug_selector(||"model-catalog".into()).label("Choose provider and model").secondary().on_click(cx.listener(|app,_,_,cx| { app.catalog_open = !app.catalog_open;cx.notify(); })))
+                                    .when(self.catalog_open,|view|view.child(div().id("provider-model-catalog").flex_shrink_0().max_h(px(200.)).overflow_y_scroll().flex().flex_col().gap_2()
+                                        .child(Button::new("refresh-catalog").label("Reload server catalog").ghost().on_click(cx.listener(|app,_,_,cx|app.perform("server.getConfig",json!({}),None,cx))))
+                                        .children(self.provider_catalog.iter().map(|provider|div().flex().flex_col().gap_1()
+                                            .child(div().text_color(muted_foreground).child(format!("{} · {} · {}",provider.label(),provider.instance_id,provider.explanation())))
+                                            .children(provider.models.iter().enumerate().map(|(index,model)| {
+                                                let instance=provider.instance_id.clone();let slug=model.slug.clone();let enabled=provider.selectable();
+                                                Button::new(gpui_kit::SharedString::from(format!("catalog-{}-{index}",provider.instance_id))).debug_selector({ let id=format!("catalog-{}-{index}",provider.instance_id);move||id.clone() }).ghost().selected(model.slug == self.model.read(cx).value()).disabled(!enabled).label(model.name.clone()).on_click(cx.listener(move|app,_,window,cx|app.pick_model(&instance,&slug,window,cx)))
+                                            })))))
+                                    )
+                                    .children(self.provider_catalog.iter().find(|provider|provider.instance_id==self.provider.read(cx).value().as_str()).and_then(|provider|provider.models.iter().find(|model|model.slug==self.model.read(cx).value().as_str())).and_then(|model|model.capabilities["optionDescriptors"].as_array()).map(|options|div().flex().flex_col().gap_1().children(options.iter().enumerate().map(|(index,option)| {
+                                        let id=option["id"].as_str().unwrap_or_default().to_owned();
+                                        let previous=self.selected_thread.as_ref().and_then(|id|self.shell.threads.iter().chain(self.pending_threads.iter().map(|draft|&draft.thread)).find(|thread|&thread.id==id)).map(|thread|&thread.model_selection).unwrap_or(&Value::Null);
+                                        let selected=self.model_selection(previous,cx).ok().and_then(|selection|selection["options"].as_array().and_then(|options|options.iter().find(|option|option["id"]==id)).map(|option|option["value"].clone())).or_else(||option.get("currentValue").cloned()).or_else(||option["options"].as_array().and_then(|choices|choices.iter().find(|choice|choice["isDefault"]==true)).map(|choice|choice["id"].clone()));
+                                        let choices=if option["type"]=="boolean" {vec![json!({"id":false,"label":"Off"}),json!({"id":true,"label":"On"})]} else {option["options"].as_array().cloned().unwrap_or_default()};
+                                        div().flex().flex_col().gap_1().child(div().text_color(muted_foreground).child(option["label"].as_str().unwrap_or_default().to_owned())).child(div().flex().flex_wrap().gap_1().children(choices.into_iter().enumerate().map(|(choice_index,choice)| {
+                                            let id=id.clone();let value=choice["id"].clone();
+                                            Button::new(gpui_kit::SharedString::from(format!("model-option-{index}-{choice_index}"))).debug_selector(move||format!("model-option-{index}-{choice_index}")).ghost().selected(selected.as_ref()==Some(&value)).label(format!("{}{}",choice["label"].as_str().unwrap_or_default(),if selected.as_ref()==Some(&value){" ✓"}else{""})).on_click(cx.listener(move|app,_,_,cx|app.choose_model_option(&id,value.clone(),cx)))
+                                        })))
+                                    }))))
                             )
                             .child(
-                                Button::new("stash")
-                                    .debug_selector(|| "stash".into())
-                                    .label("Stash prompt")
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        app.stash_prompt(false, window, cx)
-                                    })),
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(group_box)
+                                    .border_1()
+                                    .border_color(border)
+                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted_foreground).child("PROMPT"))
+                                    .child(Textarea::new(&self.composer))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .child(
+                                                Button::new("send")
+                                                    .debug_selector(|| "send".into())
+                                                    .label("Send")
+                                                    .primary()
+                                                    .on_click(cx.listener(|app, _, window, cx| {
+                                                        app.send_prompt(window, cx)
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("stash")
+                                                    .debug_selector(|| "stash".into())
+                                                    .label("Stash prompt")
+                                                    .ghost()
+                                                    .on_click(cx.listener(|app, _, window, cx| {
+                                                        app.stash_prompt(false, window, cx)
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("restore-stash")
+                                                    .debug_selector(|| "restore-stash".into())
+                                                    .label("Restore stashed")
+                                                    .ghost()
+                                                    .on_click(cx.listener(|app, _, window, cx| {
+                                                        app.stash_prompt(true, window, cx)
+                                                    })),
+                                            )
+                                            .child(Button::new("interrupt").label("Interrupt").ghost().on_click(
+                                                cx.listener(|app, _, _, cx| {
+                                                    app.lifecycle("thread.turn.interrupt", cx)
+                                                }),
+                                            ))
+                                            .child(Button::new("stop").label("Stop session").danger().outline().on_click(
+                                                cx.listener(|app, _, _, cx| {
+                                                    app.lifecycle("thread.session.stop", cx)
+                                                }),
+                                            )),
+                                    ),
                             )
                             .child(
-                                Button::new("restore-stash")
-                                    .debug_selector(|| "restore-stash".into())
-                                    .label("Restore stashed")
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        app.stash_prompt(true, window, cx)
-                                    })),
-                            )
-                            .child(Button::new("interrupt").label("Interrupt").on_click(
-                                cx.listener(|app, _, _, cx| {
-                                    app.lifecycle("thread.turn.interrupt", cx)
-                                }),
-                            ))
-                            .child(Button::new("stop").label("Stop session").on_click(
-                                cx.listener(|app, _, _, cx| {
-                                    app.lifecycle("thread.session.stop", cx)
-                                }),
-                            )),
-                    )
-                    .child("Experimental native slice — feature parity is still being evaluated"),
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child("Experimental native slice — feature parity is still being evaluated"),
+                            ),
+                    ),
             )
             .children(palette)
     }
@@ -3211,6 +3469,7 @@ fn bind_native_keys(cx: &mut App) {
 fn main() {
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        theme::init(cx);
         bind_native_keys(cx);
         cx.on_action(|_: &QuitNative, cx| cx.quit());
         cx.set_menus(vec![
@@ -3239,7 +3498,6 @@ fn main() {
                 ],
             },
         ]);
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(900.)), cx);
         gpui_kit::open_window(
             WindowOptions {

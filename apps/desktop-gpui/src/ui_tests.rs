@@ -12,6 +12,7 @@ fn harness(
 ) {
     cx.update(|cx| {
         gpui_kit::init(cx);
+        theme::init(cx);
         bind_native_keys(cx);
     });
     let mut app = None;
@@ -39,6 +40,20 @@ fn harness(
     );
     cx.run_until_parked();
     (app, cx, requests)
+}
+
+#[gpui_kit::test]
+fn zed_one_dark_is_the_installed_theme(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        theme::init(cx);
+        assert_eq!(
+            gpui_kit::component::Theme::global(cx)
+                .theme_name()
+                .to_string(),
+            "One Dark"
+        );
+    });
 }
 
 #[gpui_kit::test]
