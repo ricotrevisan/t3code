@@ -226,7 +226,46 @@ function renderArtifactTemplate(node: MarkdownAstNode, source: string): void {
   delete node.url;
 }
 
+/** Visualization references are whole blocks; code examples must remain literal. */
+function renderVisualization(node: MarkdownAstNode, source: string): boolean {
+  if (node.type !== "paragraph") return false;
+  const match = /^visualize(\{[^]*\})$/.exec(sourceForNode(node, source).trim());
+  if (!match) return false;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(match[1]!);
+  } catch {
+    return false;
+  }
+  if (typeof payload !== "object" || payload === null || !("path" in payload)) return false;
+  const path = payload.path;
+  if (
+    typeof path !== "string" ||
+    path.length > 1024 ||
+    /[\r\n\0]/.test(path) ||
+    !/^(?:\/(?!\/)|[A-Za-z]:[\\/])/.test(path) ||
+    !/\.html?$/i.test(path)
+  )
+    return false;
+  const citation = resolveCodexFileCitationLink({ path });
+  if (!citation) return false;
+  const title =
+    "title" in payload && typeof payload.title === "string" && payload.title.trim()
+      ? payload.title.trim()
+      : citation.label;
+  node.children = [
+    { type: "link", url: citation.href, children: [{ type: "text", value: title }] },
+  ];
+  node.data = {
+    codexFileCitationMarkdown: codexFileCitationMarkdown({ ...citation, label: title }),
+    hName: "div",
+    hProperties: { dataVisualizationPath: path, dataVisualizationTitle: title },
+  };
+  return true;
+}
+
 function transformCodexDirectives(node: MarkdownAstNode, source: string, insideLink = false): void {
+  if (renderVisualization(node, source)) return;
   if (node.type === "textDirective" && node.name === CODEX_FILE_CITATION_NAME) {
     renderFileCitation(node, source, insideLink);
     return;
@@ -306,7 +345,8 @@ function renderDirectiveMatches(
 
 /** Native Markdown renderers use this adapter because they cannot consume a Remark tree. */
 export function renderCodexFileCitationsAsMarkdown(markdown: string): string {
-  if (!markdown.includes(`:${CODEX_FILE_CITATION_NAME}`)) return markdown;
+  if (!markdown.includes(`:${CODEX_FILE_CITATION_NAME}`) && !markdown.includes("visualize"))
+    return markdown;
 
   return renderDirectiveMatches(markdown, (match) => match.markdown);
 }
@@ -315,7 +355,8 @@ export function renderCodexFileCitationsAsMarkdown(markdown: string): string {
 export function renderCodexDirectivesForCopy(markdown: string): string {
   if (
     !markdown.includes(`:${CODEX_FILE_CITATION_NAME}`) &&
-    !markdown.includes(`::${CODEX_ARTIFACT_TEMPLATE_NAME}`)
+    !markdown.includes(`::${CODEX_ARTIFACT_TEMPLATE_NAME}`) &&
+    !markdown.includes("visualize")
   ) {
     return markdown;
   }

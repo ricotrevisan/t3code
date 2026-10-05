@@ -1,3 +1,4 @@
+import { ChatVisualization } from "./chat/ChatVisualization";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -472,7 +473,12 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
     "*": (defaultSchema.attributes?.["*"] ?? []).filter((attribute) => attribute !== "title"),
     code: [...(defaultSchema.attributes?.code ?? []), "dataCodeMeta", "dataInlineCode"],
     blockquote: [...(defaultSchema.attributes?.blockquote ?? []), "dataAlert"],
-    div: [...(defaultSchema.attributes?.div ?? []), ...CODEX_ARTIFACT_TEMPLATE_HAST_PROPERTIES],
+    div: [
+      ...(defaultSchema.attributes?.div ?? []),
+      ...CODEX_ARTIFACT_TEMPLATE_HAST_PROPERTIES,
+      "dataVisualizationPath",
+      "dataVisualizationTitle",
+    ],
     a: [...(defaultSchema.attributes?.a ?? []), "dataPullRequestAutolink"],
     img: [
       ...(defaultSchema.attributes?.img ?? []),
@@ -2792,7 +2798,19 @@ const CHAT_MARKDOWN_COMPONENTS = {
   h5: markdownHeadingRenderer(5),
   h6: markdownHeadingRenderer(6),
   div: function MarkdownDiv({ node, children, ...props }) {
-    const { onUseArtifactTemplate } = use(ChatMarkdownRendererContext);
+    const { onUseArtifactTemplate, threadRef } = use(ChatMarkdownRendererContext);
+    const visualizationPath = node?.properties?.dataVisualizationPath;
+    if (typeof visualizationPath === "string" && threadRef) {
+      const title = node?.properties?.dataVisualizationTitle;
+      return (
+        <ChatVisualization
+          threadRef={threadRef}
+          path={visualizationPath}
+          title={typeof title === "string" ? title : "Visualization"}
+          fallback={children}
+        />
+      );
+    }
     const artifactTemplate = artifactTemplateFromHastProperties(node?.properties);
     if (artifactTemplate) {
       return (

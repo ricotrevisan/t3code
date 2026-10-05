@@ -173,3 +173,46 @@ describe("directive copy adapter", () => {
     expect(renderCodexDirectivesForCopy(markdown)).toBe(markdown);
   });
 });
+
+const VISUALIZATION =
+  'visualize{"path":"/Users/rico/dev/t3code-prototypes/thread-cleanup.html"}';
+describe("visualization references", () => {
+  it("recognizes a visualization block instead of displaying its protocol marker", () => {
+    expect(parse(VISUALIZATION).children?.[0]?.data).toMatchObject({
+      hName: "div",
+      hProperties: {
+        dataVisualizationPath: "/Users/rico/dev/t3code-prototypes/thread-cleanup.html",
+      },
+    });
+  });
+  it("preserves surrounding prose and renders multiple references with optional metadata", () => {
+    const second =
+      'visualize{"path":"/tmp/other demo.html","title":"Other [demo]","mode":"wide"}';
+    const markdown = `Before.\n\n${VISUALIZATION}\n\nBetween.\n\n${second}\n\nAfter.`;
+    const parsed = parse(markdown);
+    expect(parsed.children).toHaveLength(5);
+    expect(parsed.children?.[3]?.data?.hProperties).toMatchObject({
+      dataVisualizationPath: "/tmp/other demo.html",
+      dataVisualizationTitle: "Other [demo]",
+    });
+    expect(renderCodexFileCitationsAsMarkdown(markdown)).toBe(
+      "Before.\n\n[thread-cleanup.html](</Users/rico/dev/t3code-prototypes/thread-cleanup.html>)\n\nBetween.\n\n[Other \\[demo\\]](</tmp/other demo.html>)\n\nAfter.",
+    );
+  });
+  it("gives native clients and clipboard users an actionable file link", () => {
+    const expected =
+      "[thread-cleanup.html](</Users/rico/dev/t3code-prototypes/thread-cleanup.html>)";
+    expect(renderCodexFileCitationsAsMarkdown(VISUALIZATION)).toBe(expected);
+    expect(renderCodexDirectivesForCopy(VISUALIZATION)).toBe(expected);
+  });
+  it.each([
+    "`" + VISUALIZATION + "`",
+    "```\n" + VISUALIZATION + "\n```",
+    'visualize{"path":"https://example.com/a.html"}',
+    'visualize{"path":"/tmp/a.png"}',
+    'visualize{"path":',
+  ])("preserves code examples and invalid or incomplete references: %s", (markdown) => {
+    expect(parse(markdown)).toEqual(parseOrdinaryMarkdown(markdown));
+    expect(renderCodexFileCitationsAsMarkdown(markdown)).toBe(markdown);
+  });
+});
