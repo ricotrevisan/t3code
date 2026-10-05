@@ -57,6 +57,48 @@ fn zed_one_dark_is_the_installed_theme(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn runtime_and_interaction_mode_chips_dispatch_the_toggled_command(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(json!({
+                "id": "t",
+                "title": "Thread",
+                "runtimeMode": "full-access",
+                "interactionMode": "default",
+                "messages": [],
+                "activities": [],
+                "proposedPlans": [],
+                "checkpoints": [],
+            }));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+
+    let bounds = cx
+        .debug_bounds("runtime-mode")
+        .expect("runtime mode chip is visible");
+    cx.simulate_click(bounds.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a runtime mode command");
+    };
+    assert_eq!(payload["type"], "thread.runtime-mode.set");
+    assert_eq!(payload["threadId"], "t");
+    assert_eq!(payload["runtimeMode"], "approval-required");
+
+    let bounds = cx
+        .debug_bounds("interaction-mode")
+        .expect("interaction mode chip is visible");
+    cx.simulate_click(bounds.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected an interaction mode command");
+    };
+    assert_eq!(payload["type"], "thread.interaction-mode.set");
+    assert_eq!(payload["interactionMode"], "plan");
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");

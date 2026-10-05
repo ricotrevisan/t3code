@@ -2425,6 +2425,78 @@ impl NativeApp {
             }
         }
     }
+
+    /// The effective runtime and interaction modes for the selected thread.
+    fn selected_modes(&self) -> (String, String) {
+        if let Some(detail) = &self.detail.thread
+            && let (Some(runtime), Some(interaction)) =
+                (detail["runtimeMode"].as_str(), detail["interactionMode"].as_str())
+        {
+            return (runtime.to_owned(), interaction.to_owned());
+        }
+        if let Some(id) = &self.selected_thread {
+            if let Some(draft) = self.pending_threads.iter().find(|draft| &draft.thread.id == id) {
+                return (
+                    draft
+                        .thread
+                        .runtime_mode
+                        .clone()
+                        .unwrap_or_else(|| "full-access".into()),
+                    draft
+                        .thread
+                        .interaction_mode
+                        .clone()
+                        .unwrap_or_else(|| "default".into()),
+                );
+            }
+            if let Some(thread) = self.shell.threads.iter().find(|thread| &thread.id == id) {
+                return (
+                    thread
+                        .runtime_mode
+                        .clone()
+                        .unwrap_or_else(|| "full-access".into()),
+                    thread
+                        .interaction_mode
+                        .clone()
+                        .unwrap_or_else(|| "default".into()),
+                );
+            }
+        }
+        ("full-access".into(), "default".into())
+    }
+
+    /// Change a thread's runtime or interaction mode. Pending drafts update
+    /// locally because the server has no thread to mutate yet.
+    fn change_thread_mode(
+        &mut self,
+        kind: &str,
+        field: &str,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.selected_thread.clone() else {
+            return;
+        };
+        if let Some(draft) = self
+            .pending_threads
+            .iter_mut()
+            .find(|draft| draft.thread.id == id)
+        {
+            match field {
+                "runtimeMode" => draft.thread.runtime_mode = Some(value.to_owned()),
+                "interactionMode" => draft.thread.interaction_mode = Some(value.to_owned()),
+                _ => {}
+            }
+            if let Some(store) = &mut self.draft_store {
+                store.put_pending(&self.environment_scope, draft.clone());
+            }
+            self.schedule_draft_save(cx);
+            cx.notify();
+            return;
+        }
+        let payload = commands::set_thread_mode(kind, &id, field, value);
+        self.dispatch(payload, cx);
+    }
 }
 
 impl Drop for NativeApp {
@@ -2454,6 +2526,10 @@ impl Render for NativeApp {
         let warning = cx.theme().warning;
         let blue = cx.theme().blue;
         let green = cx.theme().green;
+
+        let (runtime_mode, interaction_mode) = self.selected_modes();
+        let full_access = runtime_mode == "full-access";
+        let plan_mode = interaction_mode == "plan";
         let sidebar = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
         let sidebar_foreground = cx.theme().sidebar_foreground;
@@ -3661,7 +3737,51 @@ impl Render for NativeApp {
                                         div()
                                             .flex()
                                             .flex_wrap()
+                                            .items_center()
                                             .gap_2()
+                                            .child(
+                                                Button::new("runtime-mode")
+                                                    .debug_selector(|| "runtime-mode".into())
+                                                    .label(if full_access {
+                                                        "Full access"
+                                                    } else {
+                                                        "Approval required"
+                                                    })
+                                                    .ghost()
+                                                    .small()
+                                                    .tooltip(
+                                                        "Toggle whether this thread may run tools without asking",
+                                                    )
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        app.change_thread_mode(
+                                                            "thread.runtime-mode.set",
+                                                            "runtimeMode",
+                                                            if full_access {
+                                                                "approval-required"
+                                                            } else {
+                                                                "full-access"
+                                                            },
+                                                            cx,
+                                                        )
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("interaction-mode")
+                                                    .debug_selector(|| "interaction-mode".into())
+                                                    .label(if plan_mode { "Plan" } else { "Default" })
+                                                    .ghost()
+                                                    .small()
+                                                    .tooltip("Toggle plan-first interaction for this thread")
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        app.change_thread_mode(
+                                                            "thread.interaction-mode.set",
+                                                            "interactionMode",
+                                                            if plan_mode { "default" } else { "plan" },
+                                                            cx,
+                                                        )
+                                                    })),
+                                            )
+                                            .child(div().flex_1())
                                             .child(
                                                 Button::new("send")
                                                     .debug_selector(|| "send".into())

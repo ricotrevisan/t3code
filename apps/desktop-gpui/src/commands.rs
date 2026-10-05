@@ -91,6 +91,15 @@ pub fn start_turn(
     Ok(result)
 }
 
+/// A `thread.runtime-mode.set` / `thread.interaction-mode.set` command. The
+/// server validates the value; the client only names the field.
+pub fn set_thread_mode(kind: &str, thread_id: &str, field: &str, value: &str) -> Value {
+    let mut command = command(kind, thread_id);
+    command[field] = json!(value);
+    command["createdAt"] = json!(now());
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +133,28 @@ mod tests {
         );
         assert!(select_model(&previous, "", "model").is_err());
     }
+    #[test]
+    fn thread_mode_changes_carry_the_mode_and_a_timestamp() {
+        let runtime = set_thread_mode(
+            "thread.runtime-mode.set",
+            "t",
+            "runtimeMode",
+            "approval-required",
+        );
+        assert_eq!(runtime["type"], "thread.runtime-mode.set");
+        assert_eq!(runtime["threadId"], "t");
+        assert_eq!(runtime["runtimeMode"], "approval-required");
+        assert!(runtime["createdAt"].is_string());
+        let interaction = set_thread_mode(
+            "thread.interaction-mode.set",
+            "t",
+            "interactionMode",
+            "plan",
+        );
+        assert_eq!(interaction["interactionMode"], "plan");
+        assert!(interaction.get("runtimeMode").is_none());
+    }
+
     #[test]
     fn command_ids_are_fresh_and_prompt_content_is_not_trimmed() {
         let selection = json!({"instanceId":"codex","model":"gpt-5.4"});
