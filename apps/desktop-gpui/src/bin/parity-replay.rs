@@ -2,7 +2,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, Read};
-use t3code_native_macos::thread::apply_event;
+use t3code_desktop_gpui::thread::apply_event;
 
 #[derive(Deserialize)]
 struct Input {

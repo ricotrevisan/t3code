@@ -12073,11 +12073,7 @@
       "id": "connections-01",
       "group": "connections",
       "behavior": "Local server bootstrap and reconnect without duplicate events",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12085,11 +12081,7 @@
       "id": "connections-02",
       "group": "connections",
       "behavior": "Remote pairing, revoked credentials and logout",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12097,11 +12089,7 @@
       "id": "connections-03",
       "group": "connections",
       "behavior": "Relay and tunnel reconnect with multi-environment isolation",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12109,11 +12097,7 @@
       "id": "connections-04",
       "group": "connections",
       "behavior": "SSH and device host setup, failure and removal",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12121,11 +12105,7 @@
       "id": "connections-05",
       "group": "connections",
       "behavior": "Background policy, host power and foreground resync",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12133,11 +12113,7 @@
       "id": "projects-01",
       "group": "projects",
       "behavior": "Add, clone, rename and remove projects without deleting user files",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12145,11 +12121,7 @@
       "id": "projects-02",
       "group": "projects",
       "behavior": "Browse, search, read and write workspace files",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12157,11 +12129,7 @@
       "id": "projects-03",
       "group": "projects",
       "behavior": "Create, switch and remove worktrees with cancellation",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12169,11 +12137,7 @@
       "id": "projects-04",
       "group": "projects",
       "behavior": "Project icons, grouping, defaults and scripts persist",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12181,11 +12145,7 @@
       "id": "projects-05",
       "group": "projects",
       "behavior": "Attachments upload, display and delete on a remote environment",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12193,11 +12153,7 @@
       "id": "threads-01",
       "group": "threads",
       "behavior": "Create, rename, delete and reopen threads",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12205,11 +12161,7 @@
       "id": "threads-02",
       "group": "threads",
       "behavior": "Archive and unarchive from chat, settings, palette and shortcuts",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12217,11 +12169,7 @@
       "id": "threads-03",
       "group": "threads",
       "behavior": "Snooze, custom snooze and unsnooze",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12229,11 +12177,7 @@
       "id": "threads-04",
       "group": "threads",
       "behavior": "Search and navigate historical threads across environments",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12241,11 +12185,7 @@
       "id": "threads-05",
       "group": "threads",
       "behavior": "Import agent sessions and review cleanup before execution",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12253,11 +12193,7 @@
       "id": "threads-06",
       "group": "threads",
       "behavior": "Reconnect snapshots and ordered events preserve durable history",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12265,11 +12201,7 @@
       "id": "conversation-01",
       "group": "conversation",
       "behavior": "Compose multiline prompts with mentions, context chips and clipboard",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12277,11 +12209,7 @@
       "id": "conversation-02",
       "group": "conversation",
       "behavior": "Stream text, tool calls, command output and runtime errors",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12289,11 +12217,7 @@
       "id": "conversation-03",
       "group": "conversation",
       "behavior": "Queue, edit, cancel and interrupt messages",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12301,11 +12225,7 @@
       "id": "conversation-04",
       "group": "conversation",
       "behavior": "Approve or deny actions and answer agent questions with attachments",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12313,11 +12233,7 @@
       "id": "conversation-05",
       "group": "conversation",
       "behavior": "Render markdown, code, citations, links and workspace images",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12325,11 +12241,7 @@
       "id": "conversation-06",
       "group": "conversation",
       "behavior": "Select, accept and execute proposed plans",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12337,11 +12249,7 @@
       "id": "conversation-07",
       "group": "conversation",
       "behavior": "Persist drafts, prompt stash and recover after restart",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12349,11 +12257,7 @@
       "id": "providers-01",
       "group": "providers",
       "behavior": "Codex setup, authentication, models, turns and reconnect",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12361,11 +12265,7 @@
       "id": "providers-02",
       "group": "providers",
       "behavior": "Claude setup, authentication, models, turns and reconnect",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12373,11 +12273,7 @@
       "id": "providers-03",
       "group": "providers",
       "behavior": "Cursor setup, authentication, models, turns and reconnect",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12385,11 +12281,7 @@
       "id": "providers-04",
       "group": "providers",
       "behavior": "Grok setup, authentication, models, turns and reconnect",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12397,11 +12289,7 @@
       "id": "providers-05",
       "group": "providers",
       "behavior": "OpenCode setup, authentication, models, turns and reconnect",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12409,11 +12297,7 @@
       "id": "providers-06",
       "group": "providers",
       "behavior": "Antigravity setup, authentication, models, turns and reconnect",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12421,11 +12305,7 @@
       "id": "providers-07",
       "group": "providers",
       "behavior": "Provider instances, account switching and load balancing",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12433,11 +12313,7 @@
       "id": "providers-08",
       "group": "providers",
       "behavior": "Custom models, usage limits, feedback and provider updates",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12445,11 +12321,7 @@
       "id": "source-control-01",
       "group": "source-control",
       "behavior": "Branch selection, status, stage, unstage and commit",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12457,11 +12329,7 @@
       "id": "source-control-02",
       "group": "source-control",
       "behavior": "Pull, push and stacked actions with progress and failures",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12469,11 +12337,7 @@
       "id": "source-control-03",
       "group": "source-control",
       "behavior": "Checkpoint turn diffs and restore without corrupting history",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12481,11 +12345,7 @@
       "id": "source-control-04",
       "group": "source-control",
       "behavior": "Review files, copy paths, open editors and attach comments",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12493,11 +12353,7 @@
       "id": "source-control-05",
       "group": "source-control",
       "behavior": "List, create and act on pull requests and review threads",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12505,11 +12361,7 @@
       "id": "source-control-06",
       "group": "source-control",
       "behavior": "GitHub and Bitbucket credential routing across environments",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12517,11 +12369,7 @@
       "id": "terminal-01",
       "group": "terminal",
       "behavior": "Open, resize, write, reconnect and close a PTY",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12529,11 +12377,7 @@
       "id": "terminal-02",
       "group": "terminal",
       "behavior": "Multiple terminal tabs preserve thread isolation",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12541,11 +12385,7 @@
       "id": "terminal-03",
       "group": "terminal",
       "behavior": "Terminal links open files and URLs correctly",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12553,11 +12393,7 @@
       "id": "terminal-04",
       "group": "terminal",
       "behavior": "Run and cancel project scripts with observable exit status",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12565,11 +12401,7 @@
       "id": "preview-01",
       "group": "preview",
       "behavior": "Navigate previews with history, reload and device sizes",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12577,11 +12409,7 @@
       "id": "preview-02",
       "group": "preview",
       "behavior": "Browser profiles, import, cookies and isolated sessions",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12589,11 +12417,7 @@
       "id": "preview-03",
       "group": "preview",
       "behavior": "Pick elements and attach annotations to prompts",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12601,11 +12425,7 @@
       "id": "preview-04",
       "group": "preview",
       "behavior": "Automation actions, snapshots and recording transfer",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12613,11 +12433,7 @@
       "id": "preview-05",
       "group": "preview",
       "behavior": "Preview permissions, keyboard shortcuts and picture-in-picture",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12625,11 +12441,7 @@
       "id": "preview-06",
       "group": "preview",
       "behavior": "Snap Shot configuration, global capture and attachments",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12637,11 +12449,7 @@
       "id": "settings-01",
       "group": "settings",
       "behavior": "Global, environment, project and thread setting inheritance",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12649,11 +12457,7 @@
       "id": "settings-02",
       "group": "settings",
       "behavior": "Appearance themes, theme import, editor and contrast",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12661,11 +12465,7 @@
       "id": "settings-03",
       "group": "settings",
       "behavior": "Fonts, layout, animations and reduced motion",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12673,11 +12473,7 @@
       "id": "settings-04",
       "group": "settings",
       "behavior": "Keybindings edit, conflicts, palette and all entry points",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12685,11 +12481,7 @@
       "id": "settings-05",
       "group": "settings",
       "behavior": "Notifications, badges and snoozed thread policies",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12697,11 +12489,7 @@
       "id": "settings-06",
       "group": "settings",
       "behavior": "Storage, diagnostics, telemetry and open-source licenses",
-      "required_modes": [
-        "local",
-        "remote",
-        "relay/tunnel"
-      ],
+      "required_modes": ["local", "remote", "relay/tunnel"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12709,9 +12497,7 @@
       "id": "macos-01",
       "group": "macos",
       "behavior": "Native window lifecycle, menu, dock and quit behavior",
-      "required_modes": [
-        "macos"
-      ],
+      "required_modes": ["macos"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12719,9 +12505,7 @@
       "id": "macos-02",
       "group": "macos",
       "behavior": "Deep links, external URLs, file drops and editor launching",
-      "required_modes": [
-        "macos"
-      ],
+      "required_modes": ["macos"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12729,9 +12513,7 @@
       "id": "macos-03",
       "group": "macos",
       "behavior": "Keychain secrets and macOS permission recovery",
-      "required_modes": [
-        "macos"
-      ],
+      "required_modes": ["macos"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12739,9 +12521,7 @@
       "id": "macos-04",
       "group": "macos",
       "behavior": "Install, update, signing, notarization and rollback",
-      "required_modes": [
-        "macos"
-      ],
+      "required_modes": ["macos"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12749,9 +12529,7 @@
       "id": "macos-05",
       "group": "macos",
       "behavior": "Accessibility keyboard navigation and screen-reader semantics",
-      "required_modes": [
-        "macos"
-      ],
+      "required_modes": ["macos"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     },
@@ -12759,9 +12537,7 @@
       "id": "macos-06",
       "group": "macos",
       "behavior": "Large thread, diff and sidebar performance versus current client",
-      "required_modes": [
-        "macos"
-      ],
+      "required_modes": ["macos"],
       "required_entry_points": "All reachable current-client entry points; verify reverse actions and restart persistence",
       "acceptance": "Run identical fixture and action sequence in both clients; compare visible outcome, durable state, errors and emitted commands. Preserve original artifacts."
     }

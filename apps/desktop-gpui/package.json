@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/native-macos",
+  "name": "@t3tools/desktop-gpui",
   "private": true,
   "type": "module",
   "devDependencies": {

@@ -12,7 +12,7 @@ from pathlib import Path
 from evaluate import native_source_digest
 
 ROOT = Path(__file__).resolve().parents[3]
-APP = ROOT / "apps/native-macos"
+APP = ROOT / "apps/desktop-gpui"
 
 
 def command(kind, **fields):

@@ -1,9 +1,9 @@
 [package]
-name = "t3code-native-macos"
+name = "t3code-desktop-gpui"
 version = "0.1.0"
 edition = "2024"
 publish = false
-default-run = "t3code-native-macos"
+default-run = "t3code-desktop-gpui"
 
 [dependencies]
 gpui = { version = "=0.2.2", default-features = false, features = ["runtime_shaders"] }

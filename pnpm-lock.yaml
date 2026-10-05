@@ -505,7 +505,7 @@ importers:
         specifier: 'catalog:'
         version: 7.0.2
 
-  apps/native-macos:
+  apps/desktop-gpui:
     devDependencies:
       '@t3tools/contracts':
         specifier: workspace:*

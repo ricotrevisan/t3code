@@ -1,7 +1,9 @@
-# T3 Code native macOS client
+# T3 Code desktop GPUI client
 
-Experimental Rust/GPUI client for this maintained fork. Development stays on
-`t3code/port-t3code-to-rust-gpui`; it is not a replacement for the shipping app.
+Experimental Rust/GPUI desktop client for this maintained fork. Development stays
+on `t3code/port-t3code-to-rust-gpui`; it is not a replacement for the shipping app.
+It uses [GPUI](https://gpui.rs), the UI framework from Zed, and builds its interface
+from [GPUI Kit](https://gpui-kit.com) components.
 
 ## Build and run
 
@@ -10,8 +12,8 @@ GPUI Component 0.5.1 controls. Runtime Metal shader compilation avoids requiring
 Xcode's separately downloaded offline Metal toolchain.
 
 ```sh
-cargo build --manifest-path apps/native-macos/Cargo.toml
-cargo run --manifest-path apps/native-macos/Cargo.toml
+cargo build --manifest-path apps/desktop-gpui/Cargo.toml
+cargo run --manifest-path apps/desktop-gpui/Cargo.toml
 ```
 
 Enter the HTTP(S) server origin and a pairing URL or one-time token, then pair.
@@ -91,11 +93,11 @@ picking require an explicit browser adapter; a URL viewer is not an equivalent.
 ## Verify the implementation
 
 ```sh
-cargo test --manifest-path apps/native-macos/Cargo.toml
-cargo clippy --manifest-path apps/native-macos/Cargo.toml --all-targets -- -D warnings
-python3 -m unittest discover -s apps/native-macos/parity -p 'test_*.py'
-python3 apps/native-macos/parity/differential.py --output /external/evidence/directory
-python3 apps/native-macos/parity/live_smoke.py --output /external/live-evidence --confirm-isolated-server
+cargo test --manifest-path apps/desktop-gpui/Cargo.toml
+cargo clippy --manifest-path apps/desktop-gpui/Cargo.toml --all-targets -- -D warnings
+python3 -m unittest discover -s apps/desktop-gpui/parity -p 'test_*.py'
+python3 apps/desktop-gpui/parity/differential.py --output /external/evidence/directory
+python3 apps/desktop-gpui/parity/live_smoke.py --output /external/live-evidence --confirm-isolated-server
 ```
 
 The differential runner executes the **current client's production reducer**
@@ -111,10 +113,10 @@ The Mac must also be unlocked. The driver reports a locked screen independently
 of permission status and refuses input and capture while it is locked.
 
 ```sh
-swift apps/native-macos/parity/native-driver.swift <owned-native-pid> inspect
-swift apps/native-macos/parity/native-driver.swift <owned-native-pid> capture /external/new-window.png
-swift apps/native-macos/parity/native-driver.swift <owned-native-pid> click <window-x> <window-y>
-printf 'Fixture text' | swift apps/native-macos/parity/native-driver.swift <owned-native-pid> type
+swift apps/desktop-gpui/parity/native-driver.swift <owned-native-pid> inspect
+swift apps/desktop-gpui/parity/native-driver.swift <owned-native-pid> capture /external/new-window.png
+swift apps/desktop-gpui/parity/native-driver.swift <owned-native-pid> click <window-x> <window-y>
+printf 'Fixture text' | swift apps/desktop-gpui/parity/native-driver.swift <owned-native-pid> type
 ```
 
 The native adapter accepts only the experimental executable, raises its owned
@@ -130,7 +132,7 @@ problem.
 `parity-session` is a real-server transport/read-model runner:
 
 ```sh
-cargo run --manifest-path apps/native-macos/Cargo.toml --bin parity-session < actions.json
+cargo run --manifest-path apps/desktop-gpui/Cargo.toml --bin parity-session < actions.json
 ```
 
 Actions are `dispatch` with a client `command`, `call` with `tag`/`payload`, or
@@ -145,8 +147,8 @@ for inspection. It requires the same private connection environment variables.
 ## Evaluate product parity
 
 ```sh
-python3 apps/native-macos/parity/evaluate.py evaluate
-python3 apps/native-macos/parity/evaluate.py evaluate --evidence /path/to/evidence.json
+python3 apps/desktop-gpui/parity/evaluate.py evaluate
+python3 apps/desktop-gpui/parity/evaluate.py evaluate --evidence /path/to/evidence.json
 ```
 
 `parity/baseline.json` pins the fork revision, source/RPC discovery inventory and

@@ -2,7 +2,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, Read};
-use t3code_native_macos::{
+use t3code_desktop_gpui::{
     connection::{self, Update},
     shell::Shell,
     thread::ThreadDetail,

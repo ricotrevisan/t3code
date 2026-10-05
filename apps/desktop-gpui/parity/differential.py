@@ -9,7 +9,7 @@ from pathlib import Path
 from evaluate import native_source_digest
 
 ROOT = Path(__file__).resolve().parents[3]
-APP = ROOT / "apps/native-macos"
+APP = ROOT / "apps/desktop-gpui"
 DATE = "2026-04-01T00:00:00.000Z"
 LATER = "2026-04-01T01:00:00.000Z"
 BASE = {

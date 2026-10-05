@@ -37,7 +37,7 @@ func output(_ value: [String: Any]) {
 let args = CommandLine.arguments
 if args.count < 3 { fail("Usage: swift native-driver.swift <owned-native-pid> <inspect|click|scroll|type|key|capture|close> [arguments]") }
 guard let pid = pid_t(args[1]), let app = NSRunningApplication(processIdentifier: pid),
-      app.executableURL?.lastPathComponent == "t3code-native-macos" else { fail("Target is not the experimental native T3 client") }
+      app.executableURL?.lastPathComponent == "t3code-desktop-gpui" else { fail("Target is not the experimental native T3 client") }
 guard AXIsProcessTrusted() else { fail("Grant Accessibility to the execution host in macOS settings") }
 let command = args[2]
 let screenLocked = (CGSessionCopyCurrentDictionary() as? [String:Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false

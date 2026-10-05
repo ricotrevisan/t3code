@@ -9,7 +9,7 @@ use gpui_component::{
     text::TextView,
 };
 use serde_json::{Value, json};
-use t3code_native_macos::{
+use t3code_desktop_gpui::{
     auth, commands, connection, credentials, drafts, files, palette, project_actions, providers,
     shell, sidebar, thread, workspaces,
 };
