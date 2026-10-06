@@ -210,6 +210,24 @@ pub fn matching(query: &str, has_thread: bool) -> Vec<&'static Entry> {
         .collect()
 }
 
+/// Rows the composer's "/" menu shows for `text`; `None` when the text is not a slash command.
+pub fn slash_matches(text: &str, has_thread: bool) -> Option<Vec<&'static Entry>> {
+    text.trim().strip_prefix('/').map(|rest| {
+        let mut entries = matching(rest.trim(), has_thread);
+        entries.truncate(8);
+        entries
+    })
+}
+
+/// Moves a list selection one row, wrapping at both ends.
+pub fn step(index: usize, count: usize, forward: bool) -> usize {
+    match count {
+        0 => 0,
+        _ if forward => (index + 1) % count,
+        _ => (index + count - 1) % count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +241,18 @@ mod tests {
         assert_eq!(matching("DELETE THREAD", true)[0].command, Command::Delete);
         assert_eq!(matching("unarchive", true)[0].command, Command::Unarchive);
         assert!(matching("not-a-command", true).is_empty());
+    }
+
+    #[test]
+    fn slash_menu_only_follows_a_leading_slash_and_selection_wraps() {
+        assert!(slash_matches("archive", true).is_none());
+        assert_eq!(slash_matches(" /", true).unwrap().len(), 8);
+        assert_eq!(
+            slash_matches("/archive", true).unwrap()[1].command,
+            Command::Unarchive
+        );
+        assert_eq!(step(0, 3, false), 2);
+        assert_eq!(step(2, 3, true), 0);
+        assert_eq!(step(4, 0, true), 0);
     }
 }

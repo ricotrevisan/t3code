@@ -517,8 +517,6 @@ fn running_turn_swaps_send_for_stop(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn escape_closes_the_topmost_overlay_and_thread_menu_tracks_state(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
-    cx.simulate_keystrokes("cmd-,");
-    assert!(app.read_with(cx, |app, _| app.settings_open));
     let trigger = cx.debug_bounds("thread-menu").unwrap();
     cx.simulate_click(trigger.center(), Default::default());
     cx.run_until_parked();
@@ -529,6 +527,9 @@ fn escape_closes_the_topmost_overlay_and_thread_menu_tracks_state(cx: &mut TestA
     // The menu hangs below its trigger instead of the window's left edge.
     assert!(pin.top() >= trigger.bottom());
     assert!(pin.left() >= trigger.left() - px(1.));
+    // Settings covers the window with a backdrop, so it opens after the menu.
+    cx.simulate_keystrokes("cmd-,");
+    assert!(app.read_with(cx, |app, _| app.settings_open && app.thread_menu_open));
     cx.simulate_keystrokes("escape");
     assert!(app.read_with(cx, |app, _| !app.thread_menu_open && app.settings_open));
     cx.simulate_keystrokes("escape");
@@ -1863,4 +1864,102 @@ fn catalog_options_reach_emitted_turn_and_invalid_choices_preserve_selection(
         app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
         "Owned options prompt"
     );
+}
+
+#[gpui_kit::test]
+fn palette_stays_centred_as_the_window_resizes(cx: &mut TestAppContext) {
+    let (_app, cx, _requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-k");
+    for width in [1280., 900.] {
+        cx.simulate_resize(size(px(width), px(1000.)));
+        cx.run_until_parked();
+        let palette = cx.debug_bounds("command-palette").expect("palette is open");
+        let window = cx.update(|window, _| window.viewport_size());
+        assert!((palette.center().x - window.width / 2.).abs() <= px(1.));
+        let backdrop = cx.debug_bounds("overlay-backdrop").unwrap();
+        assert_eq!(backdrop.size, window);
+    }
+}
+
+#[gpui_kit::test]
+fn settings_closes_on_a_backdrop_click_but_not_an_inside_click(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-,");
+    cx.run_until_parked();
+    let settings = cx.debug_bounds("settings").expect("settings is open");
+    cx.simulate_click(settings.origin + point(px(8.), px(8.)), Default::default());
+    assert!(app.read_with(cx, |app, _| app.settings_open));
+    cx.simulate_click(
+        point(settings.left() - px(24.), settings.center().y),
+        Default::default(),
+    );
+    assert!(!app.read_with(cx, |app, _| app.settings_open));
+}
+
+#[gpui_kit::test]
+fn slash_menu_runs_the_arrow_selected_command_on_enter(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    // "Pin thread" and "Unpin thread" both match and dispatch different commands,
+    // so the request proves which row Enter ran.
+    cx.simulate_input("/pin thread");
+    cx.simulate_keystrokes("down");
+    assert_eq!(app.read_with(cx, |app, _| app.slash_index), 1);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let connection::Command::Call { tag, payload, reply } = requests.try_recv().unwrap() else {
+        panic!("expected the selected command");
+    };
+    assert_eq!(tag, "orchestration.dispatchCommand");
+    assert_eq!(payload["type"], "thread.unpin");
+    reply.send_blocking(Err("owned fixture".into())).unwrap();
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err());
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        ""
+    );
+    // Up wraps to the last row, and Escape clears the slash text instead of sending.
+    cx.simulate_input("/");
+    cx.simulate_keystrokes("up");
+    assert_eq!(app.read_with(cx, |app, _| app.slash_index), 7);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        ""
+    );
+    assert!(requests.try_recv().is_err());
+}
+
+#[gpui_kit::test]
+fn catalog_and_thread_menu_close_on_an_outside_click(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let chip = cx.debug_bounds("model-catalog").unwrap();
+    cx.simulate_click(chip.center(), Default::default());
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.catalog_open));
+    let catalog = cx
+        .debug_bounds("provider-model-catalog")
+        .expect("catalog is open");
+    // The catalog opens upward from its chip.
+    assert!(catalog.bottom() <= chip.top());
+    assert!(catalog.left() >= chip.left() - px(1.));
+    cx.simulate_click(catalog.origin + point(px(8.), px(8.)), Default::default());
+    assert!(app.read_with(cx, |app, _| app.catalog_open));
+    cx.simulate_click(
+        point(catalog.right() + px(24.), catalog.top() + px(8.)),
+        Default::default(),
+    );
+    assert!(!app.read_with(cx, |app, _| app.catalog_open));
+    // Pressing the chip again while open closes it rather than reopening it.
+    cx.simulate_click(chip.center(), Default::default());
+    cx.run_until_parked();
+    cx.simulate_click(chip.center(), Default::default());
+    assert!(!app.read_with(cx, |app, _| app.catalog_open));
+
+    let trigger = cx.debug_bounds("thread-menu").unwrap();
+    cx.simulate_click(trigger.center(), Default::default());
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.thread_menu_open));
+    cx.simulate_click(point(px(640.), px(500.)), Default::default());
+    assert!(!app.read_with(cx, |app, _| app.thread_menu_open));
 }

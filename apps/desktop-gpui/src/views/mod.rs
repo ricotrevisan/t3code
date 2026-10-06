@@ -9,6 +9,7 @@ mod catalog;
 mod composer;
 mod conversation;
 mod inspector;
+mod overlay;
 mod palette;
 mod settings;
 mod sidebar;

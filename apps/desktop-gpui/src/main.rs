@@ -26,6 +26,10 @@ gpui_kit::actions!(
         ClosePalette,
         PaletteNext,
         PalettePrevious,
+        SlashNext,
+        SlashPrevious,
+        SlashRun,
+        SlashClear,
         NewThread,
         StashPrompt,
         ToggleSettle,
@@ -95,6 +99,8 @@ struct NativeApp {
     palette_open: bool,
     palette_query: Entity<InputState>,
     palette_index: usize,
+    /// Highlighted row of the composer's "/" menu.
+    slash_index: usize,
     previous_focus: Option<FocusHandle>,
     shell: shell::Shell,
     archived_shell: shell::Shell,
@@ -296,14 +302,15 @@ impl NativeApp {
         );
         subscriptions.push(
             cx.subscribe_in(&composer, window, |app, _, event, window, cx| {
-                if matches!(event, InputEvent::Change)
-                    && let Some(id) = app.selected_thread.clone()
-                {
-                    let text = app.composer.read(cx).value().to_string();
-                    app.drafts.insert(id.clone(), text.clone());
-                    if let Some(store) = &mut app.draft_store {
-                        store.set(&app.environment_scope, &id, text);
-                        app.schedule_draft_save(cx);
+                if matches!(event, InputEvent::Change) {
+                    app.slash_index = 0;
+                    if let Some(id) = app.selected_thread.clone() {
+                        let text = app.composer.read(cx).value().to_string();
+                        app.drafts.insert(id.clone(), text.clone());
+                        if let Some(store) = &mut app.draft_store {
+                            store.set(&app.environment_scope, &id, text);
+                            app.schedule_draft_save(cx);
+                        }
                     }
                 }
                 // Enter sends and Shift+Enter inserts a newline, as in the reference composer.
@@ -350,6 +357,7 @@ impl NativeApp {
             palette_open: false,
             palette_query,
             palette_index: 0,
+            slash_index: 0,
             previous_focus: None,
             shell: shell::Shell::default(),
             archived_shell: shell::Shell::default(),
@@ -580,13 +588,7 @@ impl NativeApp {
             self.selected_thread.is_some(),
         )
         .len();
-        if count > 0 {
-            self.palette_index = if forward {
-                (self.palette_index + 1) % count
-            } else {
-                (self.palette_index + count - 1) % count
-            };
-        }
+        self.palette_index = palette::step(self.palette_index, count, forward);
         cx.notify();
     }
 
@@ -3043,9 +3045,7 @@ impl Render for NativeApp {
                             ),
                     ),
             )
-            .children(self.render_palette(cx))
-            .children(self.render_settings(cx))
-            .children(self.render_catalog(cx))
+            .children(self.render_overlay_layer(cx))
     }
 }
 
@@ -3095,6 +3095,10 @@ fn bind_native_keys(cx: &mut App) {
             PalettePrevious,
             Some("NativeApp > NativePalette > Input"),
         ),
+        KeyBinding::new("down", SlashNext, Some("NativeSlashMenu > Input")),
+        KeyBinding::new("up", SlashPrevious, Some("NativeSlashMenu > Input")),
+        KeyBinding::new("enter", SlashRun, Some("NativeSlashMenu > Input")),
+        KeyBinding::new("escape", SlashClear, Some("NativeSlashMenu > Input")),
     ]);
 }
 

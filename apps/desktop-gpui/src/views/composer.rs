@@ -1,15 +1,36 @@
+use gpui_kit::base::Selectable;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable, Sizable,
     button::{Button, ButtonVariants as _},
     input::Textarea,
 };
-use gpui_kit::{Context, div, prelude::*, px};
+use gpui_kit::{Anchor, App, Context, Window, anchored, deferred, div, prelude::*, px};
 use serde_json::json;
 use t3code_desktop_gpui::palette;
 
-use crate::NativeApp;
+use crate::{NativeApp, SlashClear, SlashNext, SlashPrevious, SlashRun};
 
 impl NativeApp {
+    fn slash_entries(&self, cx: &App) -> Vec<&'static palette::Entry> {
+        palette::slash_matches(
+            &self.composer.read(cx).value(),
+            self.selected_thread.is_some(),
+        )
+        .unwrap_or_default()
+    }
+
+    /// Runs the "/" menu row at `index`; with no such row the prompt is sent as typed.
+    fn run_slash(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = self.slash_entries(cx).get(index).map(|entry| entry.command) else {
+            self.send_prompt(window, cx);
+            return;
+        };
+        self.slash_index = 0;
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.execute_command(command, window, cx);
+    }
+
     pub(crate) fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let muted_foreground = cx.theme().muted_foreground;
         let border = cx.theme().border;
@@ -21,11 +42,31 @@ impl NativeApp {
         let turn_running = self.turn_running();
         let active_model = self.active_model_label(cx);
         let composer_value = self.composer.read(cx).value().to_string();
-        let slash_entries = composer_value
-            .trim()
-            .strip_prefix('/')
-            .map(|rest| palette::matching(rest.trim(), self.selected_thread.is_some()));
+        let slash_entries = palette::slash_matches(&composer_value, self.selected_thread.is_some());
         div()
+            // While the "/" menu shows, arrows, Enter, and Escape drive it instead of the text.
+            .when(slash_entries.is_some(), |view| {
+                view.key_context("NativeSlashMenu")
+            })
+            .on_action(cx.listener(|app, _: &SlashNext, _, cx| {
+                let count = app.slash_entries(cx).len();
+                app.slash_index = palette::step(app.slash_index, count, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &SlashPrevious, _, cx| {
+                let count = app.slash_entries(cx).len();
+                app.slash_index = palette::step(app.slash_index, count, false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &SlashRun, window, cx| {
+                app.run_slash(app.slash_index, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &SlashClear, window, cx| {
+                app.composer
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                app.slash_index = 0;
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .gap_2()
@@ -105,18 +146,16 @@ impl NativeApp {
                                     .child("No matching commands"),
                             )
                         })
-                        .children(entries.into_iter().take(8).map(|entry| {
-                            let command = entry.command;
+                        .children(entries.into_iter().enumerate().map(|(index, entry)| {
                             let label = entry.label;
                             Button::new(gpui_kit::SharedString::from(format!("slash-{label}")))
                                 .debug_selector(move || format!("slash-{label}"))
                                 .label(label)
                                 .ghost()
                                 .small()
+                                .selected(index == self.slash_index)
                                 .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.composer
-                                        .update(cx, |input, cx| input.set_value("", window, cx));
-                                    app.execute_command(command, window, cx);
+                                    app.run_slash(index, window, cx)
                                 }))
                         })),
                 )
@@ -177,21 +216,35 @@ impl NativeApp {
                                 )
                             })),
                     )
+                    // The catalog opens upward from its chip rather than a fixed window position.
                     .child(
-                        Button::new("model-catalog")
-                            .debug_selector(|| "model-catalog".into())
-                            .label(if active_model.is_empty() {
-                                "Select model".to_owned()
-                            } else {
-                                active_model.clone()
+                        div()
+                            .flex()
+                            .flex_col()
+                            .when_some(self.render_catalog(cx), |view, catalog| {
+                                view.child(deferred(
+                                    anchored()
+                                        .anchor(Anchor::BottomLeft)
+                                        .snap_to_window()
+                                        .child(catalog),
+                                ))
                             })
-                            .ghost()
-                            .small()
-                            .tooltip("Choose the provider and model")
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.catalog_open = !app.catalog_open;
-                                cx.notify();
-                            })),
+                            .child(
+                                Button::new("model-catalog")
+                                    .debug_selector(|| "model-catalog".into())
+                                    .label(if active_model.is_empty() {
+                                        "Select model".to_owned()
+                                    } else {
+                                        active_model.clone()
+                                    })
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Choose the provider and model")
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.catalog_open = !app.catalog_open;
+                                        cx.notify();
+                                    })),
+                            ),
                     )
                     .child(div().flex_1())
                     // One slot: Send while idle, Stop while a turn runs.

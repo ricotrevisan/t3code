@@ -28,10 +28,9 @@ impl NativeApp {
         self.settings_open.then(|| {
             div()
                 .id("settings")
+                .debug_selector(|| "settings".into())
                 .key_context("NativeSettings")
-                .absolute()
-                .top(px(72.))
-                .left(px(320.))
+                .occlude()
                 .w(px(640.))
                 .max_h(px(620.))
                 .overflow_y_scroll()

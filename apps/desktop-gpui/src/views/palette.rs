@@ -24,10 +24,9 @@ impl NativeApp {
             );
             div()
                 .id("command-palette")
+                .debug_selector(|| "command-palette".into())
                 .key_context("NativePalette")
-                .absolute()
-                .top(px(72.))
-                .left(px(320.))
+                .occlude()
                 .w(px(640.))
                 .max_h(px(600.))
                 .overflow_y_scroll()

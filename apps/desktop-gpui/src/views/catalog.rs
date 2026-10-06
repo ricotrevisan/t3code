@@ -19,10 +19,10 @@ impl NativeApp {
         self.catalog_open.then(|| {
             div()
                 .id("provider-model-catalog")
+                .debug_selector(|| "provider-model-catalog".into())
                 .key_context("NativeCatalog")
-                .absolute()
-                .bottom(px(150.))
-                .left(px(300.))
+                .occlude()
+                .mb_1()
                 .w(px(520.))
                 .max_h(px(420.))
                 .overflow_y_scroll()
