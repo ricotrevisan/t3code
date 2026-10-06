@@ -202,6 +202,23 @@ fn slash_menu_filters_and_executes_commands(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn sidebar_search_runs_on_enter(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.search.update(cx, |input, cx| input.focus(window, cx));
+        })
+    });
+    cx.simulate_input("current");
+    cx.simulate_keystrokes("enter");
+    let connection::Command::Call { tag, payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a thread search");
+    };
+    assert_eq!(tag, "orchestration.searchThreads");
+    assert_eq!(payload["query"], "current");
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");
@@ -661,6 +678,9 @@ fn editing_while_send_is_pending_does_not_get_erased(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn delete_requires_confirmation_before_any_request(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
+    let menu = cx.debug_bounds("thread-menu").unwrap();
+    cx.simulate_click(menu.center(), Default::default());
+    cx.run_until_parked();
     let bounds = cx.debug_bounds("delete").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     assert!(requests.try_recv().is_err());

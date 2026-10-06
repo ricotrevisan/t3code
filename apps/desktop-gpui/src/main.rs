@@ -36,6 +36,19 @@ gpui_kit::actions!(
     ]
 );
 
+const THREAD_ACTIONS: &[(&str, &str, &str)] = &[
+    ("rename", "Rename", "thread.meta.update"),
+    ("archive", "Archive", "thread.archive"),
+    ("unarchive", "Unarchive", "thread.unarchive"),
+    ("settle", "Settle", "thread.settle"),
+    ("unsettle", "Unsettle", "thread.unsettle"),
+    ("snooze", "Snooze 1h", "thread.snooze"),
+    ("unsnooze", "Unsnooze", "thread.unsnooze"),
+    ("pin", "Pin", "thread.pin"),
+    ("unpin", "Unpin", "thread.unpin"),
+    ("delete", "Delete thread", "thread.delete"),
+];
+
 #[cfg(test)]
 mod ui_tests;
 mod theme;
@@ -87,6 +100,7 @@ struct NativeApp {
     settings_open: bool,
     activity_expanded: bool,
     inspector_open: bool,
+    thread_menu_open: bool,
     available_editors: Vec<String>,
     saved_window: Option<window_state::WindowSize>,
     project_actions_open: bool,
@@ -181,8 +195,11 @@ impl NativeApp {
         let provider =
             cx.new(|cx| single_line_input(window, cx).placeholder("Provider instance ID"));
         let model = cx.new(|cx| single_line_input(window, cx).placeholder("Model ID"));
-        let search =
-            cx.new(|cx| single_line_input(window, cx).placeholder("Search thread history"));
+        let search = cx.new(|cx| {
+            single_line_input(window, cx)
+                .submit_on_enter(true)
+                .placeholder("Search thread history")
+        });
         let custom_snooze = cx.new(|cx| {
             single_line_input(window, cx).placeholder("Snooze until: ISO date/time with timezone")
         });
@@ -334,6 +351,7 @@ impl NativeApp {
             settings_open: false,
             activity_expanded: false,
             inspector_open: true,
+            thread_menu_open: false,
             available_editors: Vec::new(),
             saved_window: None,
             project_actions_open: false,
@@ -3186,9 +3204,9 @@ impl Render for NativeApp {
                 div()
                     .flex()
                     .flex_col()
-                    .items_center()
-                    .justify_center()
+                    .items_start()
                     .gap_2()
+                    .pt_6()
                     .h(px(360.))
                     .text_color(muted_foreground)
                     .child(
@@ -3497,32 +3515,19 @@ impl Render for NativeApp {
                                 cx.notify();
                             })),
                     )
-                    .children(
-                    [
-                        ("rename", "Rename", "thread.meta.update"),
-                        ("archive", "Archive", "thread.archive"),
-                        ("unarchive", "Unarchive", "thread.unarchive"),
-                        ("settle", "Settle", "thread.settle"),
-                        ("unsettle", "Unsettle", "thread.unsettle"),
-                        ("snooze", "Snooze", "thread.snooze"),
-                        ("unsnooze", "Unsnooze", "thread.unsnooze"),
-                        ("pin", "Pin", "thread.pin"),
-                        ("unpin", "Unpin", "thread.unpin"),
-                        ("delete", "Delete", "thread.delete"),
-                    ]
-                    .into_iter()
-                    .map(|(id, label, kind)| {
-                        Button::new(id)
-                            .debug_selector(move || id.into())
-                            .label(label)
+                    .child(
+                        Button::new("thread-menu")
+                            .debug_selector(|| "thread-menu".into())
+                            .label("More")
                             .ghost()
                             .small()
-                            .on_click(
-                                cx.listener(move |app, _, window, cx| {if kind=="thread.delete" && app.pending_threads.iter().any(|draft|Some(&draft.thread.id)==app.selected_thread.as_ref()){app.discard_pending(window,cx);}else{app.lifecycle(kind,cx);}}),
-                            )
-                    }),
-                ),
-            );
+                            .tooltip("More thread actions")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.thread_menu_open = !app.thread_menu_open;
+                                cx.notify();
+                            })),
+                    ),
+                );
 
         let active_model = {
             let instance = self.provider.read(cx).value().to_string();
@@ -3540,6 +3545,47 @@ impl Render for NativeApp {
             .trim()
             .strip_prefix('/')
             .map(|rest| palette::matching(rest.trim(), self.selected_thread.is_some()));
+        let thread_menu = self.thread_menu_open.then(|| {
+            div()
+                .id("thread-menu-popover")
+                .absolute()
+                .top(px(96.))
+                .left(px(8.))
+                .w(px(220.))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .bg(popover)
+                .border_1()
+                .border_color(border)
+                .shadow_lg()
+                .children(THREAD_ACTIONS.iter().map(|(id, label, kind)| {
+                    let armed = *id == "delete"
+                        && self.confirm_delete.as_deref() == self.selected_thread.as_deref();
+                    Button::new(*id)
+                        .debug_selector(move || (*id).into())
+                        .label(if armed { "Confirm delete" } else { *label })
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            if *kind == "thread.delete"
+                                && app.pending_threads.iter().any(|draft| {
+                                    Some(&draft.thread.id) == app.selected_thread.as_ref()
+                                })
+                            {
+                                app.discard_pending(window, cx);
+                                app.thread_menu_open = false;
+                            } else {
+                                app.lifecycle(kind, cx);
+                                // Delete keeps the menu open so the second click confirms.
+                                app.thread_menu_open = app.confirm_delete.is_some();
+                            }
+                            cx.notify();
+                        }))
+                }))
+        });
         let composer_card = div()
             .flex()
             .flex_col()
@@ -4224,7 +4270,9 @@ impl Render for NativeApp {
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
+                                    .relative()
                                     .child(thread_header)
+                                    .when_some(thread_menu, |view, menu| view.child(menu))
                                     .child(conversation)
                                     .child(composer_card)
                                     .child(status_bar),
