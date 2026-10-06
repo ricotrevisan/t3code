@@ -100,6 +100,14 @@ pub fn set_thread_mode(kind: &str, thread_id: &str, field: &str, value: &str) ->
     command
 }
 
+/// Restore the working tree to a completed turn's checkpoint.
+pub fn revert_command(thread_id: &str, turn_count: u64) -> Value {
+    let mut command = command("thread.checkpoint.revert", thread_id);
+    command["turnCount"] = json!(turn_count);
+    command["createdAt"] = json!(now());
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +161,15 @@ mod tests {
         );
         assert_eq!(interaction["interactionMode"], "plan");
         assert!(interaction.get("runtimeMode").is_none());
+    }
+
+    #[test]
+    fn revert_command_targets_a_checkpoint_turn() {
+        let revert = revert_command("t", 3);
+        assert_eq!(revert["type"], "thread.checkpoint.revert");
+        assert_eq!(revert["threadId"], "t");
+        assert_eq!(revert["turnCount"], 3);
+        assert!(revert["createdAt"].is_string());
     }
 
     #[test]

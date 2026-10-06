@@ -115,6 +115,49 @@ fn settings_surface_opens_and_closes(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn checkpoint_revert_arms_then_dispatches(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(json!({
+                "id": "t",
+                "title": "Thread",
+                "messages": [],
+                "activities": [],
+                "proposedPlans": [],
+                "checkpoints": [{
+                    "turnId": "turn-1",
+                    "checkpointTurnCount": 2,
+                    "checkpointRef": "ref",
+                    "status": "ready",
+                    "files": [{"path": "a.rs", "kind": "modified", "additions": 1, "deletions": 0}],
+                    "assistantMessageId": null,
+                    "completedAt": "2026-01-01T00:00:00Z"
+                }],
+                "session": null,
+            }));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+
+    let bounds = cx
+        .debug_bounds("revert-checkpoint")
+        .expect("revert button is visible");
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(requests.try_recv().is_err(), "first click only arms the revert");
+    assert_eq!(app.read_with(cx, |app, _| app.confirm_revert), Some(2));
+
+    let bounds = cx.debug_bounds("revert-checkpoint").unwrap();
+    cx.simulate_click(bounds.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a revert command");
+    };
+    assert_eq!(payload["type"], "thread.checkpoint.revert");
+    assert_eq!(payload["turnCount"], 2);
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");

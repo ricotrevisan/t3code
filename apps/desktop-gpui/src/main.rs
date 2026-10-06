@@ -62,6 +62,7 @@ struct NativeApp {
     snooze_wake: Option<Task<()>>,
     custom_snooze: Entity<InputState>,
     confirm_delete: Option<String>,
+    confirm_revert: Option<u64>,
     confirm_project_removal: Option<String>,
     commands: Option<async_channel::Sender<connection::Command>>,
     connection_task: Option<Task<()>>,
@@ -296,6 +297,7 @@ impl NativeApp {
             snooze_wake: None,
             custom_snooze,
             confirm_delete: None,
+            confirm_revert: None,
             confirm_project_removal: None,
             commands: None,
             connection_task: None,
@@ -2503,6 +2505,24 @@ impl NativeApp {
         let payload = commands::set_thread_mode(kind, &id, field, value);
         self.dispatch(payload, cx);
     }
+
+    /// Revert the working tree to a completed turn's checkpoint. The first
+    /// click arms the action; the second dispatches it.
+    fn revert_checkpoint(&mut self, turn_count: u64, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_thread.clone() else {
+            return;
+        };
+        if self.confirm_revert != Some(turn_count) {
+            self.confirm_revert = Some(turn_count);
+            self.status =
+                "Click again to restore the working tree to this checkpoint".into();
+            cx.notify();
+            return;
+        }
+        self.confirm_revert = None;
+        let payload = commands::revert_command(&id, turn_count);
+        self.dispatch(payload, cx);
+    }
 }
 
 impl Drop for NativeApp {
@@ -2839,6 +2859,7 @@ impl Render for NativeApp {
                         message["id"].as_str().unwrap_or("unknown")
                     ));
                     let text = message["text"].as_str().unwrap_or("").to_owned();
+                    let copy_text = text.clone();
                     let role = message["role"].as_str().unwrap_or("message");
                     let label = conversation::role_label(role);
                     let created = message["createdAt"].as_str().and_then(conversation::clock_time);
@@ -2848,13 +2869,51 @@ impl Render for NativeApp {
                         (None, true) => format!("{label} · streaming"),
                         (None, false) => label.to_owned(),
                     };
+                    let attachments = message["attachments"].as_array().cloned().unwrap_or_default();
+                    let attachment_row = (!attachments.is_empty()).then(|| {
+                        div().flex().flex_wrap().gap_1().children(
+                            attachments.into_iter().map(|attachment| {
+                                let name = attachment["name"].as_str().unwrap_or("attachment");
+                                let size = attachment["sizeBytes"].as_u64().unwrap_or(0);
+                                div()
+                                    .px_2()
+                                    .rounded_sm()
+                                    .bg(muted)
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child(format!("{name} · {size} B"))
+                            }),
+                        )
+                    });
                     let body = div()
                         .flex()
                         .flex_col()
                         .gap_1()
                         .p_2()
                         .rounded_md()
-                        .child(div().text_xs().text_color(muted_foreground).child(meta))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(div().text_xs().text_color(muted_foreground).child(meta))
+                                .child(
+                                    Button::new(gpui_kit::SharedString::from(format!(
+                                        "copy-{}",
+                                        message["id"].as_str().unwrap_or("unknown")
+                                    )))
+                                    .label("Copy")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            copy_text.clone(),
+                                        ))
+                                    })),
+                                ),
+                        )
+                        .when_some(attachment_row, |view, row| view.child(row))
                         .child(TextView::markdown(id, text));
                     let row = match role {
                         "user" => div().flex().justify_end().child(body.max_w(px(720.)).bg(secondary)),
@@ -2945,6 +3004,8 @@ impl Render for NativeApp {
                 let files = checkpoint["files"].as_array().cloned().unwrap_or_default();
                 if !files.is_empty() {
                     let (additions, deletions) = conversation::diff_totals(&files);
+                    let turn_count = checkpoint["checkpointTurnCount"].as_u64().unwrap_or(0);
+                    let confirm = self.confirm_revert == Some(turn_count);
                     let mut card = div()
                         .flex()
                         .flex_col()
@@ -2988,6 +3049,18 @@ impl Render for NativeApp {
                                 )),
                         );
                     }
+                    card = card.child(
+                        div().flex().justify_end().pt_1().child(
+                            Button::new("revert-checkpoint")
+                                .debug_selector(|| "revert-checkpoint".into())
+                                .label(if confirm { "Confirm revert" } else { "Revert to here" })
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.revert_checkpoint(turn_count, cx)
+                                })),
+                        ),
+                    );
                     conversation = conversation.child(card);
                 }
             }
@@ -3193,6 +3266,17 @@ impl Render for NativeApp {
                         .and_then(|thread| thread.branch.clone())
                 })
             });
+        let header_session = self.detail.thread.as_ref().and_then(|detail| {
+            let status = detail["session"]["status"].as_str()?;
+            let (label, danger) = match status {
+                "running" | "starting" => ("Running", false),
+                "error" => ("Error", true),
+                "interrupted" | "stopped" => ("Interrupted", true),
+                "idle" | "ready" => return None,
+                other => (other, false),
+            };
+            Some((label.to_owned(), danger))
+        });
         let header_project = self
             .selected_project
             .as_ref()
@@ -3240,6 +3324,17 @@ impl Render for NativeApp {
                                 .text_xs()
                                 .text_color(muted_foreground)
                                 .child(branch),
+                        )
+                    })
+                    .when_some(header_session, |view, (label, is_danger)| {
+                        view.child(
+                            div()
+                                .px_2()
+                                .rounded_sm()
+                                .bg(muted)
+                                .text_xs()
+                                .text_color(if is_danger { danger } else { muted_foreground })
+                                .child(label),
                         )
                     }),
             )
