@@ -3667,6 +3667,7 @@ impl Render for NativeApp {
                     .child(
                         Button::new("settings-open")
                             .debug_selector(|| "settings-open".into())
+                            .icon(gpui_kit::assets::IconName::Settings)
                             .label("Settings")
                             .ghost()
                             .small()
@@ -3772,6 +3773,7 @@ impl Render for NativeApp {
                         view.child(
                             Button::new("branch-selector")
                                 .debug_selector(|| "branch-selector".into())
+                                .icon(gpui_kit::assets::IconName::GitBranch)
                                 .label(branch)
                                 .ghost()
                                 .small()
@@ -3814,6 +3816,7 @@ impl Render for NativeApp {
                     .child(
                         Button::new("open-editor")
                             .debug_selector(|| "open-editor".into())
+                            .icon(gpui_kit::assets::IconName::ExternalLink)
                             .label("Open")
                             .secondary()
                             .small()
@@ -3835,6 +3838,7 @@ impl Render for NativeApp {
                     .child(
                         Button::new("push-pr")
                             .debug_selector(|| "push-pr".into())
+                            .icon(gpui_kit::assets::IconName::GitPullRequest)
                             .label("Push & create PR")
                             .secondary()
                             .small()
@@ -3860,6 +3864,7 @@ impl Render for NativeApp {
                     .child(
                         Button::new("thread-menu")
                             .debug_selector(|| "thread-menu".into())
+                            .icon(gpui_kit::assets::IconName::Ellipsis)
                             .label("More")
                             .ghost()
                             .small()
@@ -4105,6 +4110,7 @@ impl Render for NativeApp {
                     .child(
                         Button::new("attach")
                             .debug_selector(|| "attach".into())
+                            .icon(gpui_kit::assets::IconName::Paperclip)
                             .label("Attach")
                             .ghost()
                             .small()
@@ -4163,6 +4169,7 @@ impl Render for NativeApp {
                     .child(
                         Button::new("send")
                             .debug_selector(|| "send".into())
+                            .icon(gpui_kit::assets::IconName::Send)
                             .label("Send")
                             .primary()
                             .loading(self.pending_actions > 0)
@@ -5127,7 +5134,9 @@ fn bind_native_keys(cx: &mut App) {
 }
 
 fn main() {
-    gpui_kit::application().run(move |cx: &mut App| {
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx: &mut App| {
         gpui_kit::init(cx);
         theme::init(cx);
         bind_native_keys(cx);
