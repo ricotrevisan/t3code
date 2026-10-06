@@ -48,81 +48,94 @@ pub fn expiry(threads: &[Thread], now: DateTime<Utc>) -> Option<std::time::Durat
         .and_then(|until| (until.with_timezone(&Utc) - now).to_std().ok())
 }
 
-/// A short status marker a thread row shows beside its title.
+/// The one live status a thread row shows beside its title.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Badge {
-    Working,
+pub enum Status {
     Approval,
     Input,
+    Working,
     Plan,
-    PullRequest,
-    Pinned,
-    Snoozed,
-    Settled,
 }
 
-impl Badge {
+impl Status {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Working => "Working",
             Self::Approval => "Approval",
             Self::Input => "Input",
+            Self::Working => "Working",
             Self::Plan => "Plan",
-            Self::PullRequest => "PR",
-            Self::Pinned => "Pinned",
-            Self::Snoozed => "Snoozed",
-            Self::Settled => "Settled",
         }
     }
 }
 
-/// Every status marker the row for `thread` should show, in display order.
-pub fn badges(thread: &Thread, now: DateTime<Utc>) -> Vec<Badge> {
-    let mut badges = Vec::new();
-    if thread
+/// The row status for `thread`, by priority: Approval > Input > Working > Plan.
+pub fn primary_status(thread: &Thread) -> Option<Status> {
+    if thread.has_pending_approvals {
+        Some(Status::Approval)
+    } else if thread.has_pending_user_input {
+        Some(Status::Input)
+    } else if thread
         .session
         .as_ref()
         .is_some_and(|session| matches!(session.status.as_str(), "running" | "starting"))
     {
-        badges.push(Badge::Working);
+        Some(Status::Working)
+    } else if thread.has_actionable_proposed_plan {
+        Some(Status::Plan)
+    } else {
+        None
     }
-    if thread.has_pending_approvals {
-        badges.push(Badge::Approval);
-    }
-    if thread.has_pending_user_input {
-        badges.push(Badge::Input);
-    }
-    if thread.has_actionable_proposed_plan {
-        badges.push(Badge::Plan);
-    }
-    if thread.linked_pull_request.is_some() {
-        badges.push(Badge::PullRequest);
-    }
-    if thread.pinned_at.is_some() {
-        badges.push(Badge::Pinned);
-    }
-    if snoozed(thread, now) {
-        badges.push(Badge::Snoozed);
-    }
-    if thread.settled_override.as_deref() == Some("settled") {
-        badges.push(Badge::Settled);
-    }
-    badges
 }
 
-/// The sidebar name for a project: its workspace directory name, falling back
-/// to the title when the path has no usable segment.
+/// When the thread last saw activity: its latest user message, else its last
+/// update, else its creation. `None` when the server sent none of them.
+pub fn last_activity(thread: &Thread) -> Option<DateTime<Utc>> {
+    [
+        &thread.latest_user_message_at,
+        &thread.updated_at,
+        &thread.created_at,
+    ]
+    .into_iter()
+    .filter_map(|value| value.as_deref())
+    .find_map(|value| DateTime::parse_from_rfc3339(value).ok())
+    .map(|at| at.with_timezone(&Utc))
+}
+
+/// Compact age of `at` relative to `now`: "now", "5m", "3h", "2d", "3w".
+pub fn relative_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = (now - at).num_seconds();
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    if minutes < 1 {
+        "now".to_owned()
+    } else if hours < 1 {
+        format!("{minutes}m")
+    } else if days < 1 {
+        format!("{hours}h")
+    } else if days < 7 {
+        format!("{days}d")
+    } else {
+        format!("{}w", days / 7)
+    }
+}
+
 /// A project's rows for a view, split into the groups the sidebar renders, in
-/// render order. Thread navigation walks the same result.
+/// render order, most recently active first. Thread navigation walks the same
+/// result.
 pub fn grouped<'a>(
     threads: &'a [Thread],
     project_id: &str,
     view: View,
     now: DateTime<Utc>,
 ) -> [(&'static str, &'static str, Vec<&'a Thread>); 2] {
-    let (pinned, active) = threads
+    let mut rows: Vec<_> = threads
         .iter()
         .filter(|thread| thread.project_id == project_id && belongs(thread, view, now))
+        .collect();
+    rows.sort_by_key(|thread| std::cmp::Reverse(last_activity(thread)));
+    let (pinned, active) = rows
+        .into_iter()
         .partition(|thread| thread.pinned_at.is_some());
     [("pinned", "Pinned", pinned), ("active", "Active", active)]
 }
@@ -165,6 +178,8 @@ pub fn action_applies(thread: &Thread, action: &str, now: DateTime<Utc>) -> bool
     }
 }
 
+/// The sidebar name for a project: its workspace directory name, falling back
+/// to the title when the path has no usable segment.
 pub fn project_name<'a>(title: &'a str, workspace_root: &'a str) -> &'a str {
     workspace_root
         .trim_end_matches('/')
@@ -228,47 +243,104 @@ mod tests {
         assert!(belongs(&thread, View::Active, now));
     }
 
+    fn at(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
     #[test]
     fn rows_expose_only_live_status_markers() {
         let now = Utc::now();
         let mut thread = thread();
-        assert!(badges(&thread, now).is_empty());
+        assert_eq!(primary_status(&thread), None);
+        // Pinned, snoozed, and settled are implied by the group or view, not the row.
         thread.pinned_at = Some(now.to_rfc3339());
         thread.snoozed_until = Some((now + chrono::Duration::hours(1)).to_rfc3339());
         thread.settled_override = Some("settled".into());
-        assert_eq!(
-            badges(&thread, now),
-            vec![Badge::Pinned, Badge::Snoozed, Badge::Settled]
-        );
-        // An expired snooze drops its marker without a server mutation.
-        thread.snoozed_until = Some((now - chrono::Duration::hours(1)).to_rfc3339());
-        assert_eq!(badges(&thread, now), vec![Badge::Pinned, Badge::Settled]);
+        thread.linked_pull_request = Some(json!({"number": 7}));
+        assert_eq!(primary_status(&thread), None);
     }
 
     #[test]
     fn rows_expose_live_shell_status() {
-        let now = Utc::now();
         let mut thread = thread();
+        thread.has_actionable_proposed_plan = true;
+        assert_eq!(primary_status(&thread), Some(Status::Plan));
         thread.session = Some(crate::shell::Session {
             status: "running".into(),
             last_error: None,
         });
+        assert_eq!(primary_status(&thread), Some(Status::Working));
+        thread.has_pending_user_input = true;
+        assert_eq!(primary_status(&thread), Some(Status::Input));
         thread.has_pending_approvals = true;
-        thread.has_actionable_proposed_plan = true;
-        thread.linked_pull_request = Some(serde_json::json!({"number": 7}));
-        assert_eq!(
-            badges(&thread, now),
-            vec![
-                Badge::Working,
-                Badge::Approval,
-                Badge::Plan,
-                Badge::PullRequest
-            ]
-        );
+        assert_eq!(primary_status(&thread), Some(Status::Approval));
+        thread.has_pending_approvals = false;
+        thread.has_pending_user_input = false;
         thread.session.as_mut().unwrap().status = "idle".into();
+        assert_eq!(primary_status(&thread), Some(Status::Plan));
+    }
+
+    #[test]
+    fn relative_time_steps_at_each_boundary() {
+        let now = at("2026-04-01T00:00:00Z");
+        let ago = |seconds: i64| relative_time(now - chrono::Duration::seconds(seconds), now);
         assert_eq!(
-            badges(&thread, now),
-            vec![Badge::Approval, Badge::Plan, Badge::PullRequest]
+            relative_time(now + chrono::Duration::minutes(5), now),
+            "now"
+        );
+        assert_eq!(ago(0), "now");
+        assert_eq!(ago(59), "now");
+        assert_eq!(ago(60), "1m");
+        assert_eq!(ago(59 * 60 + 59), "59m");
+        assert_eq!(ago(3600), "1h");
+        assert_eq!(ago(24 * 3600 - 1), "23h");
+        assert_eq!(ago(24 * 3600), "1d");
+        assert_eq!(ago(7 * 24 * 3600 - 1), "6d");
+        assert_eq!(ago(7 * 24 * 3600), "1w");
+        assert_eq!(ago(21 * 24 * 3600), "3w");
+    }
+
+    #[test]
+    fn last_activity_prefers_user_message_and_falls_back() {
+        let mut thread = thread();
+        assert_eq!(last_activity(&thread), None);
+        thread.created_at = Some("2026-04-01T00:00:00Z".into());
+        assert_eq!(last_activity(&thread), Some(at("2026-04-01T00:00:00Z")));
+        thread.updated_at = Some("2026-04-02T00:00:00Z".into());
+        assert_eq!(last_activity(&thread), Some(at("2026-04-02T00:00:00Z")));
+        thread.latest_user_message_at = Some("2026-04-01T12:00:00Z".into());
+        assert_eq!(last_activity(&thread), Some(at("2026-04-01T12:00:00Z")));
+    }
+
+    #[test]
+    fn groups_order_rows_most_recently_active_first() {
+        let now = Utc::now();
+        let row = |id: &str, activity: Option<&str>, pinned: bool| {
+            let mut row = thread();
+            row.id = id.into();
+            row.latest_user_message_at = activity.map(str::to_owned);
+            row.pinned_at = pinned.then(|| now.to_rfc3339());
+            row
+        };
+        let threads = vec![
+            row("old", Some("2026-04-01T00:00:00Z"), false),
+            row("unknown", None, false),
+            row("new", Some("2026-04-03T00:00:00Z"), false),
+            row("pin-old", Some("2026-03-01T00:00:00Z"), true),
+            row("pin-new", Some("2026-03-02T00:00:00Z"), true),
+        ];
+        let ids: Vec<_> = grouped(&threads, "p", View::Active, now)
+            .into_iter()
+            .map(|(key, _, rows)| (key, rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("pinned", vec!["pin-new", "pin-old"]),
+                ("active", vec!["new", "old", "unknown"]),
+            ]
         );
     }
 

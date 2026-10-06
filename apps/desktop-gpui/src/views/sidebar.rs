@@ -1,6 +1,7 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable,
+    ActiveTheme as _, Icon, Sizable,
     button::{Button, ButtonVariants as _},
     input::Input,
 };
@@ -16,6 +17,8 @@ impl NativeApp {
         let muted = cx.theme().muted;
         let warning = cx.theme().warning;
         let blue = cx.theme().blue;
+        let info = cx.theme().info;
+        let magenta = cx.theme().magenta;
         let green = cx.theme().green;
         let sidebar_color = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
@@ -291,8 +294,10 @@ impl NativeApp {
                     }
                     for thread in group_threads {
                         let id = thread.id.clone();
-                        let mut badges = sidebar::badges(thread, now);
-                        badges.retain(|badge| *badge != sidebar::Badge::Pinned);
+                        let status = sidebar::primary_status(thread);
+                        let has_pull_request = thread.linked_pull_request.is_some();
+                        let age = sidebar::last_activity(thread)
+                            .map(|at| sidebar::relative_time(at, now));
                         let meta = sidebar::thread_meta(thread);
                         group = group.child(
                             div().pl_4().child(
@@ -328,26 +333,48 @@ impl NativeApp {
                                                         )
                                                     }),
                                             )
-                                            .child(div().flex().items_center().gap_1().children(
-                                                badges.into_iter().map(|badge| {
-                                                    let color = match badge {
-                                                        sidebar::Badge::Working => blue,
-                                                        sidebar::Badge::Approval => warning,
-                                                        sidebar::Badge::Input => warning,
-                                                        sidebar::Badge::Plan => blue,
-                                                        sidebar::Badge::PullRequest => green,
-                                                        sidebar::Badge::Pinned => blue,
-                                                        sidebar::Badge::Snoozed => warning,
-                                                        sidebar::Badge::Settled => green,
-                                                    };
-                                                    div()
-                                                        .px_1()
-                                                        .rounded_sm()
-                                                        .text_xs()
-                                                        .text_color(color)
-                                                        .child(badge.label())
-                                                }),
-                                            )),
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_shrink_0()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .text_xs()
+                                                    .when_some(status, |view, status| {
+                                                        let color = match status {
+                                                            sidebar::Status::Approval => warning,
+                                                            sidebar::Status::Input => info,
+                                                            sidebar::Status::Working => blue,
+                                                            sidebar::Status::Plan => magenta,
+                                                        };
+                                                        view.child(
+                                                            div()
+                                                                .w(px(6.))
+                                                                .h(px(6.))
+                                                                .rounded_full()
+                                                                .bg(color),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_color(color)
+                                                                .child(status.label()),
+                                                        )
+                                                    })
+                                                    .when(has_pull_request, |view| {
+                                                        view.child(
+                                                            Icon::new(IconName::GitPullRequest)
+                                                                .xsmall()
+                                                                .text_color(green),
+                                                        )
+                                                    })
+                                                    .when_some(age, |view, age| {
+                                                        view.child(
+                                                            div()
+                                                                .text_color(muted_foreground)
+                                                                .child(age),
+                                                        )
+                                                    }),
+                                            ),
                                     )
                                     .on_click(cx.listener(move |app, _, window, cx| {
                                         app.select_thread(&id, window, cx)

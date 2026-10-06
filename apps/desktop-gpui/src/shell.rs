@@ -56,6 +56,12 @@ pub struct Thread {
     pub has_actionable_proposed_plan: bool,
     #[serde(default)]
     pub linked_pull_request: Option<serde_json::Value>,
+    #[serde(default)]
+    pub latest_user_message_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
