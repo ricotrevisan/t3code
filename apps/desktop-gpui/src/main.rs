@@ -2530,6 +2530,7 @@ impl Render for NativeApp {
         let (runtime_mode, interaction_mode) = self.selected_modes();
         let full_access = runtime_mode == "full-access";
         let plan_mode = interaction_mode == "plan";
+        let busy = self.pending_actions > 0;
         let sidebar = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
         let sidebar_foreground = cx.theme().sidebar_foreground;
@@ -3213,7 +3214,7 @@ impl Render for NativeApp {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(header_title),
                     )
-                    .when_some(header_branch, |view, branch| {
+                    .when_some(header_branch.clone(), |view, branch| {
                         view.child(
                             div()
                                 .px_2()
@@ -3306,6 +3307,8 @@ impl Render for NativeApp {
                             .debug_selector(|| "send".into())
                             .label("Send")
                             .primary()
+                            .disabled(self.composer.read(cx).value().trim().is_empty())
+                            .tooltip("Send the prompt (⌘↩)")
                             .on_click(cx.listener(|app, _, window, cx| app.send_prompt(window, cx))),
                     )
                     .child(
@@ -3335,6 +3338,64 @@ impl Render for NativeApp {
                             .outline()
                             .on_click(cx.listener(|app, _, _, cx| app.lifecycle("thread.session.stop", cx))),
                     ),
+            );
+
+        let environment_host = url::Url::parse(&self.environment_scope)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| self.environment_scope.clone());
+        let active_model = {
+            let instance = self.provider.read(cx).value().to_string();
+            let model = self.model.read(cx).value().to_string();
+            if instance.is_empty() {
+                String::new()
+            } else if model.is_empty() {
+                instance
+            } else {
+                format!("{instance} · {model}")
+            }
+        };
+        let status_bar = div()
+            .id("status-bar")
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .flex_shrink_0()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .text_color(muted_foreground)
+            .border_t_1()
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .min_w_0()
+                    .child(environment_host)
+                    .when_some(header_branch, |view, branch| {
+                        view.child(div().truncate().child(branch))
+                    })
+                    .when(!active_model.is_empty(), |view| {
+                        view.child(div().truncate().child(active_model))
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .flex_shrink_0()
+                    .when(busy, |view| {
+                        view.child(div().text_color(warning).child("Working…"))
+                    })
+                    .child(if self.commands.is_some() {
+                        "Connected"
+                    } else {
+                        "Offline"
+                    }),
             );
 
         div()
@@ -3583,7 +3644,8 @@ impl Render for NativeApp {
                                     .h_full()
                                     .child(thread_header)
                                     .child(conversation)
-                                    .child(composer_card),
+                                    .child(composer_card)
+                                    .child(status_bar),
                             )
                             .child(
                                 div()
