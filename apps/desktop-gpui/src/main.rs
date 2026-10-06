@@ -3727,6 +3727,46 @@ impl Render for NativeApp {
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .child(section("PROVIDERS"))
+                        .when(self.provider_catalog.is_empty(), |view| {
+                            view.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child("No provider catalog loaded"),
+                            )
+                        })
+                        .children(self.provider_catalog.iter().map(|provider| {
+                            div()
+                                .flex()
+                                .justify_between()
+                                .gap_2()
+                                .text_sm()
+                                .child(provider.label().to_owned())
+                                .child(
+                                    div()
+                                        .text_color(if provider.selectable() {
+                                            green
+                                        } else {
+                                            muted_foreground
+                                        })
+                                        .child(provider.explanation().to_owned()),
+                                )
+                        }))
+                        .child(
+                            Button::new("settings-refresh-providers")
+                                .label("Reload providers")
+                                .secondary()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.perform("server.getConfig", json!({}), None, cx)
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
                         .child(section("APPEARANCE"))
                         .child(div().text_sm().child("One Dark (Zed)"))
                         .child(
@@ -4101,6 +4141,13 @@ impl Render for NativeApp {
                                             .clone()
                                             .map(|error| div().text_color(danger).child(error)),
                                     )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(muted_foreground)
+                                            .child("INSPECTOR"),
+                                    )
                             .child(
                                 div()
                                     .flex()
@@ -4355,12 +4402,6 @@ impl Render for NativeApp {
                                             .child(Input::new(&self.provider))
                                             .child(Input::new(&self.model)),
                                     ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted_foreground)
-                                    .child("Experimental native slice — feature parity is still being evaluated"),
                             ),
                             ),
                     ),
