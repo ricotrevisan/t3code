@@ -9,7 +9,8 @@ impl NativeApp {
     /// beneath, so a trigger pressed while its overlay is open closes it rather
     /// than reopening it. Overlay surfaces `occlude()` so presses inside them do
     /// not land here. Palette and Settings are centred on it; the thread menu and
-    /// model catalog are deferred, so they paint above it at their triggers.
+    /// model catalog are deferred, so they paint above it at their triggers (a
+    /// sidebar row's thread menu at the pointer).
     pub(crate) fn render_overlay_layer(
         &self,
         cx: &mut Context<Self>,

@@ -1,7 +1,7 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
 use super::*;
 use gpui_kit::component::Root;
-use gpui_kit::{AppContext, TestAppContext, VisualTestContext};
+use gpui_kit::{AppContext, MouseButton, TestAppContext, VisualTestContext};
 
 fn harness(
     cx: &mut TestAppContext,
@@ -1962,4 +1962,57 @@ fn catalog_and_thread_menu_close_on_an_outside_click(cx: &mut TestAppContext) {
     assert!(app.read_with(cx, |app, _| app.thread_menu_open));
     cx.simulate_click(point(px(640.), px(500.)), Default::default());
     assert!(!app.read_with(cx, |app, _| app.thread_menu_open));
+}
+
+fn seed_second_thread(app: &Entity<NativeApp>, cx: &mut VisualTestContext, pinned: bool) {
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.shell.apply(serde_json::from_value(json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"projects":[{"id":"p","title":"Fixture","workspaceRoot":"/tmp/fixture"}],"threads":[
+            {"id":"t","projectId":"p","title":"Thread","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access","interactionMode":"default","archivedAt":null},
+            {"id":"u","projectId":"p","title":"Other","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access","interactionMode":"default","archivedAt":null,"pinnedAt":if pinned { json!("2026-01-01T00:00:00Z") } else { json!(null) }}
+        ]}})).unwrap()).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+}
+
+fn right_click(cx: &mut VisualTestContext, selector: &'static str) {
+    let row = cx.debug_bounds(selector).expect("row is visible");
+    cx.simulate_mouse_down(row.center(), MouseButton::Right, Default::default());
+    cx.simulate_mouse_up(row.center(), MouseButton::Right, Default::default());
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn row_menu_acts_on_its_row_without_changing_the_selection(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    seed_second_thread(&app, cx, false);
+    right_click(cx, "thread-u");
+    assert!(app.read_with(cx, |app, _| app.thread_menu_open));
+    let pin = cx.debug_bounds("pin").expect("Pin is offered for the row");
+    cx.simulate_click(pin.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a pin command");
+    };
+    assert_eq!(payload["type"], "thread.pin");
+    assert_eq!(payload["threadId"], "u");
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_thread.clone()),
+        Some("t".into())
+    );
+    assert!(!app.read_with(cx, |app, _| app.thread_menu_open));
+
+    right_click(cx, "thread-u");
+    assert!(app.read_with(cx, |app, _| app.thread_menu_open));
+    cx.simulate_keystrokes("escape");
+    assert!(!app.read_with(cx, |app, _| app.thread_menu_open));
+    assert!(cx.debug_bounds("pin").is_none());
+}
+
+#[gpui_kit::test]
+fn row_menu_for_a_pinned_thread_offers_unpin_only(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    seed_second_thread(&app, cx, true);
+    right_click(cx, "thread-u");
+    assert!(cx.debug_bounds("unpin").is_some());
+    assert!(cx.debug_bounds("pin").is_none());
 }

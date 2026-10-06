@@ -5,7 +5,9 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     input::Input,
 };
-use gpui_kit::{Context, FontWeight, div, prelude::*, px};
+use gpui_kit::{
+    Context, FontWeight, MouseButton, MouseDownEvent, anchored, deferred, div, prelude::*, px,
+};
 use serde_json::json;
 use t3code_desktop_gpui::{connection, credentials, palette, project_actions, sidebar, thread};
 
@@ -302,6 +304,10 @@ impl NativeApp {
                         group = group.child(
                             div().pl_4().child(
                                 Button::new(gpui_kit::SharedString::from(format!("thread-{id}")))
+                                    .debug_selector({
+                                        let id = id.clone();
+                                        move || format!("thread-{id}")
+                                    })
                                     .ghost()
                                     .selected(self.selected_thread.as_ref() == Some(&id))
                                     .child(
@@ -376,6 +382,19 @@ impl NativeApp {
                                                     }),
                                             ),
                                     )
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener({
+                                            let id = id.clone();
+                                            move |app, event: &MouseDownEvent, _, cx| {
+                                                app.close_thread_menu();
+                                                app.thread_menu_open = true;
+                                                app.thread_menu_row =
+                                                    Some((id.clone(), event.position));
+                                                cx.notify();
+                                            }
+                                        }),
+                                    )
                                     .on_click(cx.listener(move |app, _, window, cx| {
                                         app.select_thread(&id, window, cx)
                                     })),
@@ -400,6 +419,18 @@ impl NativeApp {
                 );
             }
         }
+        let row_menu = self
+            .thread_menu_row
+            .as_ref()
+            .filter(|_| self.thread_menu_open)
+            .map(|(_, at)| {
+                deferred(
+                    anchored()
+                        .position(*at)
+                        .snap_to_window()
+                        .child(self.render_thread_menu(cx)),
+                )
+            });
         div()
             .id("sidebar")
             .flex()
@@ -598,5 +629,6 @@ impl NativeApp {
                             )
                     }),
             )
+            .children(row_menu)
     }
 }

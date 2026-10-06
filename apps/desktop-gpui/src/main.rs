@@ -5,8 +5,8 @@ use gpui_kit::component::{
     TitleBar,
 };
 use gpui_kit::{
-    App, Bounds, Context, Entity, FocusHandle, KeyBinding, Subscription, Task, Window,
-    WindowBounds, WindowOptions, div, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, Point, Subscription, Task,
+    Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
 };
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
@@ -140,6 +140,9 @@ struct NativeApp {
     activity_expanded: std::collections::HashMap<String, bool>,
     inspector_open: bool,
     thread_menu_open: bool,
+    /// The sidebar row whose secondary click opened the thread menu, and the
+    /// pointer position it opens at. None while the header menu is open.
+    thread_menu_row: Option<(String, Point<Pixels>)>,
     collapsed_projects: Vec<String>,
     collapsed_groups: Vec<String>,
     conversation_scroll: gpui_kit::ScrollHandle,
@@ -396,6 +399,7 @@ impl NativeApp {
             activity_expanded: Default::default(),
             inspector_open: true,
             thread_menu_open: false,
+            thread_menu_row: None,
             collapsed_projects: Vec::new(),
             collapsed_groups: Vec::new(),
             conversation_scroll: gpui_kit::ScrollHandle::new(),
@@ -516,8 +520,7 @@ impl NativeApp {
             return true;
         }
         if self.thread_menu_open {
-            self.thread_menu_open = false;
-            self.confirm_delete = None;
+            self.close_thread_menu();
         } else if self.catalog_open {
             self.catalog_open = false;
         } else if self.settings_open {
@@ -1774,8 +1777,7 @@ impl NativeApp {
         self.model_override = None;
         self.selected_thread = Some(id.into());
         self.pending_history_attached = false;
-        self.confirm_delete = None;
-        self.thread_menu_open = false;
+        self.close_thread_menu();
         self.detail = thread::ThreadDetail::default();
         self.conversation_scroll.set_offset(point(px(0.), px(0.)));
         let text = self.drafts.get(id).cloned().unwrap_or_else(|| {
@@ -2233,14 +2235,73 @@ impl NativeApp {
         cx.notify();
     }
 
-    fn lifecycle(&mut self, kind: &str, cx: &mut Context<Self>) {
-        let Some(id) = &self.selected_thread else {
+    fn close_thread_menu(&mut self) {
+        self.thread_menu_open = false;
+        self.thread_menu_row = None;
+        self.confirm_delete = None;
+    }
+
+    /// The thread the open thread menu acts on: its sidebar row, else the selection.
+    fn thread_menu_target(&self) -> Option<String> {
+        self.thread_menu_row
+            .as_ref()
+            .map(|(id, _)| id.clone())
+            .or_else(|| self.selected_thread.clone())
+    }
+
+    /// Runs a thread menu entry on the menu's target thread. Rename from a row
+    /// selects that thread and focuses the inspector title, since the title field
+    /// carries the new name.
+    fn run_thread_menu_action(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.thread_menu_target() else {
+            self.close_thread_menu();
+            cx.notify();
             return;
         };
+        let from_row = self.thread_menu_row.is_some();
+        if from_row && kind == "thread.meta.update" {
+            self.close_thread_menu();
+            if self.selected_thread.as_ref() != Some(&target) {
+                self.select_thread(&target, window, cx);
+            }
+            self.inspector_open = true;
+            self.right_tab = RightTab::Inspector;
+            self.title.update(cx, |input, cx| input.focus(window, cx));
+            self.status = "Edit the title, then choose Rename from More".into();
+            cx.notify();
+            return;
+        }
+        let confirming = self.confirm_delete.as_ref() == Some(&target);
+        if !from_row
+            && kind == "thread.delete"
+            && self
+                .pending_threads
+                .iter()
+                .any(|draft| draft.thread.id == target)
+        {
+            self.discard_pending(window, cx);
+        } else {
+            self.thread_lifecycle(&target, kind, cx);
+        }
+        // Delete keeps the menu open so the second click confirms.
+        if kind != "thread.delete" || confirming {
+            self.close_thread_menu();
+        }
+        cx.notify();
+    }
+
+    /// Runs a thread command on the selected thread.
+    fn lifecycle(&mut self, kind: &str, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected_thread.clone() {
+            self.thread_lifecycle(&id, kind, cx);
+        }
+    }
+
+    fn thread_lifecycle(&mut self, id: &str, kind: &str, cx: &mut Context<Self>) {
         if let Some(draft) = self
             .pending_threads
             .iter_mut()
-            .find(|draft| &draft.thread.id == id)
+            .find(|draft| draft.thread.id == id)
         {
             if kind == "thread.meta.update" {
                 let title = self.title.read(cx).value().trim().to_owned();
@@ -2282,8 +2343,8 @@ impl NativeApp {
             "thread.turn.interrupt" | "thread.session.stop" => {
                 payload["createdAt"] = json!(commands::now())
             }
-            "thread.delete" if self.confirm_delete.as_ref() != Some(id) => {
-                self.confirm_delete = Some(id.clone());
+            "thread.delete" if self.confirm_delete.as_deref() != Some(id) => {
+                self.confirm_delete = Some(id.to_owned());
                 self.status = "Click Delete again to confirm permanent thread deletion".into();
                 cx.notify();
                 return;

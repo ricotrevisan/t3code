@@ -15,7 +15,6 @@ impl NativeApp {
         let muted = cx.theme().muted;
         let green = cx.theme().green;
         let danger = cx.theme().danger;
-        let popover = cx.theme().popover;
         let header_title = self.selected_thread_title();
         let header_branch = self.selected_thread_branch();
         let header_session = self.detail.thread.as_ref().and_then(|detail| {
@@ -51,63 +50,8 @@ impl NativeApp {
                 sidebar::project_name(&project.title, &project.workspace_root).to_owned()
             });
 
-        let now = chrono::Utc::now();
-        let menu_thread = self.selected_thread.as_ref().and_then(|id| {
-            self.shell
-                .threads
-                .iter()
-                .chain(&self.archived_shell.threads)
-                .find(|thread| &thread.id == id)
-        });
-        let thread_menu = self.thread_menu_open.then(|| {
-            div()
-                .id("thread-menu-popover")
-                .occlude()
-                .mt_1()
-                .w(px(220.))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .rounded_md()
-                .bg(popover)
-                .border_1()
-                .border_color(border)
-                .shadow_lg()
-                .children(
-                    THREAD_ACTIONS
-                        .iter()
-                        .filter(|(id, _, _)| {
-                            menu_thread
-                                .is_none_or(|thread| sidebar::action_applies(thread, id, now))
-                        })
-                        .map(|(id, label, kind)| {
-                            let armed = *id == "delete"
-                                && self.confirm_delete.as_deref()
-                                    == self.selected_thread.as_deref();
-                            Button::new(*id)
-                                .debug_selector(move || (*id).into())
-                                .label(if armed { "Confirm delete" } else { *label })
-                                .ghost()
-                                .small()
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    if *kind == "thread.delete"
-                                        && app.pending_threads.iter().any(|draft| {
-                                            Some(&draft.thread.id) == app.selected_thread.as_ref()
-                                        })
-                                    {
-                                        app.discard_pending(window, cx);
-                                        app.thread_menu_open = false;
-                                    } else {
-                                        app.lifecycle(kind, cx);
-                                        // Delete keeps the menu open so the second click confirms.
-                                        app.thread_menu_open = app.confirm_delete.is_some();
-                                    }
-                                    cx.notify();
-                                }))
-                        }),
-                )
-        });
+        let thread_menu = (self.thread_menu_open && self.thread_menu_row.is_none())
+            .then(|| self.render_thread_menu(cx));
         div()
             .flex()
             .flex_col()
@@ -246,11 +190,14 @@ impl NativeApp {
                                     .label("More")
                                     .ghost()
                                     .small()
-                                    .selected(self.thread_menu_open)
+                                    .selected(
+                                        self.thread_menu_open && self.thread_menu_row.is_none(),
+                                    )
                                     .tooltip("More thread actions")
                                     .on_click(cx.listener(|app, _, _, cx| {
-                                        app.thread_menu_open = !app.thread_menu_open;
-                                        app.confirm_delete = None;
+                                        let open = !app.thread_menu_open;
+                                        app.close_thread_menu();
+                                        app.thread_menu_open = open;
                                         cx.notify();
                                     })),
                             )
@@ -258,6 +205,56 @@ impl NativeApp {
                                 view.child(deferred(anchored().snap_to_window().child(menu)))
                             }),
                     ),
+            )
+    }
+
+    /// The thread actions menu, shared by the header "More" trigger and a sidebar
+    /// row's secondary click. Entries act on `thread_menu_target`.
+    pub(crate) fn render_thread_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let now = chrono::Utc::now();
+        let target = self.thread_menu_target();
+        let menu_thread = target.as_ref().and_then(|id| {
+            self.shell
+                .threads
+                .iter()
+                .chain(&self.archived_shell.threads)
+                .find(|thread| &thread.id == id)
+        });
+        let armed = target.is_some() && self.confirm_delete == target;
+        div()
+            .id("thread-menu-popover")
+            .occlude()
+            .mt_1()
+            .w(px(220.))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_lg()
+            .children(
+                THREAD_ACTIONS
+                    .iter()
+                    .filter(|(id, _, _)| {
+                        menu_thread.is_none_or(|thread| sidebar::action_applies(thread, id, now))
+                    })
+                    .map(|(id, label, kind)| {
+                        Button::new(*id)
+                            .debug_selector(move || (*id).into())
+                            .label(if armed && *id == "delete" {
+                                "Confirm delete"
+                            } else {
+                                *label
+                            })
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.run_thread_menu_action(kind, window, cx)
+                            }))
+                    }),
             )
     }
 }
