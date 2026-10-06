@@ -130,7 +130,8 @@ struct NativeApp {
     catalog_open: bool,
     connection_expanded: bool,
     settings_open: bool,
-    activity_expanded: bool,
+    /// Activity disclosures the user toggled, keyed by turn.
+    activity_expanded: std::collections::HashMap<String, bool>,
     inspector_open: bool,
     thread_menu_open: bool,
     collapsed_projects: Vec<String>,
@@ -384,7 +385,7 @@ impl NativeApp {
             catalog_open: false,
             connection_expanded: false,
             settings_open: false,
-            activity_expanded: false,
+            activity_expanded: Default::default(),
             inspector_open: true,
             thread_menu_open: false,
             collapsed_projects: Vec::new(),

@@ -158,6 +158,73 @@ fn checkpoint_revert_arms_then_dispatches(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn each_turn_owns_its_activity_and_checkpoint_controls(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    let checkpoint = |turn: &str, count: u64, at: &str| {
+        json!({
+            "turnId": turn,
+            "checkpointTurnCount": count,
+            "checkpointRef": "ref",
+            "status": "ready",
+            "files": [{"path": "a.rs", "kind": "modified", "additions": 1, "deletions": 0}],
+            "assistantMessageId": null,
+            "completedAt": at
+        })
+    };
+    let activity = |id: &str, turn: &str, at: &str| {
+        json!({"id": id, "kind": "tool.completed", "tone": "tool", "summary": "Ran tests", "payload": {}, "turnId": turn, "createdAt": at})
+    };
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(json!({
+                "id": "t",
+                "title": "Thread",
+                "messages": [
+                    {"id": "u1", "role": "user", "text": "one", "turnId": null, "streaming": false, "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"},
+                    {"id": "u2", "role": "user", "text": "two", "turnId": null, "streaming": false, "createdAt": "2026-01-01T00:01:00Z", "updatedAt": "2026-01-01T00:01:00Z"}
+                ],
+                "activities": [
+                    activity("e1", "turn-1", "2026-01-01T00:00:05Z"),
+                    activity("e2", "turn-2", "2026-01-01T00:01:05Z")
+                ],
+                "proposedPlans": [],
+                "checkpoints": [
+                    checkpoint("turn-1", 1, "2026-01-01T00:00:30Z"),
+                    checkpoint("turn-2", 2, "2026-01-01T00:01:30Z")
+                ],
+                "latestTurn": {"turnId": "turn-2", "state": "completed", "requestedAt": "2026-01-01T00:01:00Z", "startedAt": "2026-01-01T00:01:00Z", "completedAt": "2026-01-01T00:01:30Z", "assistantMessageId": null},
+                "session": null,
+            }));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("activity-toggle").is_some());
+    assert!(cx.debug_bounds("revert-checkpoint").is_some());
+
+    let bounds = cx
+        .debug_bounds("activity-toggle-turn-1")
+        .expect("the first turn has its own activity toggle");
+    cx.simulate_click(bounds.center(), Default::default());
+    cx.run_until_parked();
+    app.read_with(cx, |app, _| {
+        assert_eq!(app.activity_expanded.get("turn-1"), Some(&true));
+        assert_eq!(app.activity_expanded.get("turn-2"), None);
+    });
+
+    let bounds = cx
+        .debug_bounds("revert-checkpoint-turn-1")
+        .expect("the first turn keeps its own checkpoint");
+    cx.simulate_click(bounds.center(), Default::default());
+    assert_eq!(app.read_with(cx, |app, _| app.confirm_revert), Some(1));
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("revert-checkpoint").unwrap();
+    cx.simulate_click(bounds.center(), Default::default());
+    assert_eq!(app.read_with(cx, |app, _| app.confirm_revert), Some(2));
+    assert!(requests.try_recv().is_err(), "arming never dispatches a revert");
+}
+
+#[gpui_kit::test]
 fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {

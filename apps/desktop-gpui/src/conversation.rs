@@ -162,6 +162,177 @@ pub fn pending_approval(activities: &[Value]) -> Option<PendingApproval> {
     })
 }
 
+/// One turn of the conversation and the work it produced, in display order.
+///
+/// User messages carry no `turnId`, so a turn adopts the user message that
+/// precedes its first item. Items without a turn form turnless groups.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TurnGroup {
+    /// Stable key for per-turn view state: the turn id, or the first item's id.
+    pub key: String,
+    pub turn_id: Option<String>,
+    /// User, assistant, reasoning, and system messages in timestamp order.
+    pub messages: Vec<Value>,
+    pub activities: Vec<Value>,
+    pub plans: Vec<Value>,
+    pub checkpoint: Option<Value>,
+    /// `Working…`, `Worked for …`, `Interrupted`, or `Failed` when known.
+    pub summary: Option<(String, TurnState)>,
+}
+
+impl TurnGroup {
+    fn new(turn_id: Option<String>, key: String) -> Self {
+        Self {
+            key,
+            turn_id,
+            ..Self::default()
+        }
+    }
+
+    fn push(&mut self, kind: ItemKind, item: Value) {
+        match kind {
+            ItemKind::Message => self.messages.push(item),
+            ItemKind::Plan => self.plans.push(item),
+            ItemKind::Activity => self.activities.push(item),
+            ItemKind::Checkpoint => self.checkpoint = Some(item),
+        }
+    }
+
+    /// Elapsed time from the turn's first item to its last recorded moment.
+    fn worked_for(&self) -> Option<String> {
+        let start = self
+            .messages
+            .iter()
+            .chain(&self.activities)
+            .chain(&self.plans)
+            .filter_map(|item| item["createdAt"].as_str().and_then(parse))
+            .min()?;
+        let end = self
+            .messages
+            .iter()
+            .filter_map(|message| message["updatedAt"].as_str())
+            .chain(
+                self.activities
+                    .iter()
+                    .filter_map(|activity| activity["createdAt"].as_str()),
+            )
+            .chain(
+                self.checkpoint
+                    .iter()
+                    .filter_map(|checkpoint| checkpoint["completedAt"].as_str()),
+            )
+            .filter_map(parse)
+            .max()?;
+        Some(format_seconds((end - start).num_seconds()))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ItemKind {
+    Message,
+    Plan,
+    Activity,
+    Checkpoint,
+}
+
+fn turn_of(item: &Value) -> Option<String> {
+    item["turnId"].as_str().map(str::to_owned)
+}
+
+/// Groups a thread's messages, proposed plans, activities, and checkpoints
+/// into turns, in chronological order. Nothing is dropped: items without a
+/// turn render in a turnless group at their timestamp.
+pub fn group_turns(thread: &Value) -> Vec<TurnGroup> {
+    let sources = [
+        ("messages", "createdAt", ItemKind::Message),
+        ("proposedPlans", "createdAt", ItemKind::Plan),
+        ("activities", "createdAt", ItemKind::Activity),
+        ("checkpoints", "completedAt", ItemKind::Checkpoint),
+    ];
+    let mut items: Vec<(Option<DateTime<Utc>>, ItemKind, &Value)> = sources
+        .iter()
+        .flat_map(|(key, time, kind)| {
+            thread[*key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |item| (item[*time].as_str().and_then(parse), *kind, item))
+        })
+        .collect();
+    items.sort_by_key(|(time, _, _)| *time);
+
+    let mut groups: Vec<TurnGroup> = Vec::new();
+    let mut by_turn = std::collections::HashMap::new();
+    // The latest user message's group, until a turn claims it.
+    let mut awaiting: Option<usize> = None;
+    for (index, (_, kind, item)) in items.into_iter().enumerate() {
+        let turn = turn_of(item);
+        let fallback_key = || {
+            item["id"]
+                .as_str()
+                .map_or_else(|| format!("item-{index}"), str::to_owned)
+        };
+        let is_user = matches!(kind, ItemKind::Message) && item["role"] == "user";
+        let slot = match turn {
+            Some(turn) if by_turn.contains_key(&turn) => by_turn[&turn],
+            Some(turn) if !is_user && awaiting.is_some() => {
+                let slot = awaiting.take().unwrap_or_default();
+                groups[slot].key = turn.clone();
+                groups[slot].turn_id = Some(turn.clone());
+                by_turn.insert(turn, slot);
+                slot
+            }
+            Some(turn) => {
+                by_turn.insert(turn.clone(), groups.len());
+                groups.push(TurnGroup::new(Some(turn.clone()), turn));
+                if is_user {
+                    awaiting = None;
+                }
+                groups.len() - 1
+            }
+            None if is_user => {
+                groups.push(TurnGroup::new(None, fallback_key()));
+                awaiting = Some(groups.len() - 1);
+                groups.len() - 1
+            }
+            None => match groups.last() {
+                Some(last) if last.turn_id.is_none() => groups.len() - 1,
+                _ => {
+                    groups.push(TurnGroup::new(None, fallback_key()));
+                    groups.len() - 1
+                }
+            },
+        };
+        groups[slot].push(kind, item.clone());
+    }
+
+    let latest = &thread["latestTurn"];
+    let latest_summary = turn_summary(latest);
+    if let (Some(turn), Some(summary)) = (turn_of(latest), latest_summary) {
+        if !by_turn.contains_key(&turn) {
+            if let Some(slot) = awaiting {
+                groups[slot].key = turn.clone();
+                groups[slot].turn_id = Some(turn.clone());
+                by_turn.insert(turn.clone(), slot);
+            } else if summary.1 == TurnState::Running {
+                by_turn.insert(turn.clone(), groups.len());
+                groups.push(TurnGroup::new(Some(turn.clone()), turn.clone()));
+            }
+        }
+        if let Some(&slot) = by_turn.get(&turn) {
+            groups[slot].summary = Some(summary);
+        }
+    }
+    for group in &mut groups {
+        if group.summary.is_none() && group.turn_id.is_some() {
+            group.summary = group
+                .worked_for()
+                .map(|elapsed| (format!("Worked for {elapsed}"), TurnState::Completed));
+        }
+    }
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +401,111 @@ mod tests {
         let mut resolved = activities.clone();
         resolved.push(json!({"kind": "approval.resolved", "payload": {"requestId": "b"}}));
         assert!(pending_approval(&resolved).is_none());
+    }
+
+    fn fixture(latest: Value) -> Value {
+        json!({
+            "messages": [
+                {"id": "u1", "role": "user", "text": "first", "turnId": null, "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"},
+                {"id": "a1", "role": "assistant", "text": "done", "turnId": "t1", "createdAt": "2026-01-01T00:00:05Z", "updatedAt": "2026-01-01T00:00:30Z"},
+                {"id": "s1", "role": "system", "text": "note", "turnId": null, "createdAt": "2026-01-01T00:01:00Z", "updatedAt": "2026-01-01T00:01:00Z"},
+                {"id": "u2", "role": "user", "text": "second", "turnId": null, "createdAt": "2026-01-01T00:02:00Z", "updatedAt": "2026-01-01T00:02:00Z"},
+                {"id": "a2", "role": "assistant", "text": "working", "turnId": "t2", "streaming": true, "createdAt": "2026-01-01T00:02:10Z", "updatedAt": "2026-01-01T00:02:10Z"},
+            ],
+            "activities": [
+                {"id": "e1", "kind": "tool.completed", "summary": "Ran tests", "turnId": "t1", "createdAt": "2026-01-01T00:00:10Z"},
+                {"id": "e2", "kind": "tool.started", "summary": "Editing", "turnId": "t2", "createdAt": "2026-01-01T00:02:05Z"},
+            ],
+            "proposedPlans": [
+                {"id": "p1", "turnId": "t1", "planMarkdown": "- step", "createdAt": "2026-01-01T00:00:20Z"},
+            ],
+            "checkpoints": [
+                {"turnId": "t1", "checkpointTurnCount": 1, "files": [], "completedAt": "2026-01-01T00:00:42Z"},
+            ],
+            "latestTurn": latest,
+        })
+    }
+
+    fn ids(items: &[Value]) -> Vec<&str> {
+        items
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn group_turns_associates_items_with_their_turn_in_order() {
+        let groups = group_turns(&fixture(
+            json!({"turnId": "t2", "state": "running", "requestedAt": "2026-01-01T00:02:00Z"}),
+        ));
+        assert_eq!(groups.len(), 3);
+
+        let first = &groups[0];
+        assert_eq!(first.turn_id.as_deref(), Some("t1"));
+        assert_eq!(ids(&first.messages), ["u1", "a1"]);
+        assert_eq!(ids(&first.activities), ["e1"]);
+        assert_eq!(ids(&first.plans), ["p1"]);
+        assert_eq!(first.checkpoint.as_ref().unwrap()["checkpointTurnCount"], 1);
+        assert_eq!(
+            first.summary,
+            Some(("Worked for 42s".to_owned(), TurnState::Completed))
+        );
+
+        let orphan = &groups[1];
+        assert_eq!(orphan.turn_id, None);
+        assert_eq!(ids(&orphan.messages), ["s1"]);
+        assert_eq!(orphan.summary, None);
+
+        let running = &groups[2];
+        assert_eq!(running.key, "t2");
+        assert_eq!(ids(&running.messages), ["u2", "a2"]);
+        assert_eq!(ids(&running.activities), ["e2"]);
+        assert!(running.checkpoint.is_none());
+        assert_eq!(
+            running.summary,
+            Some(("Working…".to_owned(), TurnState::Running))
+        );
+    }
+
+    #[test]
+    fn group_turns_gives_a_just_started_turn_its_user_message() {
+        let mut thread = fixture(Value::Null);
+        thread["messages"].as_array_mut().unwrap().truncate(4);
+        thread["activities"].as_array_mut().unwrap().truncate(1);
+        thread["latestTurn"] =
+            json!({"turnId": "t2", "state": "running", "requestedAt": "2026-01-01T00:02:00Z"});
+        let groups = group_turns(&thread);
+        let last = groups.last().unwrap();
+        assert_eq!(last.turn_id.as_deref(), Some("t2"));
+        assert_eq!(ids(&last.messages), ["u2"]);
+        assert_eq!(last.summary.as_ref().unwrap().1, TurnState::Running);
+
+        thread["messages"].as_array_mut().unwrap().truncate(3);
+        let groups = group_turns(&thread);
+        let last = groups.last().unwrap();
+        assert_eq!(last.turn_id.as_deref(), Some("t2"));
+        assert!(
+            last.messages.is_empty(),
+            "a running turn shows even before any item"
+        );
+    }
+
+    #[test]
+    fn group_turns_keeps_items_without_a_turn() {
+        let thread = json!({
+            "messages": [],
+            "activities": [
+                {"id": "x", "kind": "approval.requested", "turnId": null, "createdAt": "2026-01-01T00:00:01Z"},
+                {"id": "y", "kind": "runtime.warning", "turnId": null, "createdAt": "2026-01-01T00:00:00Z"},
+            ],
+            "proposedPlans": [],
+            "checkpoints": [],
+            "latestTurn": null,
+        });
+        let groups = group_turns(&thread);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(ids(&groups[0].activities), ["y", "x"]);
+        assert_eq!(groups[0].key, "y");
+        assert!(group_turns(&json!({})).is_empty());
     }
 }

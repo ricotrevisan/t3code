@@ -5,7 +5,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{Context, FontWeight, div, prelude::*, px};
 use serde_json::Value;
-use t3code_desktop_gpui::conversation;
+use t3code_desktop_gpui::conversation::{self, TurnGroup, TurnState};
 
 use crate::NativeApp;
 
@@ -13,13 +13,8 @@ impl NativeApp {
     pub(crate) fn render_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
-        let border = cx.theme().border;
         let group_box = cx.theme().group_box;
-        let muted = cx.theme().muted;
-        let secondary = cx.theme().secondary;
         let warning = cx.theme().warning;
-        let blue = cx.theme().blue;
-        let green = cx.theme().green;
         let danger = cx.theme().danger;
         let mut conversation = div()
             .id("conversation")
@@ -33,157 +28,24 @@ impl NativeApp {
             .gap_2()
             .p_3();
         if let Some(detail) = &self.detail.thread {
-            if let Some((label, state)) = conversation::turn_summary(&detail["latestTurn"]) {
-                let color = if state.is_danger() {
-                    danger
-                } else {
-                    muted_foreground
-                };
-                conversation = conversation.child(div().text_xs().text_color(color).child(label));
-            }
-
-            if let Some(messages) = detail["messages"].as_array() {
-                for message in messages {
-                    let id = gpui_kit::SharedString::from(format!(
-                        "message-{}",
-                        message["id"].as_str().unwrap_or("unknown")
-                    ));
-                    let text = message["text"].as_str().unwrap_or("").to_owned();
-                    let copy_text = text.clone();
-                    let role = message["role"].as_str().unwrap_or("message");
-                    let label = conversation::role_label(role);
-                    let created = message["createdAt"]
-                        .as_str()
-                        .and_then(conversation::clock_time);
-                    let meta = match (created, message["streaming"] == true) {
-                        (Some(time), true) => format!("{label} · {time} · streaming"),
-                        (Some(time), false) => format!("{label} · {time}"),
-                        (None, true) => format!("{label} · streaming"),
-                        (None, false) => label.to_owned(),
-                    };
-                    let attachments = message["attachments"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                    let attachment_row = (!attachments.is_empty()).then(|| {
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_1()
-                            .children(attachments.into_iter().map(|attachment| {
-                                let name = attachment["name"].as_str().unwrap_or("attachment");
-                                let size = attachment["sizeBytes"].as_u64().unwrap_or(0);
-                                div()
-                                    .px_2()
-                                    .rounded_sm()
-                                    .bg(muted)
-                                    .text_xs()
-                                    .text_color(muted_foreground)
-                                    .child(format!("{name} · {size} B"))
-                            }))
-                    });
-                    let body = div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .p_2()
-                        .rounded_md()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .child(div().text_xs().text_color(muted_foreground).child(meta))
-                                .child(
-                                    Button::new(gpui_kit::SharedString::from(format!(
-                                        "copy-{}",
-                                        message["id"].as_str().unwrap_or("unknown")
-                                    )))
-                                    .label("Copy")
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                            copy_text.clone(),
-                                        ))
-                                    })),
-                                ),
-                        )
-                        .when_some(attachment_row, |view, row| view.child(row))
-                        .child(TextView::markdown(id, text));
-                    let row = match role {
-                        "user" => div()
-                            .flex()
-                            .justify_end()
-                            .child(body.max_w(px(720.)).bg(secondary)),
-                        "reasoning" => div()
-                            .flex()
-                            .justify_center()
-                            .child(body.max_w(px(720.)).bg(muted)),
-                        "system" => div()
-                            .flex()
-                            .justify_center()
-                            .child(body.text_color(muted_foreground)),
-                        _ => body.bg(group_box),
-                    };
-                    conversation = conversation.child(row);
-                }
-            }
-
-            if let Some(activities) = detail["activities"].as_array() {
-                let visible: Vec<&Value> = activities
-                    .iter()
-                    .filter(|activity| activity["kind"] != "worktree-setup")
-                    .collect();
-                if !visible.is_empty() {
-                    conversation = conversation.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                Button::new("activity-toggle")
-                                    .debug_selector(|| "activity-toggle".into())
-                                    .ghost()
-                                    .small()
-                                    .label(format!("{} activity steps", visible.len()))
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.activity_expanded = !app.activity_expanded;
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(self.activity_expanded, |view| {
-                                let mut log = div().flex().flex_col().gap_1();
-                                for activity in visible {
-                                    let color = match activity["tone"].as_str().unwrap_or("info") {
-                                        "error" => danger,
-                                        "approval" => warning,
-                                        "tool" => muted_foreground,
-                                        _ => blue,
-                                    };
-                                    log = log.child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .text_xs()
-                                            .text_color(muted_foreground)
-                                            .child(
-                                                div().w(px(6.)).h(px(6.)).rounded_full().bg(color),
-                                            )
-                                            .child(
-                                                activity["summary"]
-                                                    .as_str()
-                                                    .unwrap_or("")
-                                                    .to_owned(),
-                                            ),
-                                    );
-                                }
-                                view.child(log)
-                            }),
-                    );
-                }
+            let groups = conversation::group_turns(detail);
+            // The newest controls keep the bare selector ids; older turns are suffixed.
+            let latest_activity = groups
+                .iter()
+                .rposition(|group| visible_activities(group).next().is_some());
+            let latest_checkpoint = groups.iter().rposition(|group| {
+                group
+                    .checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| !checkpoint_files(checkpoint).is_empty())
+            });
+            for (index, group) in groups.iter().enumerate() {
+                conversation = conversation.child(self.render_turn(
+                    group,
+                    latest_activity == Some(index),
+                    latest_checkpoint == Some(index),
+                    cx,
+                ));
             }
 
             if let Some(approval) = detail["activities"]
@@ -240,123 +102,6 @@ impl NativeApp {
                 conversation = conversation.child(card);
             }
 
-            if let Some(plans) = detail["proposedPlans"].as_array() {
-                for plan in plans {
-                    let markdown = plan["planMarkdown"].as_str().unwrap_or("").to_owned();
-                    if markdown.is_empty() {
-                        continue;
-                    }
-                    let id = gpui_kit::SharedString::from(format!(
-                        "plan-{}",
-                        plan["id"].as_str().unwrap_or("unknown")
-                    ));
-                    let implemented = !plan["implementedAt"].is_null();
-                    conversation = conversation.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .p_3()
-                            .rounded_md()
-                            .bg(group_box)
-                            .border_1()
-                            .border_color(border)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(muted_foreground)
-                                    .child("PROPOSED PLAN")
-                                    .when(implemented, |view| {
-                                        view.child(
-                                            div()
-                                                .px_2()
-                                                .rounded_sm()
-                                                .bg(muted)
-                                                .child("implemented"),
-                                        )
-                                    }),
-                            )
-                            .child(TextView::markdown(id, markdown)),
-                    );
-                }
-            }
-
-            if let Some(checkpoint) = detail["checkpoints"]
-                .as_array()
-                .and_then(|list| list.last())
-            {
-                let files = checkpoint["files"].as_array().cloned().unwrap_or_default();
-                if !files.is_empty() {
-                    let (additions, deletions) = conversation::diff_totals(&files);
-                    let turn_count = checkpoint["checkpointTurnCount"].as_u64().unwrap_or(0);
-                    let confirm = self.confirm_revert == Some(turn_count);
-                    let mut card = div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .p_3()
-                        .rounded_md()
-                        .bg(group_box)
-                        .border_1()
-                        .border_color(border)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(muted_foreground)
-                                .child("CHANGES")
-                                .child(format!("{} files", files.len()))
-                                .child(div().text_color(green).child(format!("+{additions}")))
-                                .child(div().text_color(danger).child(format!("-{deletions}"))),
-                        );
-                    for file in files.iter().take(8) {
-                        card = card.child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .gap_2()
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(file["path"].as_str().unwrap_or("").to_owned()),
-                                )
-                                .child(format!(
-                                    "+{} -{}",
-                                    file["additions"].as_u64().unwrap_or(0),
-                                    file["deletions"].as_u64().unwrap_or(0)
-                                )),
-                        );
-                    }
-                    card = card.child(
-                        div().flex().justify_end().pt_1().child(
-                            Button::new("revert-checkpoint")
-                                .debug_selector(|| "revert-checkpoint".into())
-                                .label(if confirm {
-                                    "Confirm revert"
-                                } else {
-                                    "Revert to here"
-                                })
-                                .ghost()
-                                .small()
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.revert_checkpoint(turn_count, cx)
-                                })),
-                        ),
-                    );
-                    conversation = conversation.child(card);
-                }
-            }
-
             if let Some(error) = detail["session"]["lastError"].as_str() {
                 conversation =
                     conversation.child(div().text_xs().text_color(danger).child(error.to_owned()));
@@ -406,4 +151,350 @@ impl NativeApp {
         }
         conversation
     }
+
+    fn render_turn(
+        &self,
+        group: &TurnGroup,
+        latest_activity: bool,
+        latest_checkpoint: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let muted_foreground = cx.theme().muted_foreground;
+        let danger = cx.theme().danger;
+        let mut turn = div().flex().flex_col().gap_2();
+        for message in &group.messages {
+            turn = turn.child(self.render_message(message, cx));
+        }
+
+        let running = matches!(group.summary, Some((_, TurnState::Running)));
+        let visible: Vec<&Value> = visible_activities(group).collect();
+        match &group.summary {
+            Some((label, state)) if state.is_danger() => {
+                turn = turn.child(div().text_xs().text_color(danger).child(label.clone()));
+            }
+            Some((label, TurnState::Completed)) if visible.is_empty() => {
+                turn = turn.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(label.clone()),
+                );
+            }
+            _ => {}
+        }
+        if !visible.is_empty() {
+            let label = match &group.summary {
+                Some((label, TurnState::Completed)) => {
+                    format!("{label} · {} steps", visible.len())
+                }
+                _ => format!("{} activity steps", visible.len()),
+            };
+            let selector = if latest_activity {
+                "activity-toggle".to_owned()
+            } else {
+                format!("activity-toggle-{}", group.key)
+            };
+            let expanded = self
+                .activity_expanded
+                .get(&group.key)
+                .copied()
+                .unwrap_or(running);
+            let key = group.key.clone();
+            turn = turn.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Button::new(gpui_kit::SharedString::from(selector.clone()))
+                            .debug_selector(move || selector.clone())
+                            .ghost()
+                            .small()
+                            .label(label)
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.activity_expanded.insert(key.clone(), !expanded);
+                                cx.notify();
+                            })),
+                    )
+                    .when(expanded, |view| {
+                        view.child(self.render_activity_log(&visible, cx))
+                    }),
+            );
+        }
+
+        for plan in &group.plans {
+            if let Some(card) = self.render_plan(plan, cx) {
+                turn = turn.child(card);
+            }
+        }
+        if let Some(checkpoint) = &group.checkpoint {
+            let selector = if latest_checkpoint {
+                "revert-checkpoint".to_owned()
+            } else {
+                format!("revert-checkpoint-{}", group.key)
+            };
+            if let Some(card) = self.render_checkpoint(checkpoint, selector, cx) {
+                turn = turn.child(card);
+            }
+        }
+        if let Some((label, TurnState::Running)) = &group.summary {
+            turn = turn.child(
+                div()
+                    .text_xs()
+                    .text_color(muted_foreground)
+                    .child(label.clone()),
+            );
+        }
+        turn
+    }
+
+    fn render_message(&self, message: &Value, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let muted_foreground = cx.theme().muted_foreground;
+        let group_box = cx.theme().group_box;
+        let muted = cx.theme().muted;
+        let secondary = cx.theme().secondary;
+        let id = gpui_kit::SharedString::from(format!(
+            "message-{}",
+            message["id"].as_str().unwrap_or("unknown")
+        ));
+        let text = message["text"].as_str().unwrap_or("").to_owned();
+        let copy_text = text.clone();
+        let role = message["role"].as_str().unwrap_or("message");
+        let label = conversation::role_label(role);
+        let created = message["createdAt"]
+            .as_str()
+            .and_then(conversation::clock_time);
+        let meta = match (created, message["streaming"] == true) {
+            (Some(time), true) => format!("{label} · {time} · streaming"),
+            (Some(time), false) => format!("{label} · {time}"),
+            (None, true) => format!("{label} · streaming"),
+            (None, false) => label.to_owned(),
+        };
+        let attachments = message["attachments"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let attachment_row = (!attachments.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .children(attachments.into_iter().map(|attachment| {
+                    let name = attachment["name"].as_str().unwrap_or("attachment");
+                    let size = attachment["sizeBytes"].as_u64().unwrap_or(0);
+                    div()
+                        .px_2()
+                        .rounded_sm()
+                        .bg(muted)
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(format!("{name} · {size} B"))
+                }))
+        });
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().text_xs().text_color(muted_foreground).child(meta))
+                    .child(
+                        Button::new(gpui_kit::SharedString::from(format!(
+                            "copy-{}",
+                            message["id"].as_str().unwrap_or("unknown")
+                        )))
+                        .label("Copy")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                copy_text.clone(),
+                            ))
+                        })),
+                    ),
+            )
+            .when_some(attachment_row, |view, row| view.child(row))
+            .child(TextView::markdown(id, text));
+        match role {
+            "user" => div()
+                .flex()
+                .justify_end()
+                .child(body.max_w(px(720.)).bg(secondary)),
+            "reasoning" => div()
+                .flex()
+                .justify_center()
+                .child(body.max_w(px(720.)).bg(muted)),
+            "system" => div()
+                .flex()
+                .justify_center()
+                .child(body.text_color(muted_foreground)),
+            _ => body.bg(group_box),
+        }
+    }
+
+    fn render_activity_log(&self, activities: &[&Value], cx: &Context<Self>) -> gpui_kit::Div {
+        let muted_foreground = cx.theme().muted_foreground;
+        let warning = cx.theme().warning;
+        let blue = cx.theme().blue;
+        let danger = cx.theme().danger;
+        let mut log = div().flex().flex_col().gap_1();
+        for activity in activities {
+            let color = match activity["tone"].as_str().unwrap_or("info") {
+                "error" => danger,
+                "approval" => warning,
+                "tool" => muted_foreground,
+                _ => blue,
+            };
+            log = log.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(muted_foreground)
+                    .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color))
+                    .child(activity["summary"].as_str().unwrap_or("").to_owned()),
+            );
+        }
+        log
+    }
+
+    fn render_plan(&self, plan: &Value, cx: &Context<Self>) -> Option<gpui_kit::Div> {
+        let markdown = plan["planMarkdown"].as_str().unwrap_or("").to_owned();
+        if markdown.is_empty() {
+            return None;
+        }
+        let muted_foreground = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let group_box = cx.theme().group_box;
+        let muted = cx.theme().muted;
+        let id = gpui_kit::SharedString::from(format!(
+            "plan-{}",
+            plan["id"].as_str().unwrap_or("unknown")
+        ));
+        let implemented = !plan["implementedAt"].is_null();
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_3()
+                .rounded_md()
+                .bg(group_box)
+                .border_1()
+                .border_color(border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(muted_foreground)
+                        .child("PROPOSED PLAN")
+                        .when(implemented, |view| {
+                            view.child(div().px_2().rounded_sm().bg(muted).child("implemented"))
+                        }),
+                )
+                .child(TextView::markdown(id, markdown)),
+        )
+    }
+
+    fn render_checkpoint(
+        &self,
+        checkpoint: &Value,
+        selector: String,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::Div> {
+        let files = checkpoint_files(checkpoint);
+        if files.is_empty() {
+            return None;
+        }
+        let muted_foreground = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let group_box = cx.theme().group_box;
+        let green = cx.theme().green;
+        let danger = cx.theme().danger;
+        let (additions, deletions) = conversation::diff_totals(files);
+        let turn_count = checkpoint["checkpointTurnCount"].as_u64().unwrap_or(0);
+        let confirm = self.confirm_revert == Some(turn_count);
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .rounded_md()
+            .bg(group_box)
+            .border_1()
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted_foreground)
+                    .child("CHANGES")
+                    .child(format!("{} files", files.len()))
+                    .child(div().text_color(green).child(format!("+{additions}")))
+                    .child(div().text_color(danger).child(format!("-{deletions}"))),
+            );
+        for file in files.iter().take(8) {
+            card = card.child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(muted_foreground)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(file["path"].as_str().unwrap_or("").to_owned()),
+                    )
+                    .child(format!(
+                        "+{} -{}",
+                        file["additions"].as_u64().unwrap_or(0),
+                        file["deletions"].as_u64().unwrap_or(0)
+                    )),
+            );
+        }
+        Some(
+            card.child(
+                div().flex().justify_end().pt_1().child(
+                    Button::new(gpui_kit::SharedString::from(selector.clone()))
+                        .debug_selector(move || selector.clone())
+                        .label(if confirm {
+                            "Confirm revert"
+                        } else {
+                            "Revert to here"
+                        })
+                        .ghost()
+                        .small()
+                        .on_click(
+                            cx.listener(move |app, _, _, cx| app.revert_checkpoint(turn_count, cx)),
+                        ),
+                ),
+            ),
+        )
+    }
+}
+
+fn visible_activities(group: &TurnGroup) -> impl Iterator<Item = &Value> {
+    group
+        .activities
+        .iter()
+        .filter(|activity| activity["kind"] != "worktree-setup")
+}
+
+fn checkpoint_files(checkpoint: &Value) -> &[Value] {
+    checkpoint["files"].as_array().map_or(&[], Vec::as_slice)
 }
