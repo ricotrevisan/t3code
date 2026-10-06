@@ -4227,6 +4227,14 @@ impl Render for NativeApp {
                     .find(|segment| !segment.is_empty())
             })
             .map(str::to_owned);
+        let status_is_error = {
+            let status = self.status.to_lowercase();
+            status.contains("failed")
+                || status.contains("error")
+                || status.contains("rejected")
+                || status.contains("could not")
+                || status.contains("cannot")
+        };
         let status_bar = div()
             .id("status-bar")
             .flex()
@@ -4244,14 +4252,59 @@ impl Render for NativeApp {
                 div()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .min_w_0()
-                    .child(environment_host)
+                    .child(
+                        div()
+                            .w(px(8.))
+                            .h(px(8.))
+                            .rounded_full()
+                            .bg(if self.commands.is_some() {
+                                green
+                            } else {
+                                muted_foreground
+                            }),
+                    )
+                    .child(
+                        Button::new("environment-chip")
+                            .debug_selector(|| "environment-chip".into())
+                            .icon(gpui_kit::assets::IconName::Settings)
+                            .label(environment_host)
+                            .ghost()
+                            .small()
+                            .tooltip("Open connection settings")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.settings_open = true;
+                                cx.notify();
+                            })),
+                    )
                     .when_some(status_worktree, |view, name| {
-                        view.child(div().truncate().child(format!("Worktree · {name}")))
+                        view.child(
+                            Button::new("worktree-chip")
+                                .debug_selector(|| "worktree-chip".into())
+                                .icon(gpui_kit::assets::IconName::GitBranch)
+                                .label(format!("Worktree · {name}"))
+                                .ghost()
+                                .small()
+                                .tooltip("Manage branches and worktrees")
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.execute_command(palette::Command::Worktrees, window, cx)
+                                })),
+                        )
                     })
                     .when_some(header_branch, |view, branch| {
-                        view.child(div().truncate().child(branch))
+                        view.child(
+                            Button::new("branch-chip")
+                                .debug_selector(|| "branch-chip".into())
+                                .icon(gpui_kit::assets::IconName::GitBranch)
+                                .label(branch)
+                                .ghost()
+                                .small()
+                                .tooltip("Switch branch or worktree")
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.execute_command(palette::Command::Worktrees, window, cx)
+                                })),
+                        )
                     })
                     .when(!active_model.is_empty(), |view| {
                         view.child(div().truncate().child(active_model))
@@ -4266,6 +4319,13 @@ impl Render for NativeApp {
                     .when(busy, |view| {
                         view.child(div().text_color(warning).child("Working…"))
                     })
+                    .child(
+                        div()
+                            .max_w(px(360.))
+                            .truncate()
+                            .text_color(if status_is_error { danger } else { muted_foreground })
+                            .child(self.status.clone()),
+                    )
                     .child(if self.commands.is_some() {
                         "Connected"
                     } else {
