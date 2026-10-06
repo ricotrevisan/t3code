@@ -3,6 +3,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable, Sizable,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState, Position, Textarea, TextareaState},
+    resizable::{h_resizable, resizable_panel},
     text::TextView,
     TitleBar,
 };
@@ -4734,7 +4735,7 @@ impl Render for NativeApp {
                             .flex()
                             .flex_1()
                             .h_full()
-                            .child(
+                            .child(h_resizable("workspace-split").child(resizable_panel().child(
                                 div()
                                     .flex()
                                     .flex_col()
@@ -4746,9 +4747,10 @@ impl Render for NativeApp {
                                     .when_some(thread_menu, |view, menu| view.child(menu))
                                     .child(conversation)
                                     .child(composer_card)
-                                    .child(status_bar),
+                                    .child(status_bar).into_any_element(),
                             )
-                            .child(
+                                    )
+                            .child(resizable_panel().child(
                                 div()
                                     .id("inspector")
                                     .when(!self.inspector_open, |view| view.hidden())
@@ -5068,6 +5070,9 @@ impl Render for NativeApp {
                             .when(self.right_tab == RightTab::Agents, |view| {
                                 view.child(agents_panel)
                             })
+                            .into_any_element()
+                    ),
+                                    )
                     ),
             )
             )
