@@ -1,136 +1,87 @@
+use std::rc::Rc;
+
 use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
     text::TextView,
 };
-use gpui_kit::{Context, FontWeight, div, prelude::*, px};
+use gpui_kit::{AnyElement, Context, FontWeight, div, list, prelude::*, px};
 use serde_json::Value;
-use t3code_desktop_gpui::conversation::{self, TurnGroup, TurnState};
+use t3code_desktop_gpui::conversation::{self, PendingApproval, TimelineEntry, TimelineRow};
 
 use crate::NativeApp;
 
 impl NativeApp {
-    pub(crate) fn render_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_conversation(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let foreground = cx.theme().foreground;
         let muted_foreground = cx.theme().muted_foreground;
-        let group_box = cx.theme().group_box;
-        let warning = cx.theme().warning;
-        let danger = cx.theme().danger;
-        let mut conversation = div()
+        let conversation = div()
             .id("conversation")
             .min_h(px(140.))
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .flex_1()
-            .overflow_y_scroll()
-            .track_scroll(&self.conversation_scroll)
-            .gap_2()
-            .p_3();
+            .flex_1();
         if let Some(detail) = &self.detail.thread {
-            let groups = conversation::group_turns(detail);
-            // The newest controls keep the bare selector ids; older turns are suffixed.
-            let latest_activity = groups
-                .iter()
-                .rposition(|group| visible_activities(group).next().is_some());
-            let latest_checkpoint = groups.iter().rposition(|group| {
-                group
-                    .checkpoint
-                    .as_ref()
-                    .is_some_and(|checkpoint| !checkpoint_files(checkpoint).is_empty())
-            });
-            for (index, group) in groups.iter().enumerate() {
-                conversation = conversation.child(self.render_turn(
-                    group,
-                    latest_activity == Some(index),
-                    latest_checkpoint == Some(index),
-                    cx,
-                ));
+            let rows = conversation::timeline_rows(detail, &self.activity_expanded);
+            let diff = conversation::diff_rows(&self.conversation_rows, &rows);
+            if !diff.replaced.is_empty() || diff.inserted > 0 {
+                self.conversation_scroll
+                    .splice(diff.replaced, diff.inserted);
             }
-
-            if let Some(approval) = detail["activities"]
-                .as_array()
-                .and_then(|activities| conversation::pending_approval(activities))
-            {
-                let request_id = approval.request_id.clone();
-                let options = if approval.options.is_empty() {
-                    vec![
-                        ("accept".to_owned(), "Allow once".to_owned()),
-                        ("decline".to_owned(), "Deny".to_owned()),
-                    ]
-                } else {
-                    approval.options.clone()
-                };
-                let mut card = div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .rounded_md()
-                    .bg(group_box)
-                    .border_1()
-                    .border_color(warning)
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(warning)
-                            .child("APPROVAL REQUIRED"),
-                    )
-                    .child(div().text_sm().child(approval.summary.clone()));
-                if let Some(detail) = approval.detail.clone() {
-                    card = card.child(div().text_xs().text_color(muted_foreground).child(detail));
-                }
-                card = card.child(div().flex().flex_wrap().gap_2().children(
-                    options.into_iter().map(|(decision, label)| {
-                        let request_id = request_id.clone();
-                        let decision_id = decision.clone();
-                        let danger = decision == "decline" || decision == "cancel";
-                        Button::new(gpui_kit::SharedString::from(format!(
-                            "approval-{decision_id}"
-                        )))
-                        .debug_selector(move || format!("approval-{decision_id}"))
-                        .label(label)
-                        .ghost()
-                        .small()
-                        .when(danger, |button| button.danger())
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.respond_approval(&request_id, &decision, cx)
-                        }))
-                    }),
-                ));
-                conversation = conversation.child(card);
+            for index in diff.changed {
+                self.conversation_scroll.remeasure_items(index..index + 1);
             }
-
-            if let Some(error) = detail["session"]["lastError"].as_str() {
-                conversation =
-                    conversation.child(div().text_xs().text_color(danger).child(error.to_owned()));
-            }
-        } else if self
+            self.conversation_rows = Rc::new(rows);
+            // Only rows near the viewport are built; each frame renders them afresh.
+            let rows = self.conversation_rows.clone();
+            let app = cx.weak_entity();
+            return conversation.py_2().child(
+                list(self.conversation_scroll.clone(), move |index, _, cx| {
+                    let Some(row) = rows.get(index) else {
+                        return div().into_any_element();
+                    };
+                    app.update(cx, |app, cx| app.render_row(row, cx))
+                        .unwrap_or_else(|_| div().into_any_element())
+                })
+                .flex_1()
+                .min_h_0(),
+            );
+        }
+        let conversation = conversation.overflow_y_scroll().gap_2().p_3();
+        if self
             .pending_threads
             .iter()
             .any(|draft| Some(&draft.thread.id) == self.selected_thread.as_ref())
         {
             let phase = self.selected_setup().map(|setup| setup.phase.clone());
-            conversation = conversation.child(match phase.as_deref() {
-                Some("running") => "Preparing worktree · your first message is waiting for setup",
-                Some("cancelled") => {
-                    "Setup cancelled · your draft and message are retained for retry"
-                }
-                Some("failed") => "Setup failed · your draft and message are retained for retry",
-                _ => "New thread draft · send a message to start the conversation",
-            });
-            if phase.is_some() {
-                conversation = conversation.child(self.composer.read(cx).value().to_string());
-            }
+            conversation
+                .child(match phase.as_deref() {
+                    Some("running") => {
+                        "Preparing worktree · your first message is waiting for setup"
+                    }
+                    Some("cancelled") => {
+                        "Setup cancelled · your draft and message are retained for retry"
+                    }
+                    Some("failed") => {
+                        "Setup failed · your draft and message are retained for retry"
+                    }
+                    _ => "New thread draft · send a message to start the conversation",
+                })
+                .when(phase.is_some(), |view| {
+                    view.child(self.composer.read(cx).value().to_string())
+                })
         } else if self.selected_thread.is_some() {
-            conversation = conversation.child(
+            conversation.child(
                 div()
                     .text_color(muted_foreground)
                     .child("Loading thread history…"),
-            );
+            )
         } else {
-            conversation = conversation.child(
+            conversation.child(
                 div()
                     .flex()
                     .flex_col()
@@ -147,60 +98,46 @@ impl NativeApp {
                             .child("Select a thread"),
                     )
                     .child("Choose a thread in the sidebar, or start a new one with ⌘N"),
-            );
+            )
         }
-        conversation
     }
 
-    fn render_turn(
-        &self,
-        group: &TurnGroup,
-        latest_activity: bool,
-        latest_checkpoint: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn render_row(&self, row: &TimelineRow, cx: &mut Context<Self>) -> AnyElement {
         let muted_foreground = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
-        let mut turn = div().flex().flex_col().gap_2();
-        for message in &group.messages {
-            turn = turn.child(self.render_message(message, cx));
-        }
-
-        let running = matches!(group.summary, Some((_, TurnState::Running)));
-        let visible: Vec<&Value> = visible_activities(group).collect();
-        match &group.summary {
-            Some((label, state)) if state.is_danger() => {
-                turn = turn.child(div().text_xs().text_color(danger).child(label.clone()));
-            }
-            Some((label, TurnState::Completed)) if visible.is_empty() => {
-                turn = turn.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted_foreground)
-                        .child(label.clone()),
-                );
-            }
-            _ => {}
-        }
-        if !visible.is_empty() {
-            let label = match &group.summary {
-                Some((label, TurnState::Completed)) => {
-                    format!("{label} · {} steps", visible.len())
-                }
-                _ => format!("{} activity steps", visible.len()),
-            };
-            let selector = if latest_activity {
-                "activity-toggle".to_owned()
-            } else {
-                format!("activity-toggle-{}", group.key)
-            };
-            let expanded = self
-                .activity_expanded
-                .get(&group.key)
-                .copied()
-                .unwrap_or(running);
-            let key = group.key.clone();
-            turn = turn.child(
+        let message_id = match &row.entry {
+            TimelineEntry::Message(message) => message["id"].as_str().map(str::to_owned),
+            _ => None,
+        };
+        let content = match &row.entry {
+            TimelineEntry::Message(message) => self.render_message(message, cx).into_any_element(),
+            TimelineEntry::TurnStatus {
+                label,
+                danger: true,
+            } => div()
+                .text_xs()
+                .text_color(danger)
+                .child(label.clone())
+                .into_any_element(),
+            TimelineEntry::TurnStatus { label, .. } | TimelineEntry::Working(label) => div()
+                .text_xs()
+                .text_color(muted_foreground)
+                .child(label.clone())
+                .into_any_element(),
+            TimelineEntry::Activity {
+                turn,
+                label,
+                activities,
+                expanded,
+                latest,
+            } => {
+                let selector = if *latest {
+                    "activity-toggle".to_owned()
+                } else {
+                    format!("activity-toggle-{turn}")
+                };
+                let expanded = *expanded;
+                let key = turn.clone();
                 div()
                     .flex()
                     .flex_col()
@@ -210,42 +147,112 @@ impl NativeApp {
                             .debug_selector(move || selector.clone())
                             .ghost()
                             .small()
-                            .label(label)
+                            .label(label.clone())
                             .on_click(cx.listener(move |app, _, _, cx| {
+                                // The disclosure grows in place; do not snap to the tail.
+                                app.conversation_scroll.pause_following_tail();
                                 app.activity_expanded.insert(key.clone(), !expanded);
                                 cx.notify();
                             })),
                     )
                     .when(expanded, |view| {
-                        view.child(self.render_activity_log(&visible, cx))
-                    }),
-            );
-        }
+                        view.child(self.render_activity_log(activities, cx))
+                    })
+                    .into_any_element()
+            }
+            TimelineEntry::Plan(plan) => self.render_plan(plan, cx).into_any_element(),
+            TimelineEntry::Checkpoint {
+                turn,
+                checkpoint,
+                latest,
+            } => {
+                let selector = if *latest {
+                    "revert-checkpoint".to_owned()
+                } else {
+                    format!("revert-checkpoint-{turn}")
+                };
+                self.render_checkpoint(checkpoint, selector, cx)
+                    .into_any_element()
+            }
+            TimelineEntry::Approval(approval) => {
+                self.render_approval(approval, cx).into_any_element()
+            }
+            TimelineEntry::Error(error) => div()
+                .text_xs()
+                .text_color(danger)
+                .child(error.clone())
+                .into_any_element(),
+        };
+        div()
+            .w_full()
+            .px_3()
+            .py_1()
+            .when_some(message_id, |row, id| {
+                row.debug_selector(move || format!("message-{id}"))
+            })
+            .child(content)
+            .into_any_element()
+    }
 
-        for plan in &group.plans {
-            if let Some(card) = self.render_plan(plan, cx) {
-                turn = turn.child(card);
-            }
-        }
-        if let Some(checkpoint) = &group.checkpoint {
-            let selector = if latest_checkpoint {
-                "revert-checkpoint".to_owned()
-            } else {
-                format!("revert-checkpoint-{}", group.key)
-            };
-            if let Some(card) = self.render_checkpoint(checkpoint, selector, cx) {
-                turn = turn.child(card);
-            }
-        }
-        if let Some((label, TurnState::Running)) = &group.summary {
-            turn = turn.child(
+    fn render_approval(
+        &self,
+        approval: &PendingApproval,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let muted_foreground = cx.theme().muted_foreground;
+        let group_box = cx.theme().group_box;
+        let warning = cx.theme().warning;
+        let request_id = approval.request_id.clone();
+        let options = if approval.options.is_empty() {
+            vec![
+                ("accept".to_owned(), "Allow once".to_owned()),
+                ("decline".to_owned(), "Deny".to_owned()),
+            ]
+        } else {
+            approval.options.clone()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .bg(group_box)
+            .border_1()
+            .border_color(warning)
+            .child(
                 div()
                     .text_xs()
-                    .text_color(muted_foreground)
-                    .child(label.clone()),
-            );
-        }
-        turn
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(warning)
+                    .child("APPROVAL REQUIRED"),
+            )
+            .child(div().text_sm().child(approval.summary.clone()))
+            .when_some(approval.detail.clone(), |card, detail| {
+                card.child(div().text_xs().text_color(muted_foreground).child(detail))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(options.into_iter().map(|(decision, label)| {
+                        let request_id = request_id.clone();
+                        let decision_id = decision.clone();
+                        let danger = decision == "decline" || decision == "cancel";
+                        Button::new(gpui_kit::SharedString::from(format!(
+                            "approval-{decision_id}"
+                        )))
+                        .debug_selector(move || format!("approval-{decision_id}"))
+                        .label(label)
+                        .ghost()
+                        .small()
+                        .when(danger, |button| button.danger())
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.respond_approval(&request_id, &decision, cx)
+                        }))
+                    })),
+            )
     }
 
     fn render_message(&self, message: &Value, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -338,7 +345,7 @@ impl NativeApp {
         }
     }
 
-    fn render_activity_log(&self, activities: &[&Value], cx: &Context<Self>) -> gpui_kit::Div {
+    fn render_activity_log(&self, activities: &[Value], cx: &Context<Self>) -> gpui_kit::Div {
         let muted_foreground = cx.theme().muted_foreground;
         let warning = cx.theme().warning;
         let blue = cx.theme().blue;
@@ -365,11 +372,8 @@ impl NativeApp {
         log
     }
 
-    fn render_plan(&self, plan: &Value, cx: &Context<Self>) -> Option<gpui_kit::Div> {
+    fn render_plan(&self, plan: &Value, cx: &Context<Self>) -> gpui_kit::Div {
         let markdown = plan["planMarkdown"].as_str().unwrap_or("").to_owned();
-        if markdown.is_empty() {
-            return None;
-        }
         let muted_foreground = cx.theme().muted_foreground;
         let border = cx.theme().border;
         let group_box = cx.theme().group_box;
@@ -379,31 +383,29 @@ impl NativeApp {
             plan["id"].as_str().unwrap_or("unknown")
         ));
         let implemented = !plan["implementedAt"].is_null();
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_3()
-                .rounded_md()
-                .bg(group_box)
-                .border_1()
-                .border_color(border)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(muted_foreground)
-                        .child("PROPOSED PLAN")
-                        .when(implemented, |view| {
-                            view.child(div().px_2().rounded_sm().bg(muted).child("implemented"))
-                        }),
-                )
-                .child(TextView::markdown(id, markdown)),
-        )
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_3()
+            .rounded_md()
+            .bg(group_box)
+            .border_1()
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted_foreground)
+                    .child("PROPOSED PLAN")
+                    .when(implemented, |view| {
+                        view.child(div().px_2().rounded_sm().bg(muted).child("implemented"))
+                    }),
+            )
+            .child(TextView::markdown(id, markdown))
     }
 
     fn render_checkpoint(
@@ -411,11 +413,10 @@ impl NativeApp {
         checkpoint: &Value,
         selector: String,
         cx: &mut Context<Self>,
-    ) -> Option<gpui_kit::Div> {
-        let files = checkpoint_files(checkpoint);
-        if files.is_empty() {
-            return None;
-        }
+    ) -> gpui_kit::Div {
+        let files = checkpoint["files"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
         let muted_foreground = cx.theme().muted_foreground;
         let border = cx.theme().border;
         let group_box = cx.theme().group_box;
@@ -467,34 +468,21 @@ impl NativeApp {
                     )),
             );
         }
-        Some(
-            card.child(
-                div().flex().justify_end().pt_1().child(
-                    Button::new(gpui_kit::SharedString::from(selector.clone()))
-                        .debug_selector(move || selector.clone())
-                        .label(if confirm {
-                            "Confirm revert"
-                        } else {
-                            "Revert to here"
-                        })
-                        .ghost()
-                        .small()
-                        .on_click(
-                            cx.listener(move |app, _, _, cx| app.revert_checkpoint(turn_count, cx)),
-                        ),
-                ),
+        card.child(
+            div().flex().justify_end().pt_1().child(
+                Button::new(gpui_kit::SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .label(if confirm {
+                        "Confirm revert"
+                    } else {
+                        "Revert to here"
+                    })
+                    .ghost()
+                    .small()
+                    .on_click(
+                        cx.listener(move |app, _, _, cx| app.revert_checkpoint(turn_count, cx)),
+                    ),
             ),
         )
     }
-}
-
-fn visible_activities(group: &TurnGroup) -> impl Iterator<Item = &Value> {
-    group
-        .activities
-        .iter()
-        .filter(|activity| activity["kind"] != "worktree-setup")
-}
-
-fn checkpoint_files(checkpoint: &Value) -> &[Value] {
-    checkpoint["files"].as_array().map_or(&[], Vec::as_slice)
 }

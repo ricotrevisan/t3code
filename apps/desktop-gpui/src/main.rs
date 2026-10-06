@@ -6,7 +6,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, Point, Subscription, Task,
-    Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
@@ -156,7 +156,11 @@ struct NativeApp {
     thread_menu_row: Option<(String, Point<Pixels>)>,
     collapsed_projects: Vec<String>,
     collapsed_groups: Vec<String>,
-    conversation_scroll: gpui_kit::ScrollHandle,
+    /// The conversation's virtual list. It follows the tail until the user
+    /// scrolls up, and resumes once they scroll back to the newest row.
+    conversation_scroll: gpui_kit::ListState,
+    /// The rows `conversation_scroll` currently holds, diffed on each render.
+    conversation_rows: std::rc::Rc<Vec<t3code_desktop_gpui::conversation::TimelineRow>>,
     attachments: Vec<Value>,
     auth_state: Option<Value>,
     auth_callback: Entity<InputState>,
@@ -410,7 +414,12 @@ impl NativeApp {
             thread_menu_row: None,
             collapsed_projects: Vec::new(),
             collapsed_groups: Vec::new(),
-            conversation_scroll: gpui_kit::ScrollHandle::new(),
+            conversation_scroll: {
+                let list = gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, px(400.));
+                list.set_follow_mode(gpui_kit::FollowMode::Tail);
+                list
+            },
+            conversation_rows: Default::default(),
             attachments: Vec::new(),
             auth_state: None,
             auth_callback: cx.new(|cx| {
@@ -497,16 +506,10 @@ impl NativeApp {
         app
     }
 
-    /// Applies a thread subscription item, keeping the conversation on its newest
-    /// content unless the user has scrolled up to read history.
+    /// Applies a thread subscription item. The conversation list keeps itself on
+    /// the newest content unless the user has scrolled up to read history.
     fn apply_thread_update(&mut self, thread_id: &str, item: Value) -> Result<(), String> {
-        let scroll = &self.conversation_scroll;
-        let at_tail = scroll.max_offset().y + scroll.offset().y <= px(48.);
-        let result = self.detail.apply(thread_id, item);
-        if at_tail {
-            self.conversation_scroll.scroll_to_bottom();
-        }
-        result
+        self.detail.apply(thread_id, item)
     }
 
     fn turn_running(&self) -> bool {
@@ -1771,7 +1774,9 @@ impl NativeApp {
         self.pending_history_attached = false;
         self.close_thread_menu();
         self.detail = thread::ThreadDetail::default();
-        self.conversation_scroll.set_offset(point(px(0.), px(0.)));
+        self.conversation_rows = Default::default();
+        self.conversation_scroll.reset(0);
+        self.conversation_scroll.set_follow_mode(gpui_kit::FollowMode::Tail);
         let text = self.drafts.get(id).cloned().unwrap_or_else(|| {
             self.draft_store
                 .as_ref()

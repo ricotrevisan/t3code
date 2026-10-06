@@ -127,9 +127,7 @@ pub fn pending_approval(activities: &[Value]) -> Option<PendingApproval> {
                     pending = Some(activity.clone());
                 }
             }
-            "approval.resolved"
-                if request_id.is_some() && request_id == pending_id =>
-            {
+            "approval.resolved" if request_id.is_some() && request_id == pending_id => {
                 pending = None;
                 pending_id = None;
             }
@@ -333,6 +331,201 @@ pub fn group_turns(thread: &Value) -> Vec<TurnGroup> {
     groups
 }
 
+/// One renderable entry of the conversation timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TimelineEntry {
+    Message(Value),
+    /// A settled turn's `Worked for …`, `Interrupted`, or `Failed` line.
+    TurnStatus {
+        label: String,
+        danger: bool,
+    },
+    /// The turn's activity disclosure. `latest` marks the newest one, whose
+    /// toggle keeps the bare selector id.
+    Activity {
+        turn: String,
+        label: String,
+        activities: Vec<Value>,
+        expanded: bool,
+        latest: bool,
+    },
+    Plan(Value),
+    Checkpoint {
+        turn: String,
+        checkpoint: Value,
+        latest: bool,
+    },
+    /// The running turn's `Working…` indicator.
+    Working(String),
+    Approval(PendingApproval),
+    Error(String),
+}
+
+/// A timeline row with a key that stays the same while the entry it renders
+/// exists, so a virtual list can splice around it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimelineRow {
+    pub key: String,
+    pub entry: TimelineEntry,
+}
+
+/// Flattens a thread into timeline rows in display order: each turn's
+/// messages, its status, activity disclosure, plans, checkpoint, and working
+/// indicator, then the pending approval and the session error. `expanded`
+/// holds the activity disclosures the user toggled, by turn key; untouched
+/// ones are open while their turn runs.
+pub fn timeline_rows(
+    thread: &Value,
+    expanded: &std::collections::HashMap<String, bool>,
+) -> Vec<TimelineRow> {
+    let groups = group_turns(thread);
+    let visible = |activity: &Value| activity["kind"] != "worktree-setup";
+    let has_files = |checkpoint: &Value| {
+        checkpoint["files"]
+            .as_array()
+            .is_some_and(|files| !files.is_empty())
+    };
+    let latest_activity = groups
+        .iter()
+        .rposition(|group| group.activities.iter().any(visible));
+    let latest_checkpoint = groups
+        .iter()
+        .rposition(|group| group.checkpoint.as_ref().is_some_and(has_files));
+
+    let mut rows = Vec::new();
+    let mut push = |key: String, entry| rows.push(TimelineRow { key, entry });
+    for (index, group) in groups.into_iter().enumerate() {
+        let TurnGroup {
+            key,
+            messages,
+            activities,
+            plans,
+            checkpoint,
+            summary,
+            ..
+        } = group;
+        let activities: Vec<Value> = activities.into_iter().filter(visible).collect();
+        for (position, message) in messages.into_iter().enumerate() {
+            let id = message["id"]
+                .as_str()
+                .map_or_else(|| format!("{key}:{position}"), str::to_owned);
+            push(format!("message:{id}"), TimelineEntry::Message(message));
+        }
+        let running = matches!(summary, Some((_, TurnState::Running)));
+        match &summary {
+            Some((label, state)) if state.is_danger() => push(
+                format!("status:{key}"),
+                TimelineEntry::TurnStatus {
+                    label: label.clone(),
+                    danger: true,
+                },
+            ),
+            Some((label, TurnState::Completed)) if activities.is_empty() => push(
+                format!("status:{key}"),
+                TimelineEntry::TurnStatus {
+                    label: label.clone(),
+                    danger: false,
+                },
+            ),
+            _ => {}
+        }
+        if !activities.is_empty() {
+            let label = match &summary {
+                Some((label, TurnState::Completed)) => {
+                    format!("{label} · {} steps", activities.len())
+                }
+                _ => format!("{} activity steps", activities.len()),
+            };
+            push(
+                format!("activity:{key}"),
+                TimelineEntry::Activity {
+                    turn: key.clone(),
+                    label,
+                    expanded: expanded.get(&key).copied().unwrap_or(running),
+                    activities,
+                    latest: latest_activity == Some(index),
+                },
+            );
+        }
+        for plan in plans {
+            if plan["planMarkdown"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+            {
+                let id = plan["id"].as_str().unwrap_or("unknown").to_owned();
+                push(format!("plan:{id}"), TimelineEntry::Plan(plan));
+            }
+        }
+        if let Some(checkpoint) = checkpoint.filter(has_files) {
+            push(
+                format!("checkpoint:{key}"),
+                TimelineEntry::Checkpoint {
+                    turn: key.clone(),
+                    checkpoint,
+                    latest: latest_checkpoint == Some(index),
+                },
+            );
+        }
+        if let Some((label, TurnState::Running)) = summary {
+            push(format!("working:{key}"), TimelineEntry::Working(label));
+        }
+    }
+    if let Some(approval) = thread["activities"]
+        .as_array()
+        .and_then(|activities| pending_approval(activities))
+    {
+        push(
+            format!("approval:{}", approval.request_id),
+            TimelineEntry::Approval(approval),
+        );
+    }
+    if let Some(error) = thread["session"]["lastError"].as_str() {
+        push("error".to_owned(), TimelineEntry::Error(error.to_owned()));
+    }
+    rows
+}
+
+/// How a list showing `old` rows catches up with `new`: replace the rows in
+/// `replaced` with `inserted` new ones, then remeasure the surviving rows at
+/// `changed` (indices into `new`) whose content changed in place.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RowsDiff {
+    pub replaced: std::ops::Range<usize>,
+    pub inserted: usize,
+    pub changed: Vec<usize>,
+}
+
+pub fn diff_rows(old: &[TimelineRow], new: &[TimelineRow]) -> RowsDiff {
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(old, new)| old.key == new.key)
+        .count();
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(old.len().min(new.len()) - prefix)
+        .take_while(|(old, new)| old.key == new.key)
+        .count();
+    let changed = (0..prefix)
+        .chain(new.len() - suffix..new.len())
+        .filter(|&index| {
+            let before = if index < prefix {
+                index
+            } else {
+                old.len() - (new.len() - index)
+            };
+            old[before].entry != new[index].entry
+        })
+        .collect();
+    RowsDiff {
+        replaced: prefix..old.len() - suffix,
+        inserted: new.len() - prefix - suffix,
+        changed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +680,83 @@ mod tests {
         assert!(
             last.messages.is_empty(),
             "a running turn shows even before any item"
+        );
+    }
+
+    #[test]
+    fn timeline_rows_flatten_turns_into_one_row_per_entry() {
+        let mut thread = fixture(
+            json!({"turnId": "t2", "state": "running", "requestedAt": "2026-01-01T00:02:00Z"}),
+        );
+        let rows = timeline_rows(&thread, &Default::default());
+        let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "message:u1",
+                "message:a1",
+                "activity:t1",
+                "plan:p1",
+                "message:s1",
+                "message:u2",
+                "message:a2",
+                "activity:t2",
+                "working:t2",
+            ],
+            "a checkpoint without files renders nothing, so it has no row"
+        );
+        assert!(matches!(
+            &rows[7].entry,
+            TimelineEntry::Activity {
+                expanded: true,
+                latest: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &rows[2].entry,
+            TimelineEntry::Activity {
+                expanded: false,
+                latest: false,
+                ..
+            }
+        ));
+
+        thread["messages"].as_array_mut().unwrap().push(json!(
+            {"id": "a3", "role": "assistant", "text": "more", "turnId": "t2", "createdAt": "2026-01-01T00:02:20Z", "updatedAt": "2026-01-01T00:02:20Z"}
+        ));
+        let appended = timeline_rows(&thread, &Default::default());
+        assert_eq!(appended[7].key, "message:a3");
+        assert_eq!(
+            diff_rows(&rows, &appended),
+            RowsDiff {
+                replaced: 7..7,
+                inserted: 1,
+                changed: vec![]
+            },
+            "an appended message splices one row and keeps every other row"
+        );
+
+        thread["messages"][4]["text"] = json!("working harder");
+        let streamed = timeline_rows(&thread, &Default::default());
+        assert_eq!(
+            diff_rows(&appended, &streamed),
+            RowsDiff {
+                replaced: 10..10,
+                inserted: 0,
+                changed: vec![6]
+            },
+            "streaming text remeasures its row in place"
+        );
+        let collapsed = timeline_rows(&thread, &[("t2".to_owned(), false)].into());
+        assert_eq!(diff_rows(&streamed, &collapsed).changed, vec![8]);
+        assert_eq!(
+            diff_rows(&[], &collapsed),
+            RowsDiff {
+                replaced: 0..0,
+                inserted: 10,
+                changed: vec![]
+            }
         );
     }
 

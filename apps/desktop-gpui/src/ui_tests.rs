@@ -1,7 +1,7 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
 use super::*;
 use gpui_kit::component::Root;
-use gpui_kit::{AppContext, MouseButton, TestAppContext, VisualTestContext};
+use gpui_kit::{AppContext, MouseButton, TestAppContext, VisualTestContext, point};
 
 fn harness(
     cx: &mut TestAppContext,
@@ -461,7 +461,8 @@ fn conversation_follows_the_tail_until_the_user_scrolls_up(cx: &mut TestAppConte
         }));
         cx.run_until_parked();
         app.read_with(cx, |app, _| {
-            (app.conversation_scroll.offset().y, app.conversation_scroll.max_offset().y)
+            let list = &app.conversation_scroll;
+            (list.scroll_px_offset_for_scrollbar().y, list.max_offset_for_scrollbar().y)
         })
     };
     let (offset, max) = load(60, cx);
@@ -470,9 +471,80 @@ fn conversation_follows_the_tail_until_the_user_scrolls_up(cx: &mut TestAppConte
     let (offset, max) = load(80, cx);
     assert_eq!(offset, -max, "new content keeps the tail in view");
     // Reading history: later updates must not yank the viewport.
-    app.read_with(cx, |app, _| app.conversation_scroll.set_offset(point(px(0.), px(0.))));
+    app.read_with(cx, |app, _| app.conversation_scroll.scroll_to(Default::default()));
     let (offset, _) = load(90, cx);
     assert_eq!(offset, px(0.));
+}
+
+#[gpui_kit::test]
+fn conversation_tail_survives_streaming_and_thread_switches(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let tail = |cx: &mut VisualTestContext| {
+        app.read_with(cx, |app, _| {
+            let list = &app.conversation_scroll;
+            (list.scroll_px_offset_for_scrollbar().y, list.max_offset_for_scrollbar().y)
+        })
+    };
+    let load = |thread: &str, messages: Vec<Value>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| app.update(cx, |app, cx| {
+            let item = json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"thread":{"id":thread,"title":"Thread","messages":messages,"session":{"status":"running"}}}});
+            app.apply_thread_update(thread, item).unwrap();
+            cx.notify();
+        }));
+        cx.run_until_parked();
+    };
+    let mut messages: Vec<Value> = (0..60).map(message).collect();
+    load("t", messages.clone(), cx);
+    let (_, before) = tail(cx);
+    messages[59]["text"] = json!("streamed line\n\n".repeat(40));
+    messages[59]["streaming"] = json!(true);
+    load("t", messages, cx);
+    let (offset, max) = tail(cx);
+    assert!(max > before, "the streamed message grew");
+    assert_eq!(offset, -max, "streaming growth keeps the tail in view");
+
+    app.read_with(cx, |app, _| app.conversation_scroll.scroll_to(Default::default()));
+    cx.update(|window, cx| app.update(cx, |app, cx| {
+        app.shell.apply(serde_json::from_value(json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"projects":[{"id":"p","title":"Fixture","workspaceRoot":"/tmp/fixture"}],"threads":[{"id":"t","projectId":"p","title":"Thread","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"archivedAt":null},{"id":"u","projectId":"p","title":"Other","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"archivedAt":null}]}})).unwrap()).unwrap();
+        app.select_thread("u", window, cx);
+    }));
+    load("u", (0..60).map(message).collect(), cx);
+    let (offset, max) = tail(cx);
+    assert!(max > px(0.));
+    assert_eq!(offset, -max, "switching threads lands on the new thread's tail");
+}
+
+#[gpui_kit::test]
+fn long_conversations_only_build_rows_near_the_viewport(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.apply_thread_update("t", snapshot((0..2000).map(message).collect(), "idle"))
+            .unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let ids: Vec<&'static str> = (0..2000)
+        .map(|index| &*format!("message-m{index}").leak())
+        .collect();
+    let built = |cx: &mut VisualTestContext| {
+        ids.iter()
+            .filter(|id| cx.debug_bounds(id).is_some())
+            .count()
+    };
+    assert!(cx.debug_bounds("message-m1999").is_some(), "the newest message is built");
+    assert!(cx.debug_bounds("message-m1000").is_none());
+    assert!(cx.debug_bounds("message-m0").is_none());
+    let tail_rows = built(cx);
+    assert!((1..50).contains(&tail_rows), "{tail_rows} rows built at the tail");
+
+    app.read_with(cx, |app, _| app.conversation_scroll.scroll_to(Default::default()));
+    cx.update(|_, cx| app.update(cx, |_, cx| cx.notify()));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("message-m0").is_some(), "the oldest message is built");
+    assert!(cx.debug_bounds("message-m1000").is_none());
+    assert!(cx.debug_bounds("message-m1999").is_none());
+    let head_rows = built(cx);
+    assert!((1..50).contains(&head_rows), "{head_rows} rows built at the top");
 }
 
 #[gpui_kit::test]
