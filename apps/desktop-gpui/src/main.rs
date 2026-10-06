@@ -13,7 +13,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
     auth, commands, connection, conversation, credentials, drafts, files, palette, project_actions,
-    providers, shell, sidebar, thread, workspaces,
+    providers, shell, sidebar, thread, window_state, workspaces,
 };
 
 gpui_kit::actions!(
@@ -87,6 +87,7 @@ struct NativeApp {
     settings_open: bool,
     activity_expanded: bool,
     available_editors: Vec<String>,
+    saved_window: Option<window_state::WindowSize>,
     project_actions_open: bool,
     project_settings: Option<Value>,
     action_name: Entity<InputState>,
@@ -282,6 +283,14 @@ impl NativeApp {
                 },
             ),
         );
+        subscriptions.push(cx.observe_window_bounds(window, |app, window, _cx| {
+            if let gpui_kit::WindowBounds::Windowed(bounds) = window.window_bounds() {
+                app.saved_window = Some(window_state::WindowSize {
+                    width: bounds.size.width / px(1.),
+                    height: bounds.size.height / px(1.),
+                });
+            }
+        }));
         let mut app = Self {
             focus: cx.focus_handle(),
             palette_open: false,
@@ -324,6 +333,7 @@ impl NativeApp {
             settings_open: false,
             activity_expanded: false,
             available_editors: Vec::new(),
+            saved_window: None,
             project_actions_open: false,
             project_settings: None,
             action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
@@ -2588,6 +2598,9 @@ impl Drop for NativeApp {
         {
             eprintln!("Could not flush native drafts during shutdown");
         }
+        if let Some(size) = self.saved_window {
+            window_state::save(size);
+        }
     }
 }
 
@@ -4488,7 +4501,10 @@ fn main() {
                 ],
             },
         ]);
-        let bounds = Bounds::centered(None, size(px(1280.), px(900.)), cx);
+        let window_size = window_state::load()
+            .map(|saved| size(px(saved.width), px(saved.height)))
+            .unwrap_or_else(|| size(px(1280.), px(900.)));
+        let bounds = Bounds::centered(None, window_size, cx);
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

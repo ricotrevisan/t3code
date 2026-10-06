@@ -14,4 +14,5 @@ pub mod reconnect;
 pub mod shell;
 pub mod sidebar;
 pub mod thread;
+pub mod window_state;
 pub mod workspaces;
