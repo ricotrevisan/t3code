@@ -2816,28 +2816,6 @@ impl Render for NativeApp {
             .gap_2()
             .p_3();
         if let Some(detail) = &self.detail.thread {
-            let title = detail["title"].as_str().unwrap_or("Thread").to_owned();
-            let branch = detail["branch"].as_str().unwrap_or("").to_owned();
-            conversation = conversation.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pb_1()
-                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(title))
-                    .when(!branch.is_empty(), |view| {
-                        view.child(
-                            div()
-                                .px_2()
-                                .rounded_sm()
-                                .bg(muted)
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(branch),
-                        )
-                    }),
-            );
-
             if let Some((label, state)) = conversation::turn_summary(&detail["latestTurn"]) {
                 let color = if state.is_danger() {
                     danger
@@ -3165,6 +3143,200 @@ impl Render for NativeApp {
                     ),
             );
 
+        let header_title = self
+            .detail
+            .thread
+            .as_ref()
+            .and_then(|detail| detail["title"].as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.selected_thread.as_ref().and_then(|id| {
+                    self.shell
+                        .threads
+                        .iter()
+                        .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                        .find(|thread| &thread.id == id)
+                        .map(|thread| thread.title.clone())
+                })
+            })
+            .unwrap_or_else(|| "No thread selected".to_owned());
+        let header_branch = self
+            .detail
+            .thread
+            .as_ref()
+            .and_then(|detail| detail["branch"].as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.selected_thread.as_ref().and_then(|id| {
+                    self.shell
+                        .threads
+                        .iter()
+                        .find(|thread| &thread.id == id)
+                        .and_then(|thread| thread.branch.clone())
+                })
+            });
+        let header_project = self
+            .selected_project
+            .as_ref()
+            .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
+            .map(|project| {
+                sidebar::project_name(&project.title, &project.workspace_root).to_owned()
+            });
+
+        let thread_header = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_shrink_0()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .when_some(header_project, |view, project| {
+                        view.child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_foreground)
+                                .child(format!("{project} /")),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(header_title),
+                    )
+                    .when_some(header_branch, |view, branch| {
+                        view.child(
+                            div()
+                                .px_2()
+                                .rounded_sm()
+                                .bg(muted)
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(branch),
+                        )
+                    }),
+            )
+            .child(
+                div().flex().flex_wrap().gap_1().children(
+                    [
+                        ("rename", "Rename", "thread.meta.update"),
+                        ("archive", "Archive", "thread.archive"),
+                        ("unarchive", "Unarchive", "thread.unarchive"),
+                        ("settle", "Settle", "thread.settle"),
+                        ("unsettle", "Unsettle", "thread.unsettle"),
+                        ("snooze", "Snooze", "thread.snooze"),
+                        ("unsnooze", "Unsnooze", "thread.unsnooze"),
+                        ("pin", "Pin", "thread.pin"),
+                        ("unpin", "Unpin", "thread.unpin"),
+                        ("delete", "Delete", "thread.delete"),
+                    ]
+                    .into_iter()
+                    .map(|(id, label, kind)| {
+                        Button::new(id)
+                            .debug_selector(move || id.into())
+                            .label(label)
+                            .ghost()
+                            .small()
+                            .on_click(
+                                cx.listener(move |app, _, window, cx| {if kind=="thread.delete" && app.pending_threads.iter().any(|draft|Some(&draft.thread.id)==app.selected_thread.as_ref()){app.discard_pending(window,cx);}else{app.lifecycle(kind,cx);}}),
+                            )
+                    }),
+                ),
+            );
+
+        let composer_card = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_shrink_0()
+            .p_3()
+            .border_t_1()
+            .border_color(border)
+            .child(Textarea::new(&self.composer))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("runtime-mode")
+                            .debug_selector(|| "runtime-mode".into())
+                            .label(if full_access { "Full access" } else { "Approval required" })
+                            .ghost()
+                            .small()
+                            .tooltip("Toggle whether this thread may run tools without asking")
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.change_thread_mode(
+                                    "thread.runtime-mode.set",
+                                    "runtimeMode",
+                                    if full_access { "approval-required" } else { "full-access" },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("interaction-mode")
+                            .debug_selector(|| "interaction-mode".into())
+                            .label(if plan_mode { "Plan" } else { "Default" })
+                            .ghost()
+                            .small()
+                            .tooltip("Toggle plan-first interaction for this thread")
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.change_thread_mode(
+                                    "thread.interaction-mode.set",
+                                    "interactionMode",
+                                    if plan_mode { "default" } else { "plan" },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("send")
+                            .debug_selector(|| "send".into())
+                            .label("Send")
+                            .primary()
+                            .on_click(cx.listener(|app, _, window, cx| app.send_prompt(window, cx))),
+                    )
+                    .child(
+                        Button::new("stash")
+                            .debug_selector(|| "stash".into())
+                            .label("Stash")
+                            .ghost()
+                            .on_click(cx.listener(|app, _, window, cx| app.stash_prompt(false, window, cx))),
+                    )
+                    .child(
+                        Button::new("restore-stash")
+                            .debug_selector(|| "restore-stash".into())
+                            .label("Restore")
+                            .ghost()
+                            .on_click(cx.listener(|app, _, window, cx| app.stash_prompt(true, window, cx))),
+                    )
+                    .child(
+                        Button::new("interrupt")
+                            .label("Interrupt")
+                            .ghost()
+                            .on_click(cx.listener(|app, _, _, cx| app.lifecycle("thread.turn.interrupt", cx))),
+                    )
+                    .child(
+                        Button::new("stop")
+                            .label("Stop")
+                            .danger()
+                            .outline()
+                            .on_click(cx.listener(|app, _, _, cx| app.lifecycle("thread.session.stop", cx))),
+                    ),
+            );
+
         div()
             .relative()
             .key_context("NativeApp")
@@ -3394,23 +3566,44 @@ impl Render for NativeApp {
                                     }),
                             ),
                     )
-                    // Workspace
+                    // Workspace: the conversation is primary; controls live in the inspector.
                     .child(
                         div()
                             .id("native-workspace")
                             .min_w_0()
-                            .overflow_y_scroll()
                             .flex()
-                            .flex_col()
                             .flex_1()
                             .h_full()
-                            .p_3()
-                            .gap_2()
-                            .children(
-                                self.storage_error
-                                    .clone()
-                                    .map(|error| div().text_color(danger).child(error)),
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .child(thread_header)
+                                    .child(conversation)
+                                    .child(composer_card),
                             )
+                            .child(
+                                div()
+                                    .id("inspector")
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .w(px(340.))
+                                    .flex_shrink_0()
+                                    .h_full()
+                                    .overflow_y_scroll()
+                                    .p_3()
+                                    .bg(group_box)
+                                    .border_l_1()
+                                    .border_color(border)
+                                    .children(
+                                        self.storage_error
+                                            .clone()
+                                            .map(|error| div().text_color(danger).child(error)),
+                                    )
                             .child(
                                 div()
                                     .flex()
@@ -3468,17 +3661,8 @@ impl Render for NativeApp {
                                                 cx.listener(|app, _, window, cx| {
                                                     app.execute_command(palette::Command::NewThread, window, cx)
                                                 }),
-                                            ))
-                                            .child(
-                                                Button::new("rename")
-                                                    .debug_selector(|| "rename".into())
-                                                    .label("Rename thread")
-                                                    .ghost()
-                                                    .on_click(cx.listener(|app, _, _, cx| {
-                                                        app.lifecycle("thread.meta.update", cx)
-                                                    })),
+                                            )),
                                             ),
-                                    ),
                             )
                             .child(
                                 div()
@@ -3495,32 +3679,7 @@ impl Render for NativeApp {
                                             .text_xs()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(muted_foreground)
-                                            .child("THREAD"),
-                                    )
-                                    .child(
-                                        div().flex().flex_wrap().gap_2().children(
-                                            [
-                                                ("archive", "Archive", "thread.archive"),
-                                                ("unarchive", "Unarchive", "thread.unarchive"),
-                                                ("settle", "Settle", "thread.settle"),
-                                                ("unsettle", "Unsettle", "thread.unsettle"),
-                                                ("snooze", "Snooze 1h", "thread.snooze"),
-                                                ("unsnooze", "Unsnooze", "thread.unsnooze"),
-                                                ("pin", "Pin", "thread.pin"),
-                                                ("unpin", "Unpin", "thread.unpin"),
-                                                ("delete", "Delete thread", "thread.delete"),
-                                            ]
-                                            .into_iter()
-                                            .map(|(id, label, kind)| {
-                                                Button::new(id)
-                                                    .debug_selector(move || id.into())
-                                                    .label(label)
-                                                    .ghost()
-                                                    .on_click(
-                                                        cx.listener(move |app, _, window, cx| {if kind=="thread.delete" && app.pending_threads.iter().any(|draft|Some(&draft.thread.id)==app.selected_thread.as_ref()){app.discard_pending(window,cx);}else{app.lifecycle(kind,cx);}}),
-                                                    )
-                                            }),
-                                        ),
+                                            .child("SNOOZE"),
                                     )
                                     .child(
                                         div()
@@ -3681,7 +3840,6 @@ impl Render for NativeApp {
                                         .child(Textarea::new(&self.file_contents)),
                                 )
                             })
-                            .child(conversation)
                             .child(
                                 div()
                                     .flex()
@@ -3723,109 +3881,10 @@ impl Render for NativeApp {
                             )
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .p_2()
-                                    .rounded_md()
-                                    .bg(group_box)
-                                    .border_1()
-                                    .border_color(border)
-                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(muted_foreground).child("PROMPT"))
-                                    .child(Textarea::new(&self.composer))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                Button::new("runtime-mode")
-                                                    .debug_selector(|| "runtime-mode".into())
-                                                    .label(if full_access {
-                                                        "Full access"
-                                                    } else {
-                                                        "Approval required"
-                                                    })
-                                                    .ghost()
-                                                    .small()
-                                                    .tooltip(
-                                                        "Toggle whether this thread may run tools without asking",
-                                                    )
-                                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                                        app.change_thread_mode(
-                                                            "thread.runtime-mode.set",
-                                                            "runtimeMode",
-                                                            if full_access {
-                                                                "approval-required"
-                                                            } else {
-                                                                "full-access"
-                                                            },
-                                                            cx,
-                                                        )
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("interaction-mode")
-                                                    .debug_selector(|| "interaction-mode".into())
-                                                    .label(if plan_mode { "Plan" } else { "Default" })
-                                                    .ghost()
-                                                    .small()
-                                                    .tooltip("Toggle plan-first interaction for this thread")
-                                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                                        app.change_thread_mode(
-                                                            "thread.interaction-mode.set",
-                                                            "interactionMode",
-                                                            if plan_mode { "default" } else { "plan" },
-                                                            cx,
-                                                        )
-                                                    })),
-                                            )
-                                            .child(div().flex_1())
-                                            .child(
-                                                Button::new("send")
-                                                    .debug_selector(|| "send".into())
-                                                    .label("Send")
-                                                    .primary()
-                                                    .on_click(cx.listener(|app, _, window, cx| {
-                                                        app.send_prompt(window, cx)
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("stash")
-                                                    .debug_selector(|| "stash".into())
-                                                    .label("Stash prompt")
-                                                    .ghost()
-                                                    .on_click(cx.listener(|app, _, window, cx| {
-                                                        app.stash_prompt(false, window, cx)
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("restore-stash")
-                                                    .debug_selector(|| "restore-stash".into())
-                                                    .label("Restore stashed")
-                                                    .ghost()
-                                                    .on_click(cx.listener(|app, _, window, cx| {
-                                                        app.stash_prompt(true, window, cx)
-                                                    })),
-                                            )
-                                            .child(Button::new("interrupt").label("Interrupt").ghost().on_click(
-                                                cx.listener(|app, _, _, cx| {
-                                                    app.lifecycle("thread.turn.interrupt", cx)
-                                                }),
-                                            ))
-                                            .child(Button::new("stop").label("Stop session").danger().outline().on_click(
-                                                cx.listener(|app, _, _, cx| {
-                                                    app.lifecycle("thread.session.stop", cx)
-                                                }),
-                                            )),
-                                    ),
-                            )
-                            .child(
-                                div()
                                     .text_xs()
                                     .text_color(muted_foreground)
                                     .child("Experimental native slice — feature parity is still being evaluated"),
+                            ),
                             ),
                     ),
             )
