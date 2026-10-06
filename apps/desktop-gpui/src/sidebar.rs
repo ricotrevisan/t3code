@@ -51,6 +51,11 @@ pub fn expiry(threads: &[Thread], now: DateTime<Utc>) -> Option<std::time::Durat
 /// A short status marker a thread row shows beside its title.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Badge {
+    Working,
+    Approval,
+    Input,
+    Plan,
+    PullRequest,
     Pinned,
     Snoozed,
     Settled,
@@ -59,6 +64,11 @@ pub enum Badge {
 impl Badge {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Working => "Working",
+            Self::Approval => "Approval",
+            Self::Input => "Input",
+            Self::Plan => "Plan",
+            Self::PullRequest => "PR",
             Self::Pinned => "Pinned",
             Self::Snoozed => "Snoozed",
             Self::Settled => "Settled",
@@ -69,6 +79,25 @@ impl Badge {
 /// Every status marker the row for `thread` should show, in display order.
 pub fn badges(thread: &Thread, now: DateTime<Utc>) -> Vec<Badge> {
     let mut badges = Vec::new();
+    if thread
+        .session
+        .as_ref()
+        .is_some_and(|session| matches!(session.status.as_str(), "running" | "starting"))
+    {
+        badges.push(Badge::Working);
+    }
+    if thread.has_pending_approvals {
+        badges.push(Badge::Approval);
+    }
+    if thread.has_pending_user_input {
+        badges.push(Badge::Input);
+    }
+    if thread.has_actionable_proposed_plan {
+        badges.push(Badge::Plan);
+    }
+    if thread.linked_pull_request.is_some() {
+        badges.push(Badge::PullRequest);
+    }
     if thread.pinned_at.is_some() {
         badges.push(Badge::Pinned);
     }
@@ -161,6 +190,33 @@ mod tests {
         // An expired snooze drops its marker without a server mutation.
         thread.snoozed_until = Some((now - chrono::Duration::hours(1)).to_rfc3339());
         assert_eq!(badges(&thread, now), vec![Badge::Pinned, Badge::Settled]);
+    }
+
+    #[test]
+    fn rows_expose_live_shell_status() {
+        let now = Utc::now();
+        let mut thread = thread();
+        thread.session = Some(crate::shell::Session {
+            status: "running".into(),
+            last_error: None,
+        });
+        thread.has_pending_approvals = true;
+        thread.has_actionable_proposed_plan = true;
+        thread.linked_pull_request = Some(serde_json::json!({"number": 7}));
+        assert_eq!(
+            badges(&thread, now),
+            vec![
+                Badge::Working,
+                Badge::Approval,
+                Badge::Plan,
+                Badge::PullRequest
+            ]
+        );
+        thread.session.as_mut().unwrap().status = "idle".into();
+        assert_eq!(
+            badges(&thread, now),
+            vec![Badge::Approval, Badge::Plan, Badge::PullRequest]
+        );
     }
 
     #[test]

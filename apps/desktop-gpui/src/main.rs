@@ -2810,6 +2810,11 @@ impl Render for NativeApp {
                                     div().flex().items_center().gap_1().children(
                                         badges.into_iter().map(|badge| {
                                             let color = match badge {
+                                                sidebar::Badge::Working => blue,
+                                                sidebar::Badge::Approval => warning,
+                                                sidebar::Badge::Input => warning,
+                                                sidebar::Badge::Plan => blue,
+                                                sidebar::Badge::PullRequest => green,
                                                 sidebar::Badge::Pinned => blue,
                                                 sidebar::Badge::Snoozed => warning,
                                                 sidebar::Badge::Settled => green,

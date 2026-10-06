@@ -15,6 +15,14 @@ pub struct Project {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Session {
+    pub status: String,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub id: String,
     pub project_id: String,
@@ -37,6 +45,17 @@ pub struct Thread {
     pub branch: Option<String>,
     #[serde(default)]
     pub worktree_path: Option<String>,
+    // Shell-level live state, unset on older servers.
+    #[serde(default)]
+    pub session: Option<Session>,
+    #[serde(default)]
+    pub has_pending_approvals: bool,
+    #[serde(default)]
+    pub has_pending_user_input: bool,
+    #[serde(default)]
+    pub has_actionable_proposed_plan: bool,
+    #[serde(default)]
+    pub linked_pull_request: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -49,6 +68,9 @@ pub struct Snapshot {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+// Wire events carry the full thread/project projection; the variant-size lint
+// does not apply to a decoded network message.
+#[allow(clippy::large_enum_variant)]
 pub enum ShellItem {
     Snapshot {
         snapshot: Snapshot,
