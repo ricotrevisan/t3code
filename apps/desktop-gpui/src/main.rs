@@ -2578,6 +2578,15 @@ impl NativeApp {
         self.dispatch(payload, cx);
     }
 
+    /// Answer the provider's pending approval request.
+    fn respond_approval(&mut self, request_id: &str, decision: &str, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_thread.clone() else {
+            return;
+        };
+        let payload = commands::approval_response(&id, request_id, decision);
+        self.dispatch(payload, cx);
+    }
+
     /// Open the selected thread's worktree (or the project root) in the first
     /// available editor, preferring Zed to match the app's design language.
     fn open_in_editor(&mut self, cx: &mut Context<Self>) {
@@ -3103,6 +3112,62 @@ impl Render for NativeApp {
                             }),
                     );
                 }
+            }
+
+            if let Some(approval) = detail["activities"]
+                .as_array()
+                .and_then(|activities| conversation::pending_approval(activities))
+            {
+                let request_id = approval.request_id.clone();
+                let options = if approval.options.is_empty() {
+                    vec![
+                        ("accept".to_owned(), "Allow once".to_owned()),
+                        ("decline".to_owned(), "Deny".to_owned()),
+                    ]
+                } else {
+                    approval.options.clone()
+                };
+                let mut card = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .bg(group_box)
+                    .border_1()
+                    .border_color(warning)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(warning)
+                            .child("APPROVAL REQUIRED"),
+                    )
+                    .child(div().text_sm().child(approval.summary.clone()));
+                if let Some(detail) = approval.detail.clone() {
+                    card = card.child(div().text_xs().text_color(muted_foreground).child(detail));
+                }
+                card = card.child(
+                    div().flex().flex_wrap().gap_2().children(options.into_iter().map(
+                        |(decision, label)| {
+                            let request_id = request_id.clone();
+                            let decision_id = decision.clone();
+                            let danger = decision == "decline" || decision == "cancel";
+                            Button::new(gpui_kit::SharedString::from(format!(
+                                "approval-{decision_id}"
+                            )))
+                            .debug_selector(move || format!("approval-{decision_id}"))
+                            .label(label)
+                            .ghost()
+                            .small()
+                            .when(danger, |button| button.danger())
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.respond_approval(&request_id, &decision, cx)
+                            }))
+                        },
+                    )),
+                );
+                conversation = conversation.child(card);
             }
 
             if let Some(plans) = detail["proposedPlans"].as_array() {

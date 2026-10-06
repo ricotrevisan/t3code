@@ -254,6 +254,51 @@ fn sidebar_projects_collapse_and_expand(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn pending_approval_renders_and_responds(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(json!({
+                "id": "t",
+                "title": "Thread",
+                "messages": [],
+                "activities": [{
+                    "id": "a1",
+                    "kind": "approval.requested",
+                    "tone": "approval",
+                    "summary": "Command approval requested",
+                    "payload": {
+                        "requestId": "req-1",
+                        "detail": "run rm -rf build",
+                        "options": [
+                            {"decision": "accept", "label": "Allow once"},
+                            {"decision": "decline", "label": "Deny"}
+                        ]
+                    },
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "turnId": null
+                }],
+                "proposedPlans": [],
+                "checkpoints": [],
+                "session": null,
+            }));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("approval-accept")
+        .expect("approval option is visible");
+    cx.simulate_click(bounds.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected an approval response");
+    };
+    assert_eq!(payload["type"], "thread.approval.respond");
+    assert_eq!(payload["requestId"], "req-1");
+    assert_eq!(payload["decision"], "accept");
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");

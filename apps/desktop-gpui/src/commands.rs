@@ -108,6 +108,15 @@ pub fn revert_command(thread_id: &str, turn_count: u64) -> Value {
     command
 }
 
+/// Answer a pending provider approval.
+pub fn approval_response(thread_id: &str, request_id: &str, decision: &str) -> Value {
+    let mut command = command("thread.approval.respond", thread_id);
+    command["requestId"] = json!(request_id);
+    command["decision"] = json!(decision);
+    command["createdAt"] = json!(now());
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +179,16 @@ mod tests {
         assert_eq!(revert["threadId"], "t");
         assert_eq!(revert["turnCount"], 3);
         assert!(revert["createdAt"].is_string());
+    }
+
+    #[test]
+    fn approval_response_carries_the_request_and_decision() {
+        let response = approval_response("t", "req-1", "acceptAlways");
+        assert_eq!(response["type"], "thread.approval.respond");
+        assert_eq!(response["threadId"], "t");
+        assert_eq!(response["requestId"], "req-1");
+        assert_eq!(response["decision"], "acceptAlways");
+        assert!(response["createdAt"].is_string());
     }
 
     #[test]

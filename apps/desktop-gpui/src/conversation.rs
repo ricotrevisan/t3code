@@ -102,6 +102,66 @@ pub fn diff_totals(files: &[Value]) -> (u64, u64) {
     })
 }
 
+/// An approval the agent is still waiting on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub request_id: String,
+    pub summary: String,
+    pub detail: Option<String>,
+    /// Provider-supplied `(decision, label)` choices.
+    pub options: Vec<(String, String)>,
+}
+
+/// The latest `approval.requested` activity that no `approval.resolved` has
+/// closed, in activity order.
+pub fn pending_approval(activities: &[Value]) -> Option<PendingApproval> {
+    let mut pending: Option<Value> = None;
+    let mut pending_id: Option<String> = None;
+    for activity in activities {
+        let kind = activity["kind"].as_str().unwrap_or("");
+        let request_id = activity["payload"]["requestId"].as_str().map(str::to_owned);
+        match kind {
+            "approval.requested" => {
+                if request_id.is_some() {
+                    pending_id = request_id;
+                    pending = Some(activity.clone());
+                }
+            }
+            "approval.resolved"
+                if request_id.is_some() && request_id == pending_id =>
+            {
+                pending = None;
+                pending_id = None;
+            }
+            _ => {}
+        }
+    }
+    let activity = pending?;
+    let options = activity["payload"]["options"]
+        .as_array()
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    Some((
+                        option["decision"].as_str()?.to_owned(),
+                        option["label"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(PendingApproval {
+        request_id: pending_id?,
+        summary: activity["summary"]
+            .as_str()
+            .unwrap_or("Approval requested")
+            .to_owned(),
+        detail: activity["payload"]["detail"].as_str().map(str::to_owned),
+        options,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +212,23 @@ mod tests {
         ];
         assert_eq!(diff_totals(&files), (13, 7));
         assert_eq!(diff_totals(&[]), (0, 0));
+    }
+
+    #[test]
+    fn pending_approval_tracks_the_latest_unresolved_request() {
+        let activities = vec![
+            json!({"kind": "approval.requested", "summary": "Command approval requested", "payload": {"requestId": "a", "options": [{"decision": "accept", "label": "Allow once"}, {"decision": "decline", "label": "Deny"}]}}),
+            json!({"kind": "approval.resolved", "payload": {"requestId": "a"}}),
+            json!({"kind": "approval.requested", "summary": "File-change approval requested", "payload": {"requestId": "b", "detail": "write src/lib.rs"}}),
+        ];
+        let pending = pending_approval(&activities).expect("one approval is open");
+        assert_eq!(pending.request_id, "b");
+        assert_eq!(pending.summary, "File-change approval requested");
+        assert_eq!(pending.detail.as_deref(), Some("write src/lib.rs"));
+        assert!(pending.options.is_empty());
+
+        let mut resolved = activities.clone();
+        resolved.push(json!({"kind": "approval.resolved", "payload": {"requestId": "b"}}));
+        assert!(pending_approval(&resolved).is_none());
     }
 }
