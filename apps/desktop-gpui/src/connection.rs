@@ -45,6 +45,12 @@ pub enum Command {
         payload: Value,
         reply: async_channel::Sender<Result<Vec<Value>, String>>,
     },
+    Upload {
+        url: String,
+        content_type: String,
+        bytes: Vec<u8>,
+        reply: async_channel::Sender<Result<(), String>>,
+    },
 }
 
 pub struct Session {
@@ -97,6 +103,29 @@ pub async fn call_stream(
         .recv()
         .await
         .map_err(|_| "Connection lost before receipt; RPC outcome is unknown".to_owned())?
+}
+
+/// PUT bytes to a signed upload URL on the connection's runtime.
+pub async fn upload(
+    commands: &async_channel::Sender<Command>,
+    url: String,
+    content_type: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    let (reply, receiver) = async_channel::bounded(1);
+    commands
+        .send(Command::Upload {
+            url,
+            content_type,
+            bytes,
+            reply,
+        })
+        .await
+        .map_err(|_| "Not connected")?;
+    receiver
+        .recv()
+        .await
+        .map_err(|_| "Connection lost before upload finished".to_owned())?
 }
 
 pub struct ConnectionOptions {
@@ -294,6 +323,13 @@ async fn reject_disconnected(
             let _ = reply
                 .send(Err(
                     "Disconnected; request was not sent. Retry after synchronization.".into(),
+                ))
+                .await;
+        }
+        Command::Upload { reply, .. } => {
+            let _ = reply
+                .send(Err(
+                    "Disconnected; upload was not started. Retry after synchronization.".into(),
                 ))
                 .await;
         }
@@ -578,6 +614,21 @@ where
                         send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
                         pending.insert(id, Pending::CallStream(reply, Vec::new()));
                         next_id += 1;
+                    }
+                    Command::Upload { url, content_type, bytes, reply } => {
+                        // Uploads do not use the socket; run on the runtime and reply when done.
+                        tokio::spawn(async move {
+                            let result = reqwest::Client::new()
+                                .put(&url)
+                                .header("content-type", content_type)
+                                .body(bytes)
+                                .send()
+                                .await
+                                .and_then(|response| response.error_for_status())
+                                .map(|_| ())
+                                .map_err(|error| format!("Upload failed: {error}"));
+                            let _ = reply.send(result).await;
+                        });
                     }
                 }
             }

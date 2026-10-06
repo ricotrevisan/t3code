@@ -75,6 +75,7 @@ pub fn select_model(previous: &Value, instance: &str, model: &str) -> Result<Val
 pub fn start_turn(
     thread_id: &str,
     text: &str,
+    attachments: &[Value],
     selection: Value,
     runtime: &str,
     interaction: &str,
@@ -83,7 +84,8 @@ pub fn start_turn(
         return Err("A prompt is required");
     }
     let mut result = command("thread.turn.start", thread_id);
-    result["message"] = json!({"messageId":id(),"role":"user","text":text,"attachments":[]});
+    result["message"] =
+        json!({"messageId":id(),"role":"user","text":text,"attachments":attachments});
     result["modelSelection"] = selection;
     result["runtimeMode"] = json!(runtime);
     result["interactionMode"] = json!(interaction);
@@ -125,7 +127,7 @@ mod tests {
         assert!(create_project("", "/tmp").is_err());
         assert!(create_project("Title", "").is_err());
         assert!(create_thread("p", "Title", Value::Null).is_err());
-        assert!(start_turn("t", " \n", Value::Null, "full-access", "default").is_err());
+        assert!(start_turn("t", " \n", &[], Value::Null, "full-access", "default").is_err());
     }
     #[test]
     fn project_updates_are_metadata_only_and_removal_never_forces_running_sessions() {
@@ -142,7 +144,7 @@ mod tests {
     fn unchanged_model_retains_provider_options_but_switching_does_not_leak_them() {
         let previous = json!({"instanceId":"codex","model":"gpt-5.4","options":[{"id":"reasoningEffort","value":"high"}]});
         let unchanged = select_model(&previous, "codex", "gpt-5.4").unwrap();
-        let command = start_turn("t", "Prompt", unchanged, "full-access", "default").unwrap();
+        let command = start_turn("t", "Prompt", &[], unchanged, "full-access", "default").unwrap();
         assert_eq!(command["modelSelection"], previous);
         assert_eq!(
             select_model(&previous, "claudeAgent", "sonnet").unwrap(),
@@ -197,12 +199,13 @@ mod tests {
         let a = start_turn(
             "t",
             "  hello\n世界  ",
+            &[],
             selection.clone(),
             "approval-required",
             "plan",
         )
         .unwrap();
-        let b = start_turn("t", "hello", selection, "approval-required", "plan").unwrap();
+        let b = start_turn("t", "hello", &[], selection, "approval-required", "plan").unwrap();
         assert_ne!(a["commandId"], b["commandId"]);
         assert_eq!(a["message"]["text"], "  hello\n世界  ");
         assert_eq!(a["runtimeMode"], "approval-required");

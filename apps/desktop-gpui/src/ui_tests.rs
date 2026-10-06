@@ -321,6 +321,35 @@ fn push_and_create_pr_streams_the_stacked_action(cx: &mut TestAppContext) {
     assert_eq!(payload["cwd"], "/tmp/fixture");
 }
 
+#[test]
+fn attachment_mime_maps_common_extensions() {
+    assert_eq!(attachment_mime("a.PNG"), "image/png");
+    assert_eq!(attachment_mime("b.jpeg"), "image/jpeg");
+    assert_eq!(attachment_mime("notes.md"), "text/markdown");
+    assert_eq!(attachment_mime("archive.bin"), "application/octet-stream");
+}
+
+#[gpui_kit::test]
+fn attachments_render_and_detach(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.attachments.push(
+                json!({"id": "a1", "name": "notes.md", "mimeType": "text/markdown", "sizeBytes": 12}),
+            );
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("detach-0").expect("attachment chip is visible");
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(app.read_with(cx, |app, _| app.attachments.is_empty()));
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected an attachment delete");
+    };
+    assert_eq!(payload["attachmentId"], "a1");
+}
+
 #[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);

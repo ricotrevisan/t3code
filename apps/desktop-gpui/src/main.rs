@@ -36,6 +36,27 @@ gpui_kit::actions!(
     ]
 );
 
+/// Content type inferred from a filename, defaulting to a generic binary.
+fn attachment_mime(name: &str) -> &'static str {
+    match std::path::Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("pdf") => "application/pdf",
+        Some("json") => "application/json",
+        Some("md") => "text/markdown",
+        Some("txt") => "text/plain",
+        Some("csv") => "text/csv",
+        _ => "application/octet-stream",
+    }
+}
+
 const THREAD_ACTIONS: &[(&str, &str, &str)] = &[
     ("rename", "Rename", "thread.meta.update"),
     ("archive", "Archive", "thread.archive"),
@@ -109,6 +130,7 @@ struct NativeApp {
     inspector_open: bool,
     thread_menu_open: bool,
     collapsed_projects: Vec<String>,
+    attachments: Vec<Value>,
     right_tab: RightTab,
     available_editors: Vec<String>,
     saved_window: Option<window_state::WindowSize>,
@@ -362,6 +384,7 @@ impl NativeApp {
             inspector_open: true,
             thread_menu_open: false,
             collapsed_projects: Vec::new(),
+            attachments: Vec::new(),
             right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
             saved_window: None,
@@ -1961,6 +1984,7 @@ impl NativeApp {
                         {
                             app.composer
                                 .update(cx, |input, cx| input.set_value("", window, cx));
+                            app.attachments.clear();
                         }
                     })
                 });
@@ -2458,6 +2482,7 @@ impl NativeApp {
         match commands::start_turn(
             &id,
             &text,
+            &self.attachments,
             selection,
             thread.runtime_mode.as_deref().unwrap_or("full-access"),
             thread.interaction_mode.as_deref().unwrap_or("default"),
@@ -2585,6 +2610,93 @@ impl NativeApp {
         };
         let payload = commands::approval_response(&id, request_id, decision);
         self.dispatch(payload, cx);
+    }
+
+    /// Open the platform file picker, upload each selected file, and stage it as
+    /// an attachment for the next turn.
+    fn attach_files(&mut self, cx: &mut Context<Self>) {
+        let Some(sender) = self.commands.clone() else {
+            self.status = "Not connected".into();
+            cx.notify();
+            return;
+        };
+        let origin = self.environment_scope.clone();
+        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach files".into()),
+        });
+        self.pending_actions += 1;
+        self.status = "Uploading attachments…".into();
+        cx.notify();
+        cx.spawn(async move |entity, cx| {
+            let paths = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                _ => Vec::new(),
+            };
+            for path in paths {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("attachment")
+                    .to_owned();
+                let bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let _ = entity.update(cx, |app, cx| {
+                            app.status = format!("Could not read {name}: {error}");
+                            cx.notify();
+                        });
+                        continue;
+                    }
+                };
+                let mime = attachment_mime(&name).to_owned();
+                let size = bytes.len() as u64;
+                let input = json!({
+                    "type": if mime.starts_with("image/") { "image" } else { "file" },
+                    "name": name,
+                    "mimeType": mime,
+                    "sizeBytes": size,
+                });
+                let attachment = match connection::call(&sender, "attachments.createUploadUrl", input).await {
+                    Ok(value) => {
+                        let id = value["attachmentId"].as_str().unwrap_or_default().to_owned();
+                        let relative = value["relativeUrl"].as_str().unwrap_or_default().to_owned();
+                        match connection::upload(&sender, format!("{origin}{relative}"), mime.clone(), bytes).await {
+                            Ok(()) => Some(json!({"id": id, "name": name, "mimeType": mime, "sizeBytes": size})),
+                            Err(error) => {
+                                let _ = entity.update(cx, |app, cx| {
+                                    app.status = error;
+                                    cx.notify();
+                                });
+                                None
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = entity.update(cx, |app, cx| {
+                            app.status = error;
+                            cx.notify();
+                        });
+                        None
+                    }
+                };
+                if let Some(attachment) = attachment {
+                    let label = attachment["name"].as_str().unwrap_or("attachment").to_owned();
+                    let _ = entity.update(cx, |app, cx| {
+                        app.attachments.push(attachment);
+                        app.status = format!("Attached {label}");
+                        cx.notify();
+                    });
+                }
+            }
+            let _ = entity.update(cx, |app, cx| {
+                app.pending_actions = app.pending_actions.saturating_sub(1);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Commit, push, and open a pull request for the selected thread. Streams the
@@ -3843,6 +3955,50 @@ impl Render for NativeApp {
             .border_t_1()
             .border_color(border)
             .child(Textarea::new(&self.composer))
+            .when(!self.attachments.is_empty(), |view| {
+                view.child(
+                    div().flex().flex_wrap().gap_1().children(
+                        self.attachments.iter().enumerate().map(|(index, attachment)| {
+                            let id = attachment["id"].as_str().unwrap_or_default().to_owned();
+                            let name = attachment["name"]
+                                .as_str()
+                                .unwrap_or("attachment")
+                                .to_owned();
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_2()
+                                .rounded_sm()
+                                .bg(muted)
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(name)
+                                .child(
+                                    Button::new(gpui_kit::SharedString::from(format!(
+                                        "detach-{index}"
+                                    )))
+                                    .debug_selector(move || format!("detach-{index}"))
+                                    .label("×")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.attachments.retain(|attachment| {
+                                            attachment["id"].as_str() != Some(&id)
+                                        });
+                                        app.perform(
+                                            "attachments.delete",
+                                            json!({"attachmentId": id}),
+                                            None,
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    })),
+                                )
+                        }),
+                    ),
+                )
+            })
             .when_some(slash_entries, |view, entries| {
                 view.child(
                     div()
@@ -3887,6 +4043,15 @@ impl Render for NativeApp {
                     .flex_wrap()
                     .items_center()
                     .gap_2()
+                    .child(
+                        Button::new("attach")
+                            .debug_selector(|| "attach".into())
+                            .label("Attach")
+                            .ghost()
+                            .small()
+                            .tooltip("Attach files to the prompt")
+                            .on_click(cx.listener(|app, _, _, cx| app.attach_files(cx))),
+                    )
                     .child(
                         Button::new("runtime-mode")
                             .debug_selector(|| "runtime-mode".into())
