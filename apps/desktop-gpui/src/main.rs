@@ -130,6 +130,7 @@ struct NativeApp {
     inspector_open: bool,
     thread_menu_open: bool,
     collapsed_projects: Vec<String>,
+    collapsed_groups: Vec<String>,
     attachments: Vec<Value>,
     right_tab: RightTab,
     available_editors: Vec<String>,
@@ -384,6 +385,7 @@ impl NativeApp {
             inspector_open: true,
             thread_menu_open: false,
             collapsed_projects: Vec::new(),
+            collapsed_groups: Vec::new(),
             attachments: Vec::new(),
             right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
@@ -3069,10 +3071,65 @@ impl Render for NativeApp {
             } else {
                 &self.shell.threads
             };
-            for thread in threads
+            let visible: Vec<_> = threads
                 .iter()
                 .filter(|t| t.project_id == project.id && sidebar::belongs(t, self.sidebar_view, now))
-            {
+                .collect();
+            let group_defs = [
+                (
+                    "pinned",
+                    "Pinned",
+                    visible
+                        .iter()
+                        .copied()
+                        .filter(|t| t.pinned_at.is_some())
+                        .collect::<Vec<_>>(),
+                ),
+                (
+                    "active",
+                    "Active",
+                    visible
+                        .iter()
+                        .copied()
+                        .filter(|t| t.pinned_at.is_none())
+                        .collect::<Vec<_>>(),
+                ),
+            ];
+            for (group_key, group_label, group_threads) in group_defs {
+                if group_threads.is_empty() {
+                    continue;
+                }
+                let group_collapsed = self
+                    .collapsed_groups
+                    .iter()
+                    .any(|entry| entry == group_key);
+                group = group.child(div().pl_4().child(
+                    Button::new(gpui_kit::SharedString::from(format!(
+                        "group-toggle-{group_key}"
+                    )))
+                    .debug_selector(move || format!("group-toggle-{group_key}"))
+                    .label(format!(
+                        "{} {} ({})",
+                        if group_collapsed { "▸" } else { "▾" },
+                        group_label,
+                        group_threads.len()
+                    ))
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        let key = group_key.to_owned();
+                        if let Some(index) = app.collapsed_groups.iter().position(|entry| entry == &key) {
+                            app.collapsed_groups.remove(index);
+                        } else {
+                            app.collapsed_groups.push(key);
+                        }
+                        cx.notify();
+                    })),
+                ));
+                if group_collapsed {
+                    continue;
+                }
+                for thread in group_threads {
                 let id = thread.id.clone();
                 let badges = sidebar::badges(thread, now);
                 let meta = sidebar::thread_meta(thread);
@@ -3136,6 +3193,7 @@ impl Render for NativeApp {
                             app.select_thread(&id, window, cx)
                         })),
                 ));
+            }
             }
             }
             projects.push(group);
