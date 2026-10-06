@@ -133,6 +133,8 @@ struct NativeApp {
     collapsed_projects: Vec<String>,
     collapsed_groups: Vec<String>,
     attachments: Vec<Value>,
+    auth_state: Option<Value>,
+    auth_callback: Entity<InputState>,
     right_tab: RightTab,
     available_editors: Vec<String>,
     saved_window: Option<window_state::WindowSize>,
@@ -388,6 +390,10 @@ impl NativeApp {
             collapsed_projects: Vec::new(),
             collapsed_groups: Vec::new(),
             attachments: Vec::new(),
+            auth_state: None,
+            auth_callback: cx.new(|cx| {
+                single_line_input(window, cx).placeholder("Paste the authorization callback URL")
+            }),
             right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
             saved_window: None,
@@ -2043,6 +2049,18 @@ impl NativeApp {
                                 })
                                 .unwrap_or_default();
                         }
+                        if tag == "provider.auth.start" {
+                            app.auth_state = Some(value.clone());
+                            if let Some(url) = value["authorizationUrl"].as_str() {
+                                cx.open_url(url);
+                            }
+                        }
+                        if tag == "provider.auth.start" {
+                            app.auth_state = Some(value.clone());
+                            if let Some(url) = value["authorizationUrl"].as_str() {
+                                cx.open_url(url);
+                            }
+                        }
                         if tag == "orchestration.getArchivedShellSnapshot" {
                             match serde_json::from_value::<shell::Snapshot>(value.clone()) {
                                 Ok(snapshot) => {
@@ -2613,6 +2631,38 @@ impl NativeApp {
         };
         let payload = commands::approval_response(&id, request_id, decision);
         self.dispatch(payload, cx);
+    }
+
+    /// Begin a provider sign-in flow and surface its authorization URL.
+    fn start_provider_auth(&mut self, instance_id: &str, cx: &mut Context<Self>) {
+        self.auth_state = None;
+        self.perform(
+            "provider.auth.start",
+            json!({"instanceId": instance_id, "callbackMode": "client"}),
+            None,
+            cx,
+        );
+    }
+
+    /// Finish a provider sign-in flow with a pasted callback URL.
+    fn complete_provider_auth(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.auth_state.clone() else {
+            return;
+        };
+        let instance = state["instanceId"].as_str().unwrap_or_default().to_owned();
+        let flow = state["flowId"].as_str().unwrap_or_default().to_owned();
+        let callback = self.auth_callback.read(cx).value().trim().to_owned();
+        if callback.is_empty() {
+            self.status = "Paste the callback URL first".into();
+            cx.notify();
+            return;
+        }
+        self.perform(
+            "provider.auth.complete",
+            json!({"instanceId": instance, "flowId": flow, "callbackUrl": callback}),
+            None,
+            cx,
+        );
     }
 
     /// Open the platform file picker, upload each selected file, and stage it as
@@ -4429,20 +4479,42 @@ impl Render for NativeApp {
                             )
                         })
                         .children(self.provider_catalog.iter().map(|provider| {
+                            let instance_id = provider.instance_id.clone();
                             div()
                                 .flex()
-                                .justify_between()
-                                .gap_2()
-                                .text_sm()
-                                .child(provider.label().to_owned())
+                                .flex_col()
+                                .gap_1()
                                 .child(
                                     div()
-                                        .text_color(if provider.selectable() {
-                                            green
-                                        } else {
-                                            muted_foreground
-                                        })
-                                        .child(provider.explanation().to_owned()),
+                                        .flex()
+                                        .justify_between()
+                                        .gap_2()
+                                        .text_sm()
+                                        .child(provider.label().to_owned())
+                                        .child(
+                                            div()
+                                                .text_color(if provider.selectable() {
+                                                    green
+                                                } else {
+                                                    muted_foreground
+                                                })
+                                                .child(provider.explanation().to_owned()),
+                                        ),
+                                )
+                                .child(
+                                    Button::new(gpui_kit::SharedString::from(format!(
+                                        "provider-signin-{instance_id}"
+                                    )))
+                                    .debug_selector({
+                                        let id = instance_id.clone();
+                                        move || format!("provider-signin-{id}")
+                                    })
+                                    .label("Sign in")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.start_provider_auth(&instance_id, cx)
+                                    })),
                                 )
                         }))
                         .child(
@@ -4452,7 +4524,49 @@ impl Render for NativeApp {
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.perform("server.getConfig", json!({}), None, cx)
                                 })),
-                        ),
+                        )
+                        .when_some(self.auth_state.clone(), |view, state| {
+                            view.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(group_box)
+                                    .border_1()
+                                    .border_color(border)
+                                    .child(section("SIGN IN"))
+                                    .child(div().text_sm().child(format!(
+                                        "{} · {}",
+                                        state["phase"].as_str().unwrap_or("idle"),
+                                        state["message"].as_str().unwrap_or("")
+                                    )))
+                                    .when_some(
+                                        state["authorizationUrl"].as_str().map(str::to_owned),
+                                        |view, url| {
+                                            view.child(
+                                                Button::new("provider-auth-open")
+                                                    .label("Open authorization page")
+                                                    .secondary()
+                                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                                        cx.open_url(&url)
+                                                    })),
+                                            )
+                                        },
+                                    )
+                                    .child(Input::new(&self.auth_callback))
+                                    .child(
+                                        Button::new("provider-auth-complete")
+                                            .debug_selector(|| "provider-auth-complete".into())
+                                            .label("Complete sign-in")
+                                            .primary()
+                                            .on_click(cx.listener(|app, _, _, cx| {
+                                                app.complete_provider_auth(cx)
+                                            })),
+                                    ),
+                            )
+                        }),
                 )
                 .child(
                     div()
