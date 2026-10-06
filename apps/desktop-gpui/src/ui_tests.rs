@@ -180,6 +180,28 @@ fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn slash_menu_filters_and_executes_commands(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.composer
+                .update(cx, |input, cx| input.set_value("/archive", window, cx));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("slash-Archive thread")
+        .expect("slash command entry is visible");
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(app.read_with(cx, |app, cx| app.composer.read(cx).value().is_empty()));
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected an archive command");
+    };
+    assert_eq!(payload["type"], "thread.archive");
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");

@@ -3505,6 +3505,11 @@ impl Render for NativeApp {
                 format!("{instance} · {model}")
             }
         };
+        let composer_value = self.composer.read(cx).value().to_string();
+        let slash_entries = composer_value
+            .trim()
+            .strip_prefix('/')
+            .map(|rest| palette::matching(rest.trim(), self.selected_thread.is_some()));
         let composer_card = div()
             .flex()
             .flex_col()
@@ -3514,6 +3519,44 @@ impl Render for NativeApp {
             .border_t_1()
             .border_color(border)
             .child(Textarea::new(&self.composer))
+            .when_some(slash_entries, |view, entries| {
+                view.child(
+                    div()
+                        .id("slash-commands")
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .max_h(px(200.))
+                        .overflow_y_scroll()
+                        .p_2()
+                        .rounded_md()
+                        .bg(popover)
+                        .border_1()
+                        .border_color(border)
+                        .when(entries.is_empty(), |view| {
+                            view.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child("No matching commands"),
+                            )
+                        })
+                        .children(entries.into_iter().take(8).map(|entry| {
+                            let command = entry.command;
+                            let label = entry.label;
+                            Button::new(gpui_kit::SharedString::from(format!("slash-{label}")))
+                                .debug_selector(move || format!("slash-{label}"))
+                                .label(label)
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.composer
+                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                    app.execute_command(command, window, cx);
+                                }))
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex()
