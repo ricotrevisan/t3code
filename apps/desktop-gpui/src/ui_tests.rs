@@ -219,6 +219,26 @@ fn sidebar_search_runs_on_enter(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn right_panel_tabs_switch_tools(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let changes = cx
+        .debug_bounds("right-tab-changes")
+        .expect("changes tab is visible");
+    cx.simulate_click(changes.center(), Default::default());
+    assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Changes);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("changes-panel").is_some());
+
+    let agents = cx
+        .debug_bounds("right-tab-agents")
+        .expect("agents tab is visible");
+    cx.simulate_click(agents.center(), Default::default());
+    assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Agents);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("agents-panel").is_some());
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");

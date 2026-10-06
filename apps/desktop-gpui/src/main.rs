@@ -49,6 +49,13 @@ const THREAD_ACTIONS: &[(&str, &str, &str)] = &[
     ("delete", "Delete thread", "thread.delete"),
 ];
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RightTab {
+    Inspector,
+    Changes,
+    Agents,
+}
+
 #[cfg(test)]
 mod ui_tests;
 mod theme;
@@ -101,6 +108,7 @@ struct NativeApp {
     activity_expanded: bool,
     inspector_open: bool,
     thread_menu_open: bool,
+    right_tab: RightTab,
     available_editors: Vec<String>,
     saved_window: Option<window_state::WindowSize>,
     project_actions_open: bool,
@@ -352,6 +360,7 @@ impl NativeApp {
             activity_expanded: false,
             inspector_open: true,
             thread_menu_open: false,
+            right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
             saved_window: None,
             project_actions_open: false,
@@ -3586,6 +3595,83 @@ impl Render for NativeApp {
                         }))
                 }))
         });
+        let changes_panel = {
+            let files = self
+                .detail
+                .thread
+                .as_ref()
+                .and_then(|detail| detail["checkpoints"].as_array().and_then(|list| list.last()))
+                .and_then(|checkpoint| checkpoint["files"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            div()
+                .id("changes-panel")
+                .debug_selector(|| "changes-panel".into())
+                .flex()
+                .flex_col()
+                .gap_2()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .when(files.is_empty(), |view| {
+                    view.child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_foreground)
+                            .child("No checkpointed changes yet"),
+                    )
+                })
+                .children(files.iter().map(|file| {
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap_2()
+                        .text_sm()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(file["path"].as_str().unwrap_or("").to_owned()),
+                        )
+                        .child(
+                            div().text_xs().child(format!(
+                                "+{} -{}",
+                                file["additions"].as_u64().unwrap_or(0),
+                                file["deletions"].as_u64().unwrap_or(0)
+                            )),
+                        )
+                }))
+        };
+        let agents_panel = div()
+            .id("agents-panel")
+            .debug_selector(|| "agents-panel".into())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .when(self.provider_catalog.is_empty(), |view| {
+                view.child(
+                    div()
+                        .text_sm()
+                        .text_color(muted_foreground)
+                        .child("No provider catalog loaded"),
+                )
+            })
+            .children(self.provider_catalog.iter().map(|provider| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_sm().child(provider.label().to_owned()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted_foreground)
+                            .child(format!("{} · {}", provider.instance_id, provider.explanation())),
+                    )
+            }));
         let composer_card = div()
             .flex()
             .flex_col()
@@ -4287,23 +4373,54 @@ impl Render for NativeApp {
                                     .w(px(340.))
                                     .flex_shrink_0()
                                     .h_full()
-                                    .overflow_y_scroll()
                                     .p_3()
                                     .bg(group_box)
                                     .border_l_1()
                                     .border_color(border)
-                                    .children(
-                                        self.storage_error
-                                            .clone()
-                                            .map(|error| div().text_color(danger).child(error)),
+                                    .child(
+                                        div().flex().gap_1().children(
+                                            [
+                                                ("right-tab-inspector", "Inspector", RightTab::Inspector),
+                                                ("right-tab-changes", "Changes", RightTab::Changes),
+                                                ("right-tab-agents", "Agents", RightTab::Agents),
+                                            ]
+                                            .into_iter()
+                                            .map(|(id, label, tab)| {
+                                                Button::new(id)
+                                                    .debug_selector(move || id.into())
+                                                    .label(label)
+                                                    .ghost()
+                                                    .small()
+                                                    .selected(self.right_tab == tab)
+                                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                                        app.right_tab = tab;
+                                                        cx.notify();
+                                                    }))
+                                            }),
+                                        ),
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(muted_foreground)
-                                            .child("INSPECTOR"),
-                                    )
+                                            .id("inspector-body")
+                                            .when(self.right_tab != RightTab::Inspector, |view| view.hidden())
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .overflow_y_scroll()
+                                            .children(
+                                                self.storage_error
+                                                    .clone()
+                                                    .map(|error| div().text_color(danger).child(error)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(muted_foreground)
+                                                    .child("INSPECTOR"),
+                                            )
                             .child(
                                 div()
                                     .flex()
@@ -4559,8 +4676,15 @@ impl Render for NativeApp {
                                             .child(Input::new(&self.model)),
                                     ),
                             ),
-                            ),
+                            )
+                            .when(self.right_tab == RightTab::Changes, |view| {
+                                view.child(changes_panel)
+                            })
+                            .when(self.right_tab == RightTab::Agents, |view| {
+                                view.child(agents_panel)
+                            })
                     ),
+            )
             )
             .children(palette)
             .children(settings)
