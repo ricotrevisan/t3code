@@ -351,15 +351,125 @@ fn attachments_render_and_detach(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn sidebar_thread_groups_collapse(cx: &mut TestAppContext) {
+fn sidebar_thread_groups_collapse_per_project(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.shell.apply(serde_json::from_value(json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"projects":[{"id":"p","title":"Fixture","workspaceRoot":"/tmp/fixture"},{"id":"q","title":"Other","workspaceRoot":"/tmp/other"}],"threads":[{"id":"t","projectId":"p","title":"Thread","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"archivedAt":null},{"id":"u","projectId":"q","title":"Elsewhere","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"archivedAt":null}]}})).unwrap()).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
     let toggle = cx
-        .debug_bounds("group-toggle-active")
+        .debug_bounds("group-toggle-p:active")
         .expect("active group toggle is visible");
     cx.simulate_click(toggle.center(), Default::default());
-    assert!(app.read_with(cx, |app, _| app
-        .collapsed_groups
-        .contains(&"active".to_owned())));
+    assert_eq!(
+        app.read_with(cx, |app, _| app.collapsed_groups.clone()),
+        vec!["p:active".to_owned()]
+    );
+    // Folding one project's group must not hide the other project's rows from navigation.
+    cx.simulate_keystrokes("cmd-shift-]");
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_thread.clone()),
+        Some("u".into())
+    );
+    assert!(cx.debug_bounds("group-toggle-q:active").is_some());
+}
+
+fn message(index: usize) -> Value {
+    json!({"id":format!("m{index}"),"role":"assistant","text":format!("Message {index}\n\nbody"),"createdAt":"2026-10-06T10:00:00Z"})
+}
+
+fn snapshot(messages: Vec<Value>, status: &str) -> Value {
+    json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"thread":{"id":"t","title":"Thread","messages":messages,"session":{"status":status}}}})
+}
+
+#[gpui_kit::test]
+fn conversation_follows_the_tail_until_the_user_scrolls_up(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let load = |count: usize, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| app.update(cx, |app, cx| {
+            app.apply_thread_update("t", snapshot((0..count).map(message).collect(), "idle"))
+                .unwrap();
+            cx.notify();
+        }));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            (app.conversation_scroll.offset().y, app.conversation_scroll.max_offset().y)
+        })
+    };
+    let (offset, max) = load(60, cx);
+    assert!(max > px(0.), "fixture must overflow the viewport");
+    assert_eq!(offset, -max, "opening a thread lands on the newest message");
+    let (offset, max) = load(80, cx);
+    assert_eq!(offset, -max, "new content keeps the tail in view");
+    // Reading history: later updates must not yank the viewport.
+    app.read_with(cx, |app, _| app.conversation_scroll.set_offset(point(px(0.), px(0.))));
+    let (offset, _) = load(90, cx);
+    assert_eq!(offset, px(0.));
+}
+
+#[gpui_kit::test]
+fn enter_sends_and_shift_enter_inserts_a_newline(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_input("first");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("second");
+    assert!(requests.try_recv().is_err());
+    cx.simulate_keystrokes("enter");
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected turn start");
+    };
+    assert_eq!(payload["message"]["text"], "first\nsecond");
+    reply.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        ""
+    );
+}
+
+#[gpui_kit::test]
+fn running_turn_swaps_send_for_stop(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    assert!(cx.debug_bounds("send").is_some());
+    assert!(cx.debug_bounds("stop-turn").is_none());
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.apply_thread_update("t", snapshot(vec![message(0)], "running")).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("send").is_none());
+    let stop = cx.debug_bounds("stop-turn").expect("Stop replaces Send");
+    cx.simulate_click(stop.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected interrupt");
+    };
+    assert_eq!(payload["type"], "thread.turn.interrupt");
+}
+
+#[gpui_kit::test]
+fn escape_closes_the_topmost_overlay_and_thread_menu_tracks_state(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-,");
+    assert!(app.read_with(cx, |app, _| app.settings_open));
+    let trigger = cx.debug_bounds("thread-menu").unwrap();
+    cx.simulate_click(trigger.center(), Default::default());
+    cx.run_until_parked();
+    // The fixture thread is unpinned and active: only the forward actions are offered.
+    let pin = cx.debug_bounds("pin").expect("Pin is offered");
+    assert!(cx.debug_bounds("unpin").is_none());
+    assert!(cx.debug_bounds("unarchive").is_none());
+    // The menu hangs below its trigger instead of the window's left edge.
+    assert!(pin.top() >= trigger.bottom());
+    assert!(pin.left() >= trigger.left() - px(1.));
+    cx.simulate_keystrokes("escape");
+    assert!(app.read_with(cx, |app, _| !app.thread_menu_open && app.settings_open));
+    cx.simulate_keystrokes("escape");
+    assert!(app.read_with(cx, |app, _| !app.settings_open));
+    cx.simulate_keystrokes("cmd-alt-b");
+    assert!(app.read_with(cx, |app, _| !app.inspector_open));
+    cx.simulate_keystrokes("cmd-alt-b");
+    assert!(app.read_with(cx, |app, _| app.inspector_open));
 }
 
 #[gpui_kit::test]

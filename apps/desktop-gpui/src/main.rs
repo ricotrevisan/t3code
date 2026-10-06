@@ -9,7 +9,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Bounds, Context, Entity, FocusHandle, FontWeight, KeyBinding, Subscription, Task, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, size,
+    WindowBounds, WindowOptions, anchored, deferred, div, point, prelude::*, px, size,
 };
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
@@ -33,6 +33,11 @@ gpui_kit::actions!(
         StashPrompt,
         ToggleSettle,
         TogglePin,
+        DismissOverlay,
+        PreviousThread,
+        NextThread,
+        OpenSettings,
+        ToggleRightPanel,
         QuitNative
     ]
 );
@@ -132,6 +137,7 @@ struct NativeApp {
     thread_menu_open: bool,
     collapsed_projects: Vec<String>,
     collapsed_groups: Vec<String>,
+    conversation_scroll: gpui_kit::ScrollHandle,
     attachments: Vec<Value>,
     auth_state: Option<Value>,
     auth_callback: Entity<InputState>,
@@ -202,6 +208,7 @@ impl NativeApp {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
+                .submit_on_enter(true)
                 .placeholder("What should we work on?")
         });
         let server = cx.new(|cx| {
@@ -300,13 +307,8 @@ impl NativeApp {
                         app.schedule_draft_save(cx);
                     }
                 }
-                if matches!(
-                    event,
-                    InputEvent::PressEnter {
-                        secondary: true,
-                        ..
-                    }
-                ) {
+                // Enter sends and Shift+Enter inserts a newline, as in the reference composer.
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     app.send_prompt(window, cx);
                 }
             }),
@@ -389,6 +391,7 @@ impl NativeApp {
             thread_menu_open: false,
             collapsed_projects: Vec::new(),
             collapsed_groups: Vec::new(),
+            conversation_scroll: gpui_kit::ScrollHandle::new(),
             attachments: Vec::new(),
             auth_state: None,
             auth_callback: cx.new(|cx| {
@@ -476,6 +479,77 @@ impl NativeApp {
             app.connect(cx);
         }
         app
+    }
+
+    /// Applies a thread subscription item, keeping the conversation on its newest
+    /// content unless the user has scrolled up to read history.
+    fn apply_thread_update(&mut self, thread_id: &str, item: Value) -> Result<(), String> {
+        let scroll = &self.conversation_scroll;
+        let at_tail = scroll.max_offset().y + scroll.offset().y <= px(48.);
+        let result = self.detail.apply(thread_id, item);
+        if at_tail {
+            self.conversation_scroll.scroll_to_bottom();
+        }
+        result
+    }
+
+    fn turn_running(&self) -> bool {
+        self.detail.thread.as_ref().is_some_and(|thread| {
+            matches!(
+                thread["session"]["status"].as_str(),
+                Some("starting" | "running")
+            )
+        })
+    }
+
+    /// Closes the topmost open overlay; false when there was nothing to close.
+    fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.palette_open {
+            self.close_palette(window, cx);
+            return true;
+        }
+        if self.thread_menu_open {
+            self.thread_menu_open = false;
+            self.confirm_delete = None;
+        } else if self.catalog_open {
+            self.catalog_open = false;
+        } else if self.settings_open {
+            self.settings_open = false;
+        } else {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
+    /// Selects the previous or next thread in the order the sidebar shows them.
+    fn step_thread(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let now = chrono::Utc::now();
+        let threads = if self.sidebar_view == sidebar::View::Archived {
+            &self.archived_shell.threads
+        } else {
+            &self.shell.threads
+        };
+        let order: Vec<String> = self
+            .shell
+            .projects
+            .iter()
+            .filter(|project| !self.collapsed_projects.contains(&project.id))
+            .flat_map(|project| {
+                sidebar::grouped(threads, &project.id, self.sidebar_view, now)
+                    .into_iter()
+                    .filter(|(group, _, _)| {
+                        !self
+                            .collapsed_groups
+                            .contains(&sidebar::group_key(&project.id, group))
+                    })
+                    .flat_map(|(_, _, rows)| rows.into_iter().map(|thread| thread.id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if let Some(id) = sidebar::neighbor(&order, self.selected_thread.as_deref(), forward) {
+            self.select_thread(&id, window, cx);
+        }
     }
 
     fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1663,7 +1737,7 @@ impl NativeApp {
                                     }
                                     connection::Update::Thread { thread_id, item } => {
                                         if app.selected_thread.as_ref() == Some(&thread_id) {
-                                            app.detail.apply(&thread_id, item)
+                                            app.apply_thread_update(&thread_id, item)
                                         } else {
                                             Ok(())
                                         }
@@ -1700,7 +1774,9 @@ impl NativeApp {
         self.selected_thread = Some(id.into());
         self.pending_history_attached = false;
         self.confirm_delete = None;
+        self.thread_menu_open = false;
         self.detail = thread::ThreadDetail::default();
+        self.conversation_scroll.set_offset(point(px(0.), px(0.)));
         let text = self.drafts.get(id).cloned().unwrap_or_else(|| {
             self.draft_store
                 .as_ref()
@@ -2453,12 +2529,7 @@ impl NativeApp {
             cx.notify();
             return;
         }
-        if self.detail.thread.as_ref().is_some_and(|thread| {
-            matches!(
-                thread["session"]["status"].as_str(),
-                Some("starting" | "running")
-            )
-        }) {
+        if self.turn_running() {
             self.status =
                 "Turn running — interrupt first. Native queue support is not implemented yet."
                     .into();
@@ -2889,6 +2960,7 @@ impl Render for NativeApp {
         let full_access = runtime_mode == "full-access";
         let plan_mode = interaction_mode == "plan";
         let busy = self.pending_actions > 0;
+        let turn_running = self.turn_running();
         let sidebar = cx.theme().sidebar;
         let sidebar_border = cx.theme().sidebar_border;
         let sidebar_foreground = cx.theme().sidebar_foreground;
@@ -3122,43 +3194,22 @@ impl Render for NativeApp {
             } else {
                 &self.shell.threads
             };
-            let visible: Vec<_> = threads
-                .iter()
-                .filter(|t| t.project_id == project.id && sidebar::belongs(t, self.sidebar_view, now))
-                .collect();
-            let group_defs = [
-                (
-                    "pinned",
-                    "Pinned",
-                    visible
-                        .iter()
-                        .copied()
-                        .filter(|t| t.pinned_at.is_some())
-                        .collect::<Vec<_>>(),
-                ),
-                (
-                    "active",
-                    "Active",
-                    visible
-                        .iter()
-                        .copied()
-                        .filter(|t| t.pinned_at.is_none())
-                        .collect::<Vec<_>>(),
-                ),
-            ];
+            let group_defs = sidebar::grouped(threads, &project.id, self.sidebar_view, now);
             for (group_key, group_label, group_threads) in group_defs {
                 if group_threads.is_empty() {
                     continue;
                 }
-                let group_collapsed = self
-                    .collapsed_groups
-                    .iter()
-                    .any(|entry| entry == group_key);
+                // Collapse state is per project: folding one project's group leaves the rest alone.
+                let group_key = sidebar::group_key(&project.id, group_key);
+                let group_collapsed = self.collapsed_groups.contains(&group_key);
                 group = group.child(div().pl_4().child(
                     Button::new(gpui_kit::SharedString::from(format!(
                         "group-toggle-{group_key}"
                     )))
-                    .debug_selector(move || format!("group-toggle-{group_key}"))
+                    .debug_selector({
+                        let key = group_key.clone();
+                        move || format!("group-toggle-{key}")
+                    })
                     .label(format!(
                         "{} {} ({})",
                         if group_collapsed { "▸" } else { "▾" },
@@ -3168,7 +3219,7 @@ impl Render for NativeApp {
                     .ghost()
                     .small()
                     .on_click(cx.listener(move |app, _, _, cx| {
-                        let key = group_key.to_owned();
+                        let key = group_key.clone();
                         if let Some(index) = app.collapsed_groups.iter().position(|entry| entry == &key) {
                             app.collapsed_groups.remove(index);
                         } else {
@@ -3182,7 +3233,8 @@ impl Render for NativeApp {
                 }
                 for thread in group_threads {
                 let id = thread.id.clone();
-                let badges = sidebar::badges(thread, now);
+                let mut badges = sidebar::badges(thread, now);
+                badges.retain(|badge| *badge != sidebar::Badge::Pinned);
                 let meta = sidebar::thread_meta(thread);
                 group = group.child(div().pl_4().child(
                     Button::new(gpui_kit::SharedString::from(format!("thread-{id}")))
@@ -3258,6 +3310,7 @@ impl Render for NativeApp {
             .flex_col()
             .flex_1()
             .overflow_y_scroll()
+            .track_scroll(&self.conversation_scroll)
             .gap_2()
             .p_3();
         if let Some(detail) = &self.detail.thread {
@@ -3789,6 +3842,55 @@ impl Render for NativeApp {
                 sidebar::project_name(&project.title, &project.workspace_root).to_owned()
             });
 
+        let menu_thread = self.selected_thread.as_ref().and_then(|id| {
+            self.shell
+                .threads
+                .iter()
+                .chain(&self.archived_shell.threads)
+                .find(|thread| &thread.id == id)
+        });
+        let thread_menu = self.thread_menu_open.then(|| {
+            div()
+                .id("thread-menu-popover")
+                .occlude()
+                .mt_1()
+                .w(px(220.))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .bg(popover)
+                .border_1()
+                .border_color(border)
+                .shadow_lg()
+                .children(THREAD_ACTIONS.iter().filter(|(id, _, _)| {
+                    menu_thread.is_none_or(|thread| sidebar::action_applies(thread, id, now))
+                }).map(|(id, label, kind)| {
+                    let armed = *id == "delete"
+                        && self.confirm_delete.as_deref() == self.selected_thread.as_deref();
+                    Button::new(*id)
+                        .debug_selector(move || (*id).into())
+                        .label(if armed { "Confirm delete" } else { *label })
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            if *kind == "thread.delete"
+                                && app.pending_threads.iter().any(|draft| {
+                                    Some(&draft.thread.id) == app.selected_thread.as_ref()
+                                })
+                            {
+                                app.discard_pending(window, cx);
+                                app.thread_menu_open = false;
+                            } else {
+                                app.lifecycle(kind, cx);
+                                // Delete keeps the menu open so the second click confirms.
+                                app.thread_menu_open = app.confirm_delete.is_some();
+                            }
+                            cx.notify();
+                        }))
+                }))
+        });
         let thread_header = div()
             .flex()
             .flex_col()
@@ -3911,18 +4013,29 @@ impl Render for NativeApp {
                                 cx.notify();
                             })),
                     )
+                    // The menu hangs off its trigger rather than a fixed window position.
                     .child(
-                        Button::new("thread-menu")
-                            .debug_selector(|| "thread-menu".into())
-                            .icon(gpui_kit::assets::IconName::Ellipsis)
-                            .label("More")
-                            .ghost()
-                            .small()
-                            .tooltip("More thread actions")
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.thread_menu_open = !app.thread_menu_open;
-                                cx.notify();
-                            })),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                Button::new("thread-menu")
+                                    .debug_selector(|| "thread-menu".into())
+                                    .icon(gpui_kit::assets::IconName::Ellipsis)
+                                    .label("More")
+                                    .ghost()
+                                    .small()
+                                    .selected(self.thread_menu_open)
+                                    .tooltip("More thread actions")
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.thread_menu_open = !app.thread_menu_open;
+                                        app.confirm_delete = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .when_some(thread_menu, |view, menu| {
+                                view.child(deferred(anchored().snap_to_window().child(menu)))
+                            }),
                     ),
                 );
 
@@ -3942,47 +4055,6 @@ impl Render for NativeApp {
             .trim()
             .strip_prefix('/')
             .map(|rest| palette::matching(rest.trim(), self.selected_thread.is_some()));
-        let thread_menu = self.thread_menu_open.then(|| {
-            div()
-                .id("thread-menu-popover")
-                .absolute()
-                .top(px(96.))
-                .left(px(8.))
-                .w(px(220.))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .rounded_md()
-                .bg(popover)
-                .border_1()
-                .border_color(border)
-                .shadow_lg()
-                .children(THREAD_ACTIONS.iter().map(|(id, label, kind)| {
-                    let armed = *id == "delete"
-                        && self.confirm_delete.as_deref() == self.selected_thread.as_deref();
-                    Button::new(*id)
-                        .debug_selector(move || (*id).into())
-                        .label(if armed { "Confirm delete" } else { *label })
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            if *kind == "thread.delete"
-                                && app.pending_threads.iter().any(|draft| {
-                                    Some(&draft.thread.id) == app.selected_thread.as_ref()
-                                })
-                            {
-                                app.discard_pending(window, cx);
-                                app.thread_menu_open = false;
-                            } else {
-                                app.lifecycle(kind, cx);
-                                // Delete keeps the menu open so the second click confirms.
-                                app.thread_menu_open = app.confirm_delete.is_some();
-                            }
-                            cx.notify();
-                        }))
-                }))
-        });
         let changes_panel = {
             let files = self
                 .detail
@@ -4216,17 +4288,31 @@ impl Render for NativeApp {
                             })),
                     )
                     .child(div().flex_1())
-                    .child(
+                    // One slot: Send while idle, Stop while a turn runs.
+                    .child(if turn_running {
+                        Button::new("stop-turn")
+                            .debug_selector(|| "stop-turn".into())
+                            .label("Stop")
+                            .danger()
+                            .outline()
+                            .tooltip("Interrupt the running turn")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.lifecycle("thread.turn.interrupt", cx)
+                            }))
+                    } else {
                         Button::new("send")
                             .debug_selector(|| "send".into())
                             .icon(gpui_kit::assets::IconName::Send)
                             .label("Send")
                             .primary()
                             .loading(self.pending_actions > 0)
-                            .disabled(self.composer.read(cx).value().trim().is_empty())
-                            .tooltip("Send the prompt (⌘↩)")
-                            .on_click(cx.listener(|app, _, window, cx| app.send_prompt(window, cx))),
-                    )
+                            .disabled(
+                                self.selected_thread.is_none()
+                                    || self.composer.read(cx).value().trim().is_empty(),
+                            )
+                            .tooltip("Send the prompt (↩)")
+                            .on_click(cx.listener(|app, _, window, cx| app.send_prompt(window, cx)))
+                    })
                     .child(
                         Button::new("stash")
                             .debug_selector(|| "stash".into())
@@ -4241,19 +4327,6 @@ impl Render for NativeApp {
                             .ghost()
                             .on_click(cx.listener(|app, _, window, cx| app.stash_prompt(true, window, cx))),
                     )
-                    .child(
-                        Button::new("interrupt")
-                            .label("Interrupt")
-                            .ghost()
-                            .on_click(cx.listener(|app, _, _, cx| app.lifecycle("thread.turn.interrupt", cx))),
-                    )
-                    .child(
-                        Button::new("stop")
-                            .label("Stop")
-                            .danger()
-                            .outline()
-                            .on_click(cx.listener(|app, _, _, cx| app.lifecycle("thread.session.stop", cx))),
-                    ),
             );
 
         let environment_host = url::Url::parse(&self.environment_scope)
@@ -4592,6 +4665,12 @@ impl Render for NativeApp {
                             [
                                 ("⌘K", "Command palette"),
                                 ("⌘N", "New thread"),
+                                ("↩", "Send prompt (⇧↩ for a newline)"),
+                                ("⌘⇧[ / ⌘⇧]", "Previous / next thread"),
+                                ("⌘⌥B", "Toggle right panel"),
+                                ("⌘,", "Settings"),
+                                ("⌘P", "Workspace files"),
+                                ("Esc", "Close the open menu or panel"),
                                 ("⌘S", "Stash prompt"),
                                 ("⌘⇧F", "Search workspace contents"),
                                 ("⌘⇧S", "Toggle settlement"),
@@ -4710,6 +4789,28 @@ impl Render for NativeApp {
             .on_action(
                 cx.listener(|app, _: &TogglePin, _, cx| app.toggle_thread_property(true, cx)),
             )
+            // Inputs re-propagate Enter after emitting PressEnter; consume it here so an
+            // unhandled keystroke can never fall through to text insertion after a send.
+            .on_action(cx.listener(|_, _: &gpui_kit::component::input::Enter, _, _| {}))
+            .on_action(cx.listener(|app, _: &DismissOverlay, window, cx| {
+                if !app.dismiss_overlay(window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|app, _: &PreviousThread, window, cx| {
+                app.step_thread(false, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &NextThread, window, cx| {
+                app.step_thread(true, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &OpenSettings, _, cx| {
+                app.settings_open = !app.settings_open;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &ToggleRightPanel, _, cx| {
+                app.inspector_open = !app.inspector_open;
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -4925,7 +5026,6 @@ impl Render for NativeApp {
                                     .h_full()
                                     .relative()
                                     .child(thread_header)
-                                    .when_some(thread_menu, |view, menu| view.child(menu))
                                     .child(conversation)
                                     .child(composer_card)
                                     .child(status_bar).into_any_element(),
@@ -5289,6 +5389,11 @@ fn bind_native_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-o", NewThread, Some("NativeApp")),
         KeyBinding::new("cmd-shift-s", ToggleSettle, Some("NativeApp")),
         KeyBinding::new("cmd-shift-p", TogglePin, Some("NativeApp")),
+        KeyBinding::new("escape", DismissOverlay, Some("NativeApp")),
+        KeyBinding::new("cmd-shift-[", PreviousThread, Some("NativeApp")),
+        KeyBinding::new("cmd-shift-]", NextThread, Some("NativeApp")),
+        KeyBinding::new("cmd-,", OpenSettings, Some("NativeApp")),
+        KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some("NativeApp")),
         KeyBinding::new(
             "escape",
             ClosePalette,
@@ -5326,6 +5431,8 @@ fn main() {
                 disabled: false,
                 items: vec![
                     gpui_kit::MenuItem::action("New thread", NewThread),
+                    gpui_kit::MenuItem::action("Previous thread", PreviousThread),
+                    gpui_kit::MenuItem::action("Next thread", NextThread),
                     gpui_kit::MenuItem::action("Toggle settlement", ToggleSettle),
                     gpui_kit::MenuItem::action("Toggle pin", TogglePin),
                     gpui_kit::MenuItem::action("Stash prompt", StashPrompt),
@@ -5336,6 +5443,8 @@ fn main() {
                 disabled: false,
                 items: vec![
                     gpui_kit::MenuItem::action("Commands", TogglePalette),
+                    gpui_kit::MenuItem::action("Settings", OpenSettings),
+                    gpui_kit::MenuItem::action("Toggle right panel", ToggleRightPanel),
                     gpui_kit::MenuItem::action("Workspace files", OpenFiles),
                     gpui_kit::MenuItem::action("Search contents", OpenContentSearch),
                 ],

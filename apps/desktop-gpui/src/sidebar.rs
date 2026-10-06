@@ -112,6 +112,59 @@ pub fn badges(thread: &Thread, now: DateTime<Utc>) -> Vec<Badge> {
 
 /// The sidebar name for a project: its workspace directory name, falling back
 /// to the title when the path has no usable segment.
+/// A project's rows for a view, split into the groups the sidebar renders, in
+/// render order. Thread navigation walks the same result.
+pub fn grouped<'a>(
+    threads: &'a [Thread],
+    project_id: &str,
+    view: View,
+    now: DateTime<Utc>,
+) -> [(&'static str, &'static str, Vec<&'a Thread>); 2] {
+    let (pinned, active) = threads
+        .iter()
+        .filter(|thread| thread.project_id == project_id && belongs(thread, view, now))
+        .partition(|thread| thread.pinned_at.is_some());
+    [("pinned", "Pinned", pinned), ("active", "Active", active)]
+}
+
+/// Collapse-state key for one project's thread group.
+pub fn group_key(project_id: &str, group: &str) -> String {
+    format!("{project_id}:{group}")
+}
+
+/// The thread before or after `current` in `order`, wrapping at the ends.
+pub fn neighbor(order: &[String], current: Option<&str>, forward: bool) -> Option<String> {
+    if order.is_empty() {
+        return None;
+    }
+    let index = match current.and_then(|id| order.iter().position(|entry| entry == id)) {
+        Some(index) if forward => (index + 1) % order.len(),
+        Some(index) => (index + order.len() - 1) % order.len(),
+        None if forward => 0,
+        None => order.len() - 1,
+    };
+    Some(order[index].clone())
+}
+
+/// Whether a thread menu action applies to the thread's current state, so the
+/// menu offers one direction of each reversible action instead of both.
+pub fn action_applies(thread: &Thread, action: &str, now: DateTime<Utc>) -> bool {
+    let archived = thread.archived_at.is_some();
+    let settled = thread.settled_override.as_deref() == Some("settled");
+    let pinned = thread.pinned_at.is_some();
+    match action {
+        "archive" => !archived,
+        "unarchive" => archived,
+        "settle" => !settled,
+        "unsettle" => settled,
+        "snooze" => !snoozed(thread, now),
+        "unsnooze" => snoozed(thread, now),
+        "pin" => !pinned,
+        "unpin" => pinned,
+        _ => true,
+    }
+}
+
 pub fn project_name<'a>(title: &'a str, workspace_root: &'a str) -> &'a str {
     workspace_root
         .trim_end_matches('/')
@@ -217,6 +270,64 @@ mod tests {
             badges(&thread, now),
             vec![Badge::Approval, Badge::Plan, Badge::PullRequest]
         );
+    }
+
+    #[test]
+    fn navigation_wraps_and_starts_from_either_end() {
+        let order = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        assert_eq!(neighbor(&order, Some("a"), true).as_deref(), Some("b"));
+        assert_eq!(neighbor(&order, Some("c"), true).as_deref(), Some("a"));
+        assert_eq!(neighbor(&order, Some("a"), false).as_deref(), Some("c"));
+        assert_eq!(neighbor(&order, None, true).as_deref(), Some("a"));
+        assert_eq!(neighbor(&order, Some("gone"), false).as_deref(), Some("c"));
+        assert_eq!(neighbor(&[], Some("a"), true), None);
+    }
+
+    #[test]
+    fn groups_list_pinned_before_active_for_one_project() {
+        let now = Utc::now();
+        let mut pinned = thread();
+        pinned.id = "pinned".into();
+        pinned.pinned_at = Some(now.to_rfc3339());
+        let mut other = thread();
+        other.id = "other".into();
+        other.project_id = "q".into();
+        let threads = vec![thread(), pinned, other];
+        let ids: Vec<_> = grouped(&threads, "p", View::Active, now)
+            .into_iter()
+            .map(|(key, _, rows)| (key, rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>()))
+            .collect();
+        assert_eq!(ids, vec![("pinned", vec!["pinned"]), ("active", vec!["t"])]);
+    }
+
+    #[test]
+    fn menu_offers_only_the_applicable_direction() {
+        let now = Utc::now();
+        let mut thread = thread();
+        for (forward, reverse) in [
+            ("pin", "unpin"),
+            ("settle", "unsettle"),
+            ("snooze", "unsnooze"),
+            ("archive", "unarchive"),
+        ] {
+            assert!(action_applies(&thread, forward, now), "{forward}");
+            assert!(!action_applies(&thread, reverse, now), "{reverse}");
+        }
+        thread.pinned_at = Some(now.to_rfc3339());
+        thread.settled_override = Some("settled".into());
+        thread.snoozed_until = Some((now + chrono::Duration::hours(1)).to_rfc3339());
+        thread.archived_at = Some(now.to_rfc3339());
+        for (forward, reverse) in [
+            ("pin", "unpin"),
+            ("settle", "unsettle"),
+            ("snooze", "unsnooze"),
+            ("archive", "unarchive"),
+        ] {
+            assert!(!action_applies(&thread, forward, now), "{forward}");
+            assert!(action_applies(&thread, reverse, now), "{reverse}");
+        }
+        assert!(action_applies(&thread, "delete", now));
+        assert!(action_applies(&thread, "rename", now));
     }
 
     #[test]
