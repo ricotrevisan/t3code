@@ -158,6 +158,28 @@ fn checkpoint_revert_arms_then_dispatches(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.workspace
+                .update(cx, |input, cx| input.set_value("/tmp/fixture", window, cx));
+            app.available_editors = vec!["vscode".into(), "zed".into()];
+        })
+    });
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("open-editor").expect("open button is visible");
+    cx.simulate_click(bounds.center(), Default::default());
+    cx.run_until_parked();
+    let connection::Command::Call { tag, payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected an editor launch");
+    };
+    assert_eq!(tag, "shell.openInEditor");
+    assert_eq!(payload["cwd"], "/tmp/fixture");
+    assert_eq!(payload["editor"], "zed");
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");

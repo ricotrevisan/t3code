@@ -86,6 +86,7 @@ struct NativeApp {
     connection_expanded: bool,
     settings_open: bool,
     activity_expanded: bool,
+    available_editors: Vec<String>,
     project_actions_open: bool,
     project_settings: Option<Value>,
     action_name: Entity<InputState>,
@@ -322,6 +323,7 @@ impl NativeApp {
             connection_expanded: false,
             settings_open: false,
             activity_expanded: false,
+            available_editors: Vec::new(),
             project_actions_open: false,
             project_settings: None,
             action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
@@ -1963,6 +1965,15 @@ impl NativeApp {
                                     return;
                                 }
                             }
+                            app.available_editors = value["availableEditors"]
+                                .as_array()
+                                .map(|editors| {
+                                    editors
+                                        .iter()
+                                        .filter_map(|editor| editor.as_str().map(str::to_owned))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
                         }
                         if tag == "orchestration.getArchivedShellSnapshot" {
                             match serde_json::from_value::<shell::Snapshot>(value.clone()) {
@@ -2524,6 +2535,46 @@ impl NativeApp {
         self.confirm_revert = None;
         let payload = commands::revert_command(&id, turn_count);
         self.dispatch(payload, cx);
+    }
+
+    /// Open the selected thread's worktree (or the project root) in the first
+    /// available editor, preferring Zed to match the app's design language.
+    fn open_in_editor(&mut self, cx: &mut Context<Self>) {
+        let cwd = self
+            .selected_thread
+            .as_ref()
+            .and_then(|id| {
+                self.shell
+                    .threads
+                    .iter()
+                    .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                    .find(|thread| &thread.id == id)
+            })
+            .and_then(|thread| thread.worktree_path.clone())
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| self.workspace.read(cx).value().to_string());
+        if cwd.trim().is_empty() {
+            self.status = "Select a project or open a worktree first".into();
+            cx.notify();
+            return;
+        }
+        let editor = self
+            .available_editors
+            .iter()
+            .find(|editor| editor.as_str() == "zed")
+            .or_else(|| {
+                self.available_editors
+                    .iter()
+                    .find(|editor| editor.as_str() != "file-manager")
+            })
+            .cloned()
+            .unwrap_or_else(|| "zed".into());
+        self.perform(
+            "shell.openInEditor",
+            json!({"cwd": cwd, "editor": editor}),
+            None,
+            cx,
+        );
     }
 }
 
@@ -3303,6 +3354,16 @@ impl Render for NativeApp {
             };
             Some((label.to_owned(), danger))
         });
+        let header_diff = self
+            .detail
+            .thread
+            .as_ref()
+            .and_then(|detail| detail["checkpoints"].as_array().and_then(|list| list.last()))
+            .map(|checkpoint| {
+                let files = checkpoint["files"].as_array().cloned().unwrap_or_default();
+                let (additions, deletions) = conversation::diff_totals(&files);
+                (files.len(), additions, deletions)
+            });
         let header_project = self
             .selected_project
             .as_ref()
@@ -3343,13 +3404,15 @@ impl Render for NativeApp {
                     )
                     .when_some(header_branch.clone(), |view, branch| {
                         view.child(
-                            div()
-                                .px_2()
-                                .rounded_sm()
-                                .bg(muted)
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(branch),
+                            Button::new("branch-selector")
+                                .debug_selector(|| "branch-selector".into())
+                                .label(branch)
+                                .ghost()
+                                .small()
+                                .tooltip("Switch the branch or worktree for this thread")
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.execute_command(palette::Command::Worktrees, window, cx)
+                                })),
                         )
                     })
                     .when_some(header_session, |view, (label, is_danger)| {
@@ -3362,10 +3425,36 @@ impl Render for NativeApp {
                                 .text_color(if is_danger { danger } else { muted_foreground })
                                 .child(label),
                         )
+                    })
+                    .when_some(header_diff, |view, (files, additions, deletions)| {
+                        view.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_2()
+                                .rounded_sm()
+                                .bg(muted)
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(format!("{files} files"))
+                                .child(div().text_color(green).child(format!("+{additions}")))
+                                .child(div().text_color(danger).child(format!("-{deletions}"))),
+                        )
                     }),
             )
             .child(
-                div().flex().flex_wrap().gap_1().children(
+                div().flex().flex_wrap().gap_1().items_center()
+                    .child(
+                        Button::new("open-editor")
+                            .debug_selector(|| "open-editor".into())
+                            .label("Open")
+                            .secondary()
+                            .small()
+                            .tooltip("Open the worktree in an editor")
+                            .on_click(cx.listener(|app, _, _, cx| app.open_in_editor(cx))),
+                    )
+                    .children(
                     [
                         ("rename", "Rename", "thread.meta.update"),
                         ("archive", "Archive", "thread.archive"),
