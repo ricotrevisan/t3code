@@ -15,6 +15,8 @@ const testState = vi.hoisted(() => {
     readonly environmentId: string;
     readonly promotedTo: null;
     readonly threadId: string;
+    readonly environmentSelection?: "auto" | "manual";
+    readonly loadBalancedEnvironmentId?: string | null;
   } | null = null;
   const router = {
     state: {
@@ -32,11 +34,34 @@ const testState = vi.hoisted(() => {
     getDraftThread: vi.fn(() => null),
     applyStickyState: vi.fn(),
     setDraftThreadContext: vi.fn(),
-    setLogicalProjectDraftThreadId: vi.fn(),
+    setLogicalProjectDraftThreadId: vi.fn(
+      (
+        _logicalKey: string,
+        projectRef: { environmentId: string },
+        draftId: string,
+        options: {
+          threadId?: string;
+          environmentSelection?: "auto" | "manual";
+          loadBalancedEnvironmentId?: string | null;
+        },
+      ) => {
+        storedDraft = {
+          ...storedDraft,
+          ...options,
+          draftId,
+          environmentId: projectRef.environmentId,
+          promotedTo: null,
+          threadId: options.threadId ?? storedDraft?.threadId ?? "missing",
+        };
+      },
+    ),
     setModelSelection: vi.fn(),
   };
 
   return {
+    get currentDraft() {
+      return storedDraft;
+    },
     completeProjectFileRead: (value: null) => completeProjectFileRead(value),
     draftStore,
     get projectFileRead() {
@@ -181,6 +206,8 @@ vi.mock("../uiStateStore", () => ({
 vi.mock("./useSettings", () => ({ useClientSettings: () => ({}) }));
 
 import { useNewThreadHandler } from "./useHandleNewThread";
+const { EnvironmentId, ProjectId } =
+  await vi.importActual<typeof import("@t3tools/contracts")>("@t3tools/contracts");
 
 describe.each([
   ["new", null],
@@ -194,6 +221,31 @@ describe.each([
     },
   ],
 ])("useNewThreadHandler with a %s draft", (_, draft) => {
+  it("preserves an explicitly chosen environment and clears previous automatic routing before opening", async () => {
+    testState.reset(
+      draft
+        ? {
+            ...draft,
+            environmentSelection: "auto",
+            loadBalancedEnvironmentId: "environment-primary",
+          }
+        : null,
+    );
+    const projectRef = {
+      environmentId: EnvironmentId.make("environment-ssh"),
+      projectId: ProjectId.make("project-remote"),
+    };
+    const pendingOpen = useNewThreadHandler()(projectRef, { environmentSelection: "manual" });
+    testState.completeProjectFileRead(null);
+    const opened = await pendingOpen;
+    expect(testState.currentDraft).toMatchObject({
+      draftId: opened?.draftId,
+      environmentId: projectRef.environmentId,
+      environmentSelection: "manual",
+      loadBalancedEnvironmentId: null,
+    });
+    expect(testState.router.state.location.href).toBe(`/draft/${opened?.draftId}`);
+  });
   it.each(["approval-required", "auto-accept-edits", "auto", "full-access"] as const)(
     "uses the target environment's %s permissions for new threads",
     async (runtimeMode) => {

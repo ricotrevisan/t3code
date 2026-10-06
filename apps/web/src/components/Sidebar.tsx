@@ -1,3 +1,8 @@
+import { ProjectThreadTree } from "./sidebar/ProjectThreadTree";
+import {
+  buildProjectThreadGroups,
+  toggleAllProjectGroups,
+} from "./sidebar/ProjectThreadTree.logic";
 import { requestThreadCleanup } from "./ThreadCleanupDialog";
 import { readEnvironmentSupportsCleanupReview } from "../state/entities";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
@@ -978,7 +983,7 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
-  variant: "card" | "slim";
+  variant: "card" | "slim" | "tree";
   // Slim rows are either settled (action: un-settle) or merely quiet
   // (seen Ready threads — action: settle).
   variantAction: "settle" | "unsettle" | "unsnooze";
@@ -1609,7 +1614,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     )
   ) : null;
 
-  if (variant === "slim") {
+  if (variant !== "card") {
     return (
       <li
         data-thread-item
@@ -1643,17 +1648,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {accessibleTitle}
             {/* Settled history recedes: dimmed favicon at rest, restored on
               hover so the tail stays scannable when you're hunting. */}
-            <span
-              className={cn(
-                "shrink-0 transition-opacity",
-                (!props.isActive || variantAction === "unsettle") &&
-                  "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
-              )}
-            >
-              {props.project ? <ProjectFavicon project={props.project} className="size-4" /> : null}
-            </span>
+            {variant === "slim" ? (
+              <span
+                className={cn(
+                  "shrink-0 transition-opacity",
+                  (!props.isActive || variantAction === "unsettle") &&
+                    "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
+                )}
+              >
+                {props.project ? (
+                  <ProjectFavicon project={props.project} className="size-4" />
+                ) : null}
+              </span>
+            ) : null}
             {draftIndicator}
             {title}
+            {variant === "tree" && topStatus ? (
+              <span className={cn("shrink-0 text-3xs", topStatus.className)}>
+                {topStatus.label}
+              </span>
+            ) : null}
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -2194,6 +2208,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
+  const reorderProjects = useUiStateStore((store) => store.reorderProjects);
   const threads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -2281,6 +2296,7 @@ export default function Sidebar() {
     },
   });
   const newThreadContext = useHandleNewThread();
+  const { handleNewThread } = newThreadContext;
   const openAddProjectCommandPalette = useCallback(
     () => openCommandPalette({ open: "add-project" }),
     [],
@@ -2836,44 +2852,30 @@ export default function Sidebar() {
     () => [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
     [pinnedThreads, activeThreads, visibleSnoozedThreads, renderedSettledThreads],
   );
-  const navigationProjectByKey = useMemo(
+  const projectThreadGroups = useMemo(
     () =>
-      new Map(
-        projectGroups.flatMap((group) =>
-          group.memberProjectRefs.map(
-            (ref) =>
-              [
-                `${ref.environmentId}:${ref.projectId}`,
-                { key: `project:${group.projectKey}`, label: group.displayName },
-              ] as const,
-          ),
-        ),
+      buildProjectThreadGroups(
+        projectGroups,
+        [...pinnedThreads, ...activeThreads],
+        scopedProjectKeys,
       ),
-    [projectGroups],
+    [projectGroups, pinnedThreads, activeThreads, scopedProjectKeys],
   );
   const navigationGroups = useMemo(
     () =>
       threadView === "priority"
         ? []
-        : groupNavigationThreads(
-            [...pinnedThreads, ...activeThreads],
-            (thread) => {
-              if (threadView === "machine")
-                return {
-                  key: `machine:${thread.environmentId}`,
-                  label: environmentLabelById.get(thread.environmentId) ?? thread.environmentId,
-                };
-              const projectKey = `${thread.environmentId}:${thread.projectId}`;
-              return (
-                navigationProjectByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? {
-                  key: `project:${projectKey}`,
-                  label: "Unknown project",
-                }
-              );
-            },
-            isThreadActivelyRunning,
-          ),
-    [threadView, pinnedThreads, activeThreads, environmentLabelById, navigationProjectByKey],
+        : threadView === "project"
+          ? projectThreadGroups
+          : groupNavigationThreads(
+              [...pinnedThreads, ...activeThreads],
+              (thread) => ({
+                key: `machine:${thread.environmentId}`,
+                label: environmentLabelById.get(thread.environmentId) ?? thread.environmentId,
+              }),
+              isThreadActivelyRunning,
+            ),
+    [threadView, pinnedThreads, activeThreads, environmentLabelById, projectThreadGroups],
   );
   const orderedThreadKeys = useMemo(() => {
     const key = (thread: EnvironmentThreadShell) =>
@@ -2882,7 +2884,9 @@ export default function Sidebar() {
     return [
       ...navigationGroups.flatMap((group) =>
         group.threads.filter(
-          (thread) => !collapsedNavigationGroups.has(group.key) || key(thread) === routeThreadKey,
+          (thread) =>
+            !collapsedNavigationGroups.has(group.key) ||
+            (threadView === "machine" && key(thread) === routeThreadKey),
         ),
       ),
       ...visibleSnoozedThreads,
@@ -4622,6 +4626,64 @@ export default function Sidebar() {
     updateThreadJumpHintsVisibility(shouldShowJumpHintsNow);
   }, [shouldShowJumpHintsNow, updateThreadJumpHintsVisibility]);
 
+  const handleReorderProject = useCallback(
+    (activeKey: string, overKey: string) => {
+      const active = projectGroups.find((project) => `project:${project.projectKey}` === activeKey);
+      const over = projectGroups.find((project) => `project:${project.projectKey}` === overKey);
+      if (!active || !over || active === over) return;
+      // Freeze the displayed order before switching an automatic sort to manual.
+      // Logical groups move all their physical members together, including remote ones.
+      reorderProjects(
+        projectGroups.flatMap((project) =>
+          project.memberProjects.map((member) => member.physicalProjectKey),
+        ),
+        active.memberProjects.map((member) => member.physicalProjectKey),
+        over.memberProjects.map((member) => member.physicalProjectKey),
+      );
+      if (sidebarProjectSortOrder !== "manual")
+        void updateClientSettings({ sidebarProjectSortOrder: "manual" });
+    },
+    [projectGroups, reorderProjects, sidebarProjectSortOrder, updateClientSettings],
+  );
+
+  const handleNewProjectThread = useCallback(
+    (member: SidebarProjectSnapshot["memberProjects"][number]) => {
+      const group = projectGroups.find((project) =>
+        project.memberProjects.some(
+          (candidate) => candidate.physicalProjectKey === member.physicalProjectKey,
+        ),
+      );
+      if (group)
+        setCollapsedNavigationGroups((current) => {
+          const next = new Set(current);
+          next.delete(`project:${group.projectKey}`);
+          return next;
+        });
+      if (isMobile) setOpenMobile(false);
+      void (async () => {
+        const result = await settlePromise(() =>
+          handleNewThread(
+            scopeProjectRef(member.environmentId, member.id),
+            group && group.memberProjects.length > 1
+              ? { environmentSelection: "manual" }
+              : undefined,
+          ),
+        );
+        if (result._tag === "Failure") {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not create thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      })();
+    },
+    [projectGroups, isMobile, setOpenMobile, handleNewThread],
+  );
+
   // New thread defaults to the project you're in (active thread's project,
   // falling back to the top project) — same resolution the command palette
   // uses. The command palette already offers a "New thread in..." submenu
@@ -4961,12 +5023,12 @@ export default function Sidebar() {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
                         );
-                        // Settled and snoozed are the ONLY things that collapse a
-                        // row: every other thread is a full card. Density comes
-                        // from users (or the auto rules) actually parking work,
-                        // not from the sidebar second-guessing what still matters.
+                        // Priority and machine views keep live work as full cards.
+                        // The project tree uses compact rows under the owning project;
+                        // parked work stays compact on its separate shelves.
                         const isCard = section === "active" || section === "pinned";
-                        const rowVariant = isCard ? "card" : "slim";
+                        const rowVariant =
+                          isCard && threadView === "project" ? "tree" : isCard ? "card" : "slim";
                         return (
                           <SidebarThreadRow
                             // Fade between card and compact rows while the outer
@@ -5095,45 +5157,91 @@ export default function Sidebar() {
                         />,
                       ];
                       if (threadView !== "priority") {
-                        for (const group of navigationGroups) {
-                          const expanded = !collapsedNavigationGroups.has(group.key);
+                        if (threadView === "project") {
                           items.push(
-                            <li key={group.key} className="list-none">
-                              <button
-                                type="button"
-                                aria-expanded={expanded}
-                                className="flex w-full items-center gap-2 px-2 py-2 text-left text-xs text-sidebar-muted-foreground hover:text-sidebar-foreground"
-                                onClick={() =>
-                                  setCollapsedNavigationGroups((current) => {
-                                    const next = new Set(current);
-                                    if (next.has(group.key)) next.delete(group.key);
-                                    else next.add(group.key);
-                                    return next;
-                                  })
-                                }
-                              >
-                                <span aria-hidden>{expanded ? "▾" : "▸"}</span>
-                                <span className="min-w-0 flex-1 truncate">{group.label}</span>
-                                <span>
-                                  {group.running > 0 ? `${group.running} running · ` : ""}
-                                  {group.threads.length}
-                                </span>
-                              </button>
-                            </li>,
+                            <ProjectThreadTree
+                              key="project-tree"
+                              groups={projectThreadGroups}
+                              collapsed={collapsedNavigationGroups}
+                              onToggle={(key) =>
+                                setCollapsedNavigationGroups((current) => {
+                                  const next = new Set(current);
+                                  if (next.has(key)) next.delete(key);
+                                  else next.add(key);
+                                  return next;
+                                })
+                              }
+                              onToggleAll={() =>
+                                setCollapsedNavigationGroups((current) =>
+                                  toggleAllProjectGroups(
+                                    current,
+                                    projectThreadGroups.map((group) => group.key),
+                                  ),
+                                )
+                              }
+                              onReorder={handleReorderProject}
+                              onNewThread={handleNewProjectThread}
+                              onSettings={openProjectSettings}
+                              renderThreads={(group) =>
+                                group.threads.length > 0 ? (
+                                  group.threads.map((thread) =>
+                                    renderThreadRowInner(
+                                      thread,
+                                      sectionByThreadKey.get(
+                                        scopedThreadKey(
+                                          scopeThreadRef(thread.environmentId, thread.id),
+                                        ),
+                                      ) ?? "active",
+                                    ),
+                                  )
+                                ) : (
+                                  <li className="px-2 py-3 text-xs text-sidebar-muted-foreground">
+                                    No threads yet
+                                  </li>
+                                )
+                              }
+                            />,
                           );
-                          for (const thread of group.threads) {
-                            const key = scopedThreadKey(
-                              scopeThreadRef(thread.environmentId, thread.id),
+                        } else
+                          for (const group of navigationGroups) {
+                            const expanded = !collapsedNavigationGroups.has(group.key);
+                            items.push(
+                              <li key={group.key} className="list-none">
+                                <button
+                                  type="button"
+                                  aria-expanded={expanded}
+                                  className="flex w-full items-center gap-2 px-2 py-2 text-left text-xs text-sidebar-muted-foreground hover:text-sidebar-foreground"
+                                  onClick={() =>
+                                    setCollapsedNavigationGroups((current) => {
+                                      const next = new Set(current);
+                                      if (next.has(group.key)) next.delete(group.key);
+                                      else next.add(group.key);
+                                      return next;
+                                    })
+                                  }
+                                >
+                                  <span aria-hidden>{expanded ? "▾" : "▸"}</span>
+                                  <span className="min-w-0 flex-1 truncate">{group.label}</span>
+                                  <span>
+                                    {group.running > 0 ? `${group.running} running · ` : ""}
+                                    {group.threads.length}
+                                  </span>
+                                </button>
+                              </li>,
                             );
-                            if (expanded || key === routeThreadKey)
-                              items.push(
-                                renderThreadRowInner(
-                                  thread,
-                                  sectionByThreadKey.get(key) ?? "active",
-                                ),
+                            for (const thread of group.threads) {
+                              const key = scopedThreadKey(
+                                scopeThreadRef(thread.environmentId, thread.id),
                               );
+                              if (expanded || key === routeThreadKey)
+                                items.push(
+                                  renderThreadRowInner(
+                                    thread,
+                                    sectionByThreadKey.get(key) ?? "active",
+                                  ),
+                                );
+                            }
                           }
-                        }
                         if (snoozedThreads.length > 0) {
                           items.push(
                             <SidebarSectionHeader
@@ -5296,6 +5404,7 @@ export default function Sidebar() {
             </TooltipProvider>
           ) : null}
           {!isSearchingThreads &&
+          (threadView !== "project" || projectThreadGroups.length === 0) &&
           visibleDraftSessionCount === 0 &&
           pinnedThreads.length +
             activeThreads.length +

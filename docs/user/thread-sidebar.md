@@ -32,6 +32,12 @@ Priority keeps your manual order; the grouped views help you locate active work
 and show how many threads are running in each group. Snoozed and settled work
 remain on their shelves. Switching views never changes your saved order or pins.
 
+In **By project** on web and desktop, start a thread or open settings directly
+from its project. Collapse all projects to scan the list, then expand them again.
+Project counts distinguish running work from threads waiting for input or approval.
+Drag a project header to reorder projects; this switches to manual project sorting
+and saves the order locally to this client, unlike thread ordering.
+
 On web and desktop, you can also change the view in **Settings → General** or
 through the command palette. In Priority view, drag to reorder; in any view,
 use **Move up** or **Move down** in a thread's menu. Ordering is saved by the
