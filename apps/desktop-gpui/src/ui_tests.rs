@@ -776,7 +776,7 @@ fn loaded_file_editor_accepts_real_input_dispatch(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
-            app.files_open = true;
+            app.inspector_section = Some(InspectorSection::Files);
             app.file_path
                 .update(cx, |input, cx| input.set_value("notes.txt", window, cx));
             app.file_operation(false, window, cx);
@@ -807,7 +807,7 @@ fn file_save_uses_loaded_target_preserves_later_edits_and_failed_reads(cx: &mut 
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
-            app.files_open = true;
+            app.inspector_section = Some(InspectorSection::Files);
             app.file_path
                 .update(cx, |input, cx| input.set_value("notes.txt", window, cx));
             app.file_operation(false, window, cx);
@@ -1310,7 +1310,7 @@ fn workspace_reads_follow_selected_thread_worktree_and_reject_other_project_deta
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.shell.threads[0].worktree_path = Some("/tmp/owned-worktree".into());
-            app.files_open = true;
+            app.inspector_section = Some(InspectorSection::Files);
             app.file_path
                 .update(cx, |input, cx| input.set_value("README.md", window, cx));
             app.file_operation(false, window, cx);
@@ -2015,4 +2015,87 @@ fn row_menu_for_a_pinned_thread_offers_unpin_only(cx: &mut TestAppContext) {
     right_click(cx, "thread-u");
     assert!(cx.debug_bounds("unpin").is_some());
     assert!(cx.debug_bounds("pin").is_none());
+}
+
+fn hide_right_panel_on_changes(app: &Entity<NativeApp>, cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.inspector_open = false;
+            app.right_tab = RightTab::Changes;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn branch_chip_reveals_worktree_controls_from_a_hidden_panel(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, _| app.shell.threads[0].branch = Some("main".into())));
+    hide_right_panel_on_changes(&app, cx);
+    assert!(cx.debug_bounds("draft-checkout-update").is_none());
+    let chip = cx.debug_bounds("branch-selector").expect("branch chip");
+    cx.simulate_click(chip.center(), Default::default());
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.inspector_open));
+    assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Inspector);
+    assert!(cx.debug_bounds("draft-checkout-update").is_some());
+}
+
+#[gpui_kit::test]
+fn palette_files_reveals_the_file_controls_from_a_hidden_panel(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    hide_right_panel_on_changes(&app, cx);
+    assert!(cx.debug_bounds("list-files").is_none());
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("browse workspace files");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.inspector_open));
+    assert!(cx.debug_bounds("list-files").is_some());
+    cx.simulate_input("src");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.file_path.read(cx).value().to_string()),
+        "src"
+    );
+}
+
+#[gpui_kit::test]
+fn opening_a_section_closes_the_previous_one_and_leaving_clone_unsubscribes(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    assert!(cx.debug_bounds("remove-project").is_some());
+    let clone = cx.debug_bounds("section-clone").unwrap();
+    cx.simulate_click(clone.center(), Default::default());
+    cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Subscribe { key, .. } if key == "project-clones")
+    );
+    assert!(cx.debug_bounds("remove-project").is_none());
+    assert!(cx.debug_bounds("clone-start").is_some());
+
+    let files = cx.debug_bounds("files").unwrap();
+    cx.simulate_click(files.center(), Default::default());
+    cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(key) if key == "project-clones")
+    );
+    assert!(cx.debug_bounds("clone-start").is_none());
+    assert!(cx.debug_bounds("list-files").is_some());
+
+    let clone = cx.debug_bounds("section-clone").unwrap();
+    cx.simulate_click(clone.center(), Default::default());
+    cx.run_until_parked();
+    assert!(matches!(
+        requests.try_recv().unwrap(),
+        connection::Command::Subscribe { .. }
+    ));
+    let clone = cx.debug_bounds("section-clone").unwrap();
+    cx.simulate_click(clone.center(), Default::default());
+    cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(key) if key == "project-clones")
+    );
+    assert_eq!(app.read_with(cx, |app, _| app.inspector_section), None);
 }

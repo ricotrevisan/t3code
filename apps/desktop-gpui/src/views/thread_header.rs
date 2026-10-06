@@ -147,9 +147,8 @@ impl NativeApp {
                             .ghost()
                             .small()
                             .tooltip("Edit project actions and setup scripts")
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.project_actions_open = true;
-                                app.project_actions(None, cx);
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.execute_command(palette::Command::ProjectActions, window, cx)
                             })),
                     )
                     .child(

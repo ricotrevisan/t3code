@@ -84,6 +84,17 @@ enum RightTab {
     Agents,
 }
 
+/// The one open accordion section of the Inspector tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum InspectorSection {
+    Project,
+    Worktrees,
+    ProjectActions,
+    Clone,
+    Files,
+    Thread,
+}
+
 #[cfg(test)]
 mod ui_tests;
 mod theme;
@@ -152,7 +163,7 @@ struct NativeApp {
     right_tab: RightTab,
     available_editors: Vec<String>,
     saved_window: Option<window_state::WindowSize>,
-    project_actions_open: bool,
+    inspector_section: Option<InspectorSection>,
     project_settings: Option<Value>,
     action_name: Entity<InputState>,
     action_command: Entity<InputState>,
@@ -173,7 +184,6 @@ struct NativeApp {
     pending_history_attached: bool,
     new_thread_checkout: Option<(String, String, Option<String>)>,
     worktree_outcome: Option<Value>,
-    worktrees_open: bool,
     worktree_ref: Entity<InputState>,
     worktree_branch: Entity<InputState>,
     worktree_path: Entity<InputState>,
@@ -183,10 +193,8 @@ struct NativeApp {
     worktree_epoch: u64,
     worktree_busy: bool,
     confirm_worktree_removal: Option<String>,
-    clone_open: bool,
     clone_remote: Entity<InputState>,
     clone_progress: Vec<workspaces::CloneProgress>,
-    files_open: bool,
     file_path: Entity<InputState>,
     file_contents: Entity<TextareaState>,
     file_editor: files::Editor,
@@ -411,7 +419,7 @@ impl NativeApp {
             right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
             saved_window: None,
-            project_actions_open: false,
+            inspector_section: Some(InspectorSection::Project),
             project_settings: None,
             action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
             action_command: cx.new(|cx| {
@@ -434,7 +442,6 @@ impl NativeApp {
             pending_history_attached: false,
             new_thread_checkout: None,
             worktree_outcome: None,
-            worktrees_open: false,
             worktree_ref: cx
                 .new(|cx| single_line_input(window, cx).placeholder("Base or existing branch")),
             worktree_branch: cx
@@ -448,10 +455,8 @@ impl NativeApp {
             worktree_epoch: 0,
             worktree_busy: false,
             confirm_worktree_removal: None,
-            clone_open: false,
             clone_remote,
             clone_progress: Vec::new(),
-            files_open: false,
             file_path,
             file_contents,
             file_editor: files::Editor::default(),
@@ -618,54 +623,34 @@ impl NativeApp {
                 self.project_actions(Some(json!({"operation":"model-inherit"})), cx)
             }
             Command::ProjectActions => {
-                self.project_actions_open = true;
-                self.project_actions(None, cx);
+                self.reveal_inspector(InspectorSection::ProjectActions, window, cx)
             }
-            Command::Worktrees => {
-                self.worktrees_open = true;
-                self.worktree_operation("vcs.listRefs", false, cx);
-            }
-            Command::CloneProject => {
-                self.clone_open = true;
-                if let Some(sender) = &self.commands {
-                    let _ = sender.try_send(connection::Command::Subscribe {
-                        key: "project-clones".into(),
-                        tag: "subscribeProjectClones".into(),
-                        payload: json!({}),
-                    });
-                }
-                self.clone_remote
+            Command::Worktrees => self.reveal_inspector(InspectorSection::Worktrees, window, cx),
+            Command::CloneProject => self.reveal_inspector(InspectorSection::Clone, window, cx),
+            Command::Files => {
+                self.reveal_inspector(InspectorSection::Files, window, cx);
+                self.file_path
                     .update(cx, |input, cx| input.focus(window, cx));
-                cx.notify();
             }
-            Command::Files | Command::ContentSearch => {
-                self.files_open = true;
-                if command == Command::ContentSearch {
-                    self.content_query
-                        .update(cx, |input, cx| input.focus(window, cx));
-                } else {
-                    self.file_path
-                        .update(cx, |input, cx| input.focus(window, cx));
+            Command::ContentSearch => self.reveal_inspector(InspectorSection::Files, window, cx),
+            Command::AddProject => {
+                self.reveal_inspector(InspectorSection::Project, window, cx);
+                match commands::create_project(
+                    &self.title.read(cx).value(),
+                    &self.workspace.read(cx).value(),
+                ) {
+                    Ok(command) => self.dispatch(command, cx),
+                    Err(error) => {
+                        self.status = error.into();
+                        cx.notify();
+                    }
                 }
-                cx.notify();
             }
-            Command::AddProject => match commands::create_project(
-                &self.title.read(cx).value(),
-                &self.workspace.read(cx).value(),
-            ) {
-                Ok(command) => self.dispatch(command, cx),
-                Err(error) => {
-                    self.status = error.into();
-                    cx.notify();
-                }
-            },
             Command::RenameProject => self.update_project(false, cx),
             Command::RemoveProject => self.update_project(true, cx),
             Command::NewThread => self.new_thread(window, cx),
             Command::Search => self.search.update(cx, |input, cx| input.focus(window, cx)),
-            Command::CustomSnooze => self
-                .custom_snooze
-                .update(cx, |input, cx| input.focus(window, cx)),
+            Command::CustomSnooze => self.reveal_inspector(InspectorSection::Thread, window, cx),
             Command::Stash => self.stash_prompt(false, window, cx),
             Command::RestoreStash => self.stash_prompt(true, window, cx),
             Command::Connect => self.connect(cx),
@@ -674,9 +659,12 @@ impl NativeApp {
                 self.settings_open = true;
                 cx.notify();
             }
+            Command::Rename => {
+                self.reveal_inspector(InspectorSection::Project, window, cx);
+                self.lifecycle("thread.meta.update", cx);
+            }
             _ => self.lifecycle(
                 match command {
-                    Command::Rename => "thread.meta.update",
                     Command::Archive => "thread.archive",
                     Command::Unarchive => "thread.unarchive",
                     Command::Settle => "thread.settle",
@@ -1667,7 +1655,8 @@ impl NativeApp {
                                                     },
                                                 );
                                             }
-                                            if app.clone_open
+                                            if app.inspector_section
+                                                == Some(InspectorSection::Clone)
                                                 && let Some(sender) = &app.commands
                                             {
                                                 let _ = sender.try_send(
@@ -1705,7 +1694,10 @@ impl NativeApp {
                                                     Ok(())
                                                 }
                                             }
-                                        } else if key == "project-clones" && app.clone_open {
+                                        } else if key == "project-clones"
+                                            && app.inspector_section
+                                                == Some(InspectorSection::Clone)
+                                        {
                                             match item {
                                                 Ok(value) => workspaces::apply_clones(
                                                     &mut app.clone_progress,
@@ -2264,9 +2256,7 @@ impl NativeApp {
             if self.selected_thread.as_ref() != Some(&target) {
                 self.select_thread(&target, window, cx);
             }
-            self.inspector_open = true;
-            self.right_tab = RightTab::Inspector;
-            self.title.update(cx, |input, cx| input.focus(window, cx));
+            self.reveal_inspector(InspectorSection::Project, window, cx);
             self.status = "Edit the title, then choose Rename from More".into();
             cx.notify();
             return;
