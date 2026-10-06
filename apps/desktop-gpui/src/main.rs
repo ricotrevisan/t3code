@@ -86,6 +86,7 @@ struct NativeApp {
     connection_expanded: bool,
     settings_open: bool,
     activity_expanded: bool,
+    inspector_open: bool,
     available_editors: Vec<String>,
     saved_window: Option<window_state::WindowSize>,
     project_actions_open: bool,
@@ -332,6 +333,7 @@ impl NativeApp {
             connection_expanded: false,
             settings_open: false,
             activity_expanded: false,
+            inspector_open: true,
             available_editors: Vec::new(),
             saved_window: None,
             project_actions_open: false,
@@ -3479,6 +3481,22 @@ impl Render for NativeApp {
                                 app.project_actions(None, cx);
                             })),
                     )
+                    .child(
+                        Button::new("toggle-inspector")
+                            .debug_selector(|| "toggle-inspector".into())
+                            .label(if self.inspector_open {
+                                "Hide panel"
+                            } else {
+                                "Show panel"
+                            })
+                            .ghost()
+                            .small()
+                            .tooltip("Show or hide the project inspector")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.inspector_open = !app.inspector_open;
+                                cx.notify();
+                            })),
+                    )
                     .children(
                     [
                         ("rename", "Rename", "thread.meta.update"),
@@ -3667,6 +3685,23 @@ impl Render for NativeApp {
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
             .unwrap_or_else(|| self.environment_scope.clone());
+        let status_worktree = self
+            .selected_thread
+            .as_ref()
+            .and_then(|id| {
+                self.shell
+                    .threads
+                    .iter()
+                    .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                    .find(|thread| &thread.id == id)
+            })
+            .and_then(|thread| thread.worktree_path.as_deref())
+            .and_then(|path| {
+                path.trim_end_matches('/')
+                    .rsplit('/')
+                    .find(|segment| !segment.is_empty())
+            })
+            .map(str::to_owned);
         let status_bar = div()
             .id("status-bar")
             .flex()
@@ -3687,6 +3722,9 @@ impl Render for NativeApp {
                     .gap_3()
                     .min_w_0()
                     .child(environment_host)
+                    .when_some(status_worktree, |view, name| {
+                        view.child(div().truncate().child(format!("Worktree · {name}")))
+                    })
                     .when_some(header_branch, |view, branch| {
                         view.child(div().truncate().child(branch))
                     })
@@ -4194,6 +4232,7 @@ impl Render for NativeApp {
                             .child(
                                 div()
                                     .id("inspector")
+                                    .when(!self.inspector_open, |view| view.hidden())
                                     .flex()
                                     .flex_col()
                                     .gap_2()
