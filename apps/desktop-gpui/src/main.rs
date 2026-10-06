@@ -83,6 +83,7 @@ struct NativeApp {
     provider_catalog: Vec<providers::Provider>,
     catalog_open: bool,
     connection_expanded: bool,
+    settings_open: bool,
     project_actions_open: bool,
     project_settings: Option<Value>,
     action_name: Entity<InputState>,
@@ -316,6 +317,7 @@ impl NativeApp {
             provider_catalog: vec![],
             catalog_open: false,
             connection_expanded: false,
+            settings_open: false,
             project_actions_open: false,
             project_settings: None,
             action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
@@ -511,6 +513,10 @@ impl NativeApp {
             Command::RestoreStash => self.stash_prompt(true, window, cx),
             Command::Connect => self.connect(cx),
             Command::Disconnect => self.disconnect(cx),
+            Command::Settings => {
+                self.settings_open = true;
+                cx.notify();
+            }
             _ => self.lifecycle(
                 match command {
                     Command::Rename => "thread.meta.update",
@@ -3141,6 +3147,17 @@ impl Render for NativeApp {
                             .on_click(
                                 cx.listener(|app, _, window, cx| app.toggle_palette(window, cx)),
                             ),
+                    )
+                    .child(
+                        Button::new("settings-open")
+                            .debug_selector(|| "settings-open".into())
+                            .label("Settings")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.settings_open = true;
+                                cx.notify();
+                            })),
                     ),
             );
 
@@ -3397,6 +3414,143 @@ impl Render for NativeApp {
                         "Offline"
                     }),
             );
+
+        let section = |label: &'static str| {
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(muted_foreground)
+                .child(label)
+        };
+        let settings = self.settings_open.then(|| {
+            div()
+                .id("settings")
+                .key_context("NativeSettings")
+                .absolute()
+                .top(px(72.))
+                .left(px(320.))
+                .w(px(640.))
+                .max_h(px(620.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .p_4()
+                .rounded_lg()
+                .bg(popover)
+                .border_1()
+                .border_color(border)
+                .shadow_lg()
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Settings"),
+                        )
+                        .child(
+                            Button::new("settings-close")
+                                .debug_selector(|| "settings-close".into())
+                                .label("Close")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|app, _, _, cx| {
+                                    app.settings_open = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(section("CONNECTION"))
+                        .child(Input::new(&self.server))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    Button::new("settings-pair")
+                                        .label("Pair and connect")
+                                        .primary()
+                                        .on_click(cx.listener(|app, _, window, cx| app.pair(window, cx))),
+                                )
+                                .child(
+                                    Button::new("settings-connect")
+                                        .label("Connect / retry")
+                                        .secondary()
+                                        .on_click(cx.listener(|app, _, _, cx| app.connect(cx))),
+                                )
+                                .child(
+                                    Button::new("settings-disconnect")
+                                        .label("Disconnect")
+                                        .ghost()
+                                        .on_click(cx.listener(|app, _, _, cx| app.disconnect(cx))),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(section("APPEARANCE"))
+                        .child(div().text_sm().child("One Dark (Zed)"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child("The native client ships Zed's One Dark palette with semantic tokens."),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(section("KEYBINDINGS"))
+                        .children(
+                            [
+                                ("⌘K", "Command palette"),
+                                ("⌘N", "New thread"),
+                                ("⌘S", "Stash prompt"),
+                                ("⌘⇧F", "Search workspace contents"),
+                                ("⌘⇧S", "Toggle settlement"),
+                                ("⌘⇧P", "Toggle pin"),
+                            ]
+                            .into_iter()
+                            .map(|(keys, label)| {
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .text_sm()
+                                    .child(label)
+                                    .child(div().text_color(muted_foreground).child(keys))
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(section("ABOUT"))
+                        .child(div().text_sm().child("T3 Code — desktop GPUI client"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child("Experimental native slice; feature parity is still being evaluated."),
+                        ),
+                )
+        });
 
         div()
             .relative()
@@ -3951,6 +4105,7 @@ impl Render for NativeApp {
                     ),
             )
             .children(palette)
+            .children(settings)
     }
 }
 

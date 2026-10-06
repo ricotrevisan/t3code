@@ -31,6 +31,7 @@ pub enum Command {
     Stop,
     Connect,
     Disconnect,
+    Settings,
 }
 
 pub struct Entry {
@@ -187,6 +188,11 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         command: Command::Disconnect,
         label: "Disconnect",
+        needs_thread: false,
+    },
+    Entry {
+        command: Command::Settings,
+        label: "Open settings",
         needs_thread: false,
     },
 ];

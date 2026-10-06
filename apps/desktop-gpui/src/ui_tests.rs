@@ -99,6 +99,22 @@ fn runtime_and_interaction_mode_chips_dispatch_the_toggled_command(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn settings_surface_opens_and_closes(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let bounds = cx
+        .debug_bounds("settings-open")
+        .expect("title bar settings button");
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(app.read_with(cx, |app, _| app.settings_open));
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("settings-close")
+        .expect("settings close button");
+    cx.simulate_click(bounds.center(), Default::default());
+    assert!(!app.read_with(cx, |app, _| app.settings_open));
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");
