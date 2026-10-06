@@ -239,6 +239,21 @@ fn right_panel_tabs_switch_tools(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn sidebar_projects_collapse_and_expand(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let toggle = cx
+        .debug_bounds("project-toggle-p")
+        .expect("project toggle is visible");
+    cx.simulate_click(toggle.center(), Default::default());
+    assert!(app.read_with(cx, |app, _| app
+        .collapsed_projects
+        .contains(&"p".to_owned())));
+    let toggle = cx.debug_bounds("project-toggle-p").unwrap();
+    cx.simulate_click(toggle.center(), Default::default());
+    assert!(app.read_with(cx, |app, _| app.collapsed_projects.is_empty()));
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");

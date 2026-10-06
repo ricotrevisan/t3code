@@ -108,6 +108,7 @@ struct NativeApp {
     activity_expanded: bool,
     inspector_open: bool,
     thread_menu_open: bool,
+    collapsed_projects: Vec<String>,
     right_tab: RightTab,
     available_editors: Vec<String>,
     saved_window: Option<window_state::WindowSize>,
@@ -360,6 +361,7 @@ impl NativeApp {
             activity_expanded: false,
             inspector_open: true,
             thread_menu_open: false,
+            collapsed_projects: Vec::new(),
             right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
             saved_window: None,
@@ -2695,7 +2697,29 @@ impl Render for NativeApp {
                 .next()
                 .map(|letter| letter.to_uppercase().to_string())
                 .unwrap_or_default();
+            let collapsed = self.collapsed_projects.contains(&project_id);
             let mut group = div().flex().flex_col().gap_1().child(
+                div().flex().items_center().gap_1()
+                    .child(
+                        Button::new(gpui_kit::SharedString::from(format!("project-toggle-{project_id}")))
+                            .debug_selector({ let id = project_id.clone(); move || format!("project-toggle-{id}") })
+                            .label(if collapsed { "▸" } else { "▾" })
+                            .ghost()
+                            .small()
+                            .tooltip(if collapsed { "Expand project" } else { "Collapse project" })
+                            .on_click(cx.listener({
+                                let id = project_id.clone();
+                                move |app, _, _, cx| {
+                                    if let Some(index) = app.collapsed_projects.iter().position(|p| p == &id) {
+                                        app.collapsed_projects.remove(index);
+                                    } else {
+                                        app.collapsed_projects.push(id.clone());
+                                    }
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(
                 Button::new(gpui_kit::SharedString::from(format!("project-{project_id}")))
                     .ghost()
                     .selected(project_selected)
@@ -2818,7 +2842,9 @@ impl Render for NativeApp {
                         });
                         cx.notify();
                     })),
+                    ),
             );
+            if !collapsed {
             for draft in self.pending_threads.iter().filter(|draft| {
                 draft.thread.project_id == project.id
                     && !self
@@ -2928,6 +2954,7 @@ impl Render for NativeApp {
                             app.select_thread(&id, window, cx)
                         })),
                 ));
+            }
             }
             projects.push(group);
         }
