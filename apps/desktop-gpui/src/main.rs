@@ -3467,6 +3467,18 @@ impl Render for NativeApp {
                             .tooltip("Open the worktree in an editor")
                             .on_click(cx.listener(|app, _, _, cx| app.open_in_editor(cx))),
                     )
+                    .child(
+                        Button::new("project-actions-header")
+                            .debug_selector(|| "project-actions-header".into())
+                            .label("Actions")
+                            .ghost()
+                            .small()
+                            .tooltip("Edit project actions and setup scripts")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.project_actions_open = true;
+                                app.project_actions(None, cx);
+                            })),
+                    )
                     .children(
                     [
                         ("rename", "Rename", "thread.meta.update"),
@@ -3617,6 +3629,7 @@ impl Render for NativeApp {
                             .debug_selector(|| "send".into())
                             .label("Send")
                             .primary()
+                            .loading(self.pending_actions > 0)
                             .disabled(self.composer.read(cx).value().trim().is_empty())
                             .tooltip("Send the prompt (⌘↩)")
                             .on_click(cx.listener(|app, _, window, cx| app.send_prompt(window, cx))),
