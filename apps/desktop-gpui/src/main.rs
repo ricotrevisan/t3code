@@ -2587,6 +2587,67 @@ impl NativeApp {
         self.dispatch(payload, cx);
     }
 
+    /// Commit, push, and open a pull request for the selected thread. Streams the
+    /// server's progress events and reports the final phase.
+    fn push_and_create_pr(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_thread.clone() else {
+            self.status = "Select a thread first".into();
+            cx.notify();
+            return;
+        };
+        let cwd = self
+            .shell
+            .threads
+            .iter()
+            .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+            .find(|thread| thread.id == id)
+            .and_then(|thread| thread.worktree_path.clone())
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| self.workspace.read(cx).value().to_string());
+        if cwd.trim().is_empty() {
+            self.status = "Select a project or open a worktree first".into();
+            cx.notify();
+            return;
+        }
+        let Some(sender) = self.commands.clone() else {
+            self.status = "Not connected".into();
+            cx.notify();
+            return;
+        };
+        self.pending_actions += 1;
+        self.status = "Running git action\u{2026}".into();
+        cx.notify();
+        cx.spawn(async move |entity, cx| {
+            let result = connection::call_stream(
+                &sender,
+                "git.runStackedAction",
+                json!({
+                    "actionId": uuid::Uuid::new_v4().to_string(),
+                    "cwd": cwd,
+                    "action": "commit_push_pr",
+                    "featureBranch": true,
+                    "threadId": id,
+                }),
+            )
+            .await;
+            let _ = entity.update(cx, |app, cx| {
+                app.pending_actions = app.pending_actions.saturating_sub(1);
+                match result {
+                    Ok(events) => {
+                        app.status = events
+                            .last()
+                            .and_then(|event| event["phase"].as_str())
+                            .map(|phase| format!("Git action finished ({phase})"))
+                            .unwrap_or_else(|| "Git action finished".into());
+                    }
+                    Err(error) => app.status = error,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Open the selected thread's worktree (or the project root) in the first
     /// available editor, preferring Zed to match the app's design language.
     fn open_in_editor(&mut self, cx: &mut Context<Self>) {
@@ -3599,6 +3660,15 @@ impl Render for NativeApp {
                                 app.project_actions_open = true;
                                 app.project_actions(None, cx);
                             })),
+                    )
+                    .child(
+                        Button::new("push-pr")
+                            .debug_selector(|| "push-pr".into())
+                            .label("Push & create PR")
+                            .secondary()
+                            .small()
+                            .tooltip("Commit, push, and open a pull request")
+                            .on_click(cx.listener(|app, _, _, cx| app.push_and_create_pr(cx))),
                     )
                     .child(
                         Button::new("toggle-inspector")

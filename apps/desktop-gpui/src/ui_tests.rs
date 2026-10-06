@@ -299,6 +299,29 @@ fn pending_approval_renders_and_responds(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn push_and_create_pr_streams_the_stacked_action(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.workspace
+                .update(cx, |input, cx| input.set_value("/tmp/fixture", window, cx));
+        })
+    });
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("push-pr")
+        .expect("push-pr button is visible");
+    cx.simulate_click(bounds.center(), Default::default());
+    cx.run_until_parked();
+    let connection::Command::CallStream { tag, payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a streamed git action");
+    };
+    assert_eq!(tag, "git.runStackedAction");
+    assert_eq!(payload["action"], "commit_push_pr");
+    assert_eq!(payload["cwd"], "/tmp/fixture");
+}
+
+#[gpui_kit::test]
 fn palette_archive_emits_same_command_and_escape_restores_composer_focus(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_keystrokes("cmd-k");

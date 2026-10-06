@@ -40,6 +40,11 @@ pub enum Command {
         payload: Value,
         reply: async_channel::Sender<Result<Value, String>>,
     },
+    CallStream {
+        tag: String,
+        payload: Value,
+        reply: async_channel::Sender<Result<Vec<Value>, String>>,
+    },
 }
 
 pub struct Session {
@@ -61,6 +66,27 @@ pub async fn call(
     let (reply, receiver) = async_channel::bounded(1);
     commands
         .send(Command::Call {
+            tag: tag.into(),
+            payload,
+            reply,
+        })
+        .await
+        .map_err(|_| "Not connected")?;
+    receiver
+        .recv()
+        .await
+        .map_err(|_| "Connection lost before receipt; RPC outcome is unknown".to_owned())?
+}
+
+/// Run a streaming RPC and collect every emitted value until the stream exits.
+pub async fn call_stream(
+    commands: &async_channel::Sender<Command>,
+    tag: &str,
+    payload: Value,
+) -> Result<Vec<Value>, String> {
+    let (reply, receiver) = async_channel::bounded(1);
+    commands
+        .send(Command::CallStream {
             tag: tag.into(),
             payload,
             reply,
@@ -264,6 +290,13 @@ async fn reject_disconnected(
                 ))
                 .await;
         }
+        Command::CallStream { reply, .. } => {
+            let _ = reply
+                .send(Err(
+                    "Disconnected; request was not sent. Retry after synchronization.".into(),
+                ))
+                .await;
+        }
     }
 }
 
@@ -412,6 +445,7 @@ enum Pending {
     Thread(String),
     Subscription(String),
     Call(async_channel::Sender<Result<Value, String>>),
+    CallStream(async_channel::Sender<Result<Vec<Value>, String>>, Vec<Value>),
 }
 
 #[cfg(test)]
@@ -536,6 +570,15 @@ where
                         pending.insert(id, Pending::Call(reply));
                         next_id += 1;
                     }
+                    Command::CallStream { tag, payload, reply } => {
+                        if !synchronized {
+                            let _=reply.send(Err("History is not synchronized; request was not sent".into())).await;
+                            continue;
+                        }
+                        send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
+                        pending.insert(id, Pending::CallStream(reply, Vec::new()));
+                        next_id += 1;
+                    }
                 }
             }
             _ = heartbeat.tick() => {
@@ -557,19 +600,19 @@ where
                         ServerMessage::Pong => pong_received = true,
                         ServerMessage::Chunk { request_id, values } => {
                             if values.is_empty() { return Err("Empty RPC stream chunk"); }
-                            if let Some(kind) = pending.get(&request_id) {
+                            if let Some(kind) = pending.get_mut(&request_id) {
                                 for value in values {
-                                    let update = match kind {
+                                    match kind {
                                         Pending::Shell => {
                                             let item:ShellItem=serde_json::from_value(value).map_err(|_| "Unsupported shell stream event")?;
                                             if matches!(item,ShellItem::Synchronized) { synchronized=true; *reached_sync=true; }
-                                            Update::Shell(Box::new(item))
+                                            sender.send(Update::Shell(Box::new(item))).await.map_err(|_| "Client closed")?;
                                         },
-                                        Pending::Thread(thread_id) => Update::Thread { thread_id: thread_id.clone(), item: value },
-                                        Pending::Subscription(key) => Update::Subscription { key:key.clone(),item:Ok(value) },
+                                        Pending::Thread(thread_id) => { sender.send(Update::Thread { thread_id: thread_id.clone(), item: value }).await.map_err(|_| "Client closed")?; },
+                                        Pending::Subscription(key) => { sender.send(Update::Subscription { key:key.clone(),item:Ok(value) }).await.map_err(|_| "Client closed")?; },
                                         Pending::Call(_) => return Err("Unary RPC returned a stream chunk"),
-                                    };
-                                    sender.send(update).await.map_err(|_| "Client closed")?;
+                                        Pending::CallStream(_, collected) => collected.push(value),
+                                    }
                                 }
                             } else if !cancelled.contains(&request_id) { return Err("Unexpected RPC request ID"); }
                             // Acknowledge only once the bounded consumer has accepted the full chunk.
@@ -581,6 +624,10 @@ where
                             match kind {
                                 Pending::Call(reply) => {
                                     let result = match exit { RpcExit::Success { value } => Ok(value), RpcExit::Failure { cause } => Err(rpc_failure(&cause)) };
+                                    let _ = reply.send(result).await;
+                                }
+                                Pending::CallStream(reply, collected) => {
+                                    let result = match exit { RpcExit::Success { .. } => Ok(collected), RpcExit::Failure { cause } => Err(rpc_failure(&cause)) };
                                     let _ = reply.send(result).await;
                                 }
                                 Pending::Subscription(key) => {
