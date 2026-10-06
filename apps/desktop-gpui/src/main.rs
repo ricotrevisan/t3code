@@ -85,6 +85,7 @@ struct NativeApp {
     catalog_open: bool,
     connection_expanded: bool,
     settings_open: bool,
+    activity_expanded: bool,
     project_actions_open: bool,
     project_settings: Option<Value>,
     action_name: Entity<InputState>,
@@ -320,6 +321,7 @@ impl NativeApp {
             catalog_open: false,
             connection_expanded: false,
             settings_open: false,
+            activity_expanded: false,
             project_actions_open: false,
             project_settings: None,
             action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
@@ -2941,26 +2943,45 @@ impl Render for NativeApp {
                     .filter(|activity| activity["kind"] != "worktree-setup")
                     .collect();
                 if !visible.is_empty() {
-                    let mut log = div().flex().flex_col().gap_1().pt_1();
-                    for activity in visible {
-                        let color = match activity["tone"].as_str().unwrap_or("info") {
-                            "error" => danger,
-                            "approval" => warning,
-                            "tool" => muted_foreground,
-                            _ => blue,
-                        };
-                        log = log.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color))
-                                .child(activity["summary"].as_str().unwrap_or("").to_owned()),
-                        );
-                    }
-                    conversation = conversation.child(log);
+                    conversation = conversation.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                Button::new("activity-toggle")
+                                    .debug_selector(|| "activity-toggle".into())
+                                    .ghost()
+                                    .small()
+                                    .label(format!("{} activity steps", visible.len()))
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.activity_expanded = !app.activity_expanded;
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(self.activity_expanded, |view| {
+                                let mut log = div().flex().flex_col().gap_1();
+                                for activity in visible {
+                                    let color = match activity["tone"].as_str().unwrap_or("info") {
+                                        "error" => danger,
+                                        "approval" => warning,
+                                        "tool" => muted_foreground,
+                                        _ => blue,
+                                    };
+                                    log = log.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .text_xs()
+                                            .text_color(muted_foreground)
+                                            .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color))
+                                            .child(activity["summary"].as_str().unwrap_or("").to_owned()),
+                                    );
+                                }
+                                view.child(log)
+                            }),
+                    );
                 }
             }
 
