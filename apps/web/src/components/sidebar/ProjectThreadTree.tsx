@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import {
   DndContext,
   DragOverlay,
-  KeyboardSensor,
   MeasuringStrategy,
   PointerSensor,
   closestCenter,
@@ -13,12 +12,7 @@ import {
   useSensors,
   type DragEndEvent,
 } from "@dnd-kit/core";
-import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
@@ -69,6 +63,7 @@ function ProjectBranch({
   group,
   expanded,
   dropPosition,
+  onKeyboardMove,
   onToggle,
   onNewThread,
   onSettings,
@@ -78,6 +73,7 @@ function ProjectBranch({
   group: ProjectGroup;
   expanded: boolean;
   dropPosition: "before" | "after" | null;
+  onKeyboardMove: (direction: -1 | 1) => void;
   onToggle: () => void;
   onNewThread: TreeProps["onNewThread"];
   onSettings: TreeProps["onSettings"];
@@ -141,6 +137,15 @@ function ProjectBranch({
                   variant="ghost-muted"
                   size="icon-xs"
                   aria-label={`Reorder ${project.displayName}`}
+                  aria-describedby={undefined}
+                  aria-description="Use ArrowUp and ArrowDown to move this project."
+                  aria-keyshortcuts="ArrowUp ArrowDown"
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onKeyboardMove(event.key === "ArrowUp" ? -1 : 1);
+                  }}
                   onPointerDown={(event) => {
                     onPointerDown();
                     listeners?.onPointerDown?.(event);
@@ -150,7 +155,7 @@ function ProjectBranch({
                 </Button>
               }
             />
-            <TooltipPopup>Drag to reorder, or press Space and use arrow keys</TooltipPopup>
+            <TooltipPopup>Drag to reorder, or use the up/down arrow keys</TooltipPopup>
           </Tooltip>
         </span>
         <button
@@ -275,23 +280,23 @@ export function ProjectThreadTree(props: TreeProps) {
   const draggedGroup = dragState
     ? props.groups.find((group) => group.key === dragState.activeKey)
     : null;
+  const [keyboardAnnouncement, setKeyboardAnnouncement] = useState("");
   const groupKeys = props.groups.map((group) => group.key);
   const dropIndicator = dragState
     ? resolveProjectDropIndicator(groupKeys, dragState.activeKey, dragState.overKey)
     : null;
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
   const allCollapsed =
     props.groups.length > 0 && props.groups.every((group) => props.collapsed.has(group.key));
-  function onDragEnd({ active, over, activatorEvent }: DragEndEvent) {
+  function onDragEnd({ active, over }: DragEndEvent) {
     setDragState(null);
-    if (activatorEvent.type === "keydown") suppressClick.current = false;
     if (over && active.id !== over.id) props.onReorder(String(active.id), String(over.id));
   }
   return (
     <li className="list-none px-2">
+      <span role="status" className="sr-only">
+        {keyboardAnnouncement}
+      </span>
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-medium text-sidebar-muted-foreground">Projects</span>
         <Button
@@ -311,10 +316,13 @@ export function ProjectThreadTree(props: TreeProps) {
         onDragStart={({ active }) => {
           suppressClick.current = true;
           const header = active.data.current?.headerRef?.current;
-          // Capture viewport coordinates BEFORE collapsing branches. The overlay
-          // must retain the grab point even when preceding projects shrink or scroll.
+          // Capture the pointer's viewport grab point before branches collapse.
           const headerRect = header instanceof HTMLElement ? header.getBoundingClientRect() : null;
-          setDragState({ activeKey: String(active.id), overKey: null, headerRect });
+          setDragState({
+            activeKey: String(active.id),
+            overKey: null,
+            headerRect,
+          });
         }}
         onDragOver={({ over }) => {
           const overKey = over ? String(over.id) : null;
@@ -337,6 +345,15 @@ export function ProjectThreadTree(props: TreeProps) {
                 // Dragging temporarily hides every branch without changing saved collapse state.
                 expanded={dragState === null && !props.collapsed.has(group.key)}
                 dropPosition={dropIndicator?.key === group.key ? dropIndicator.position : null}
+                onKeyboardMove={(direction) => {
+                  const index = groupKeys.indexOf(group.key);
+                  const target = props.groups[index + direction];
+                  if (!target) return;
+                  props.onReorder(group.key, target.key);
+                  setKeyboardAnnouncement(
+                    `Moved ${group.project.displayName} ${direction === -1 ? "before" : "after"} ${target.project.displayName}.`,
+                  );
+                }}
                 onToggle={() => {
                   if (dragState !== null) return;
                   if (suppressClick.current) {

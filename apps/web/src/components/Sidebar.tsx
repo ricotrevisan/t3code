@@ -4662,7 +4662,12 @@ export default function Sidebar() {
       if (isMobile) setOpenMobile(false);
       void (async () => {
         const result = await settlePromise(() =>
-          handleNewThread(scopeProjectRef(member.environmentId, member.id)),
+          handleNewThread(
+            scopeProjectRef(member.environmentId, member.id),
+            group && group.memberProjects.length > 1
+              ? { environmentSelection: "manual" }
+              : undefined,
+          ),
         );
         if (result._tag === "Failure") {
           const error = squashAtomCommandFailure(result);

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useState } from "react";
+import { arrayMove } from "@dnd-kit/sortable";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
@@ -53,6 +54,32 @@ class TestPointerEvent extends MouseEvent {
 let root: Root;
 let container: HTMLDivElement;
 
+function TreeHarness() {
+  const [orderedGroups, setOrderedGroups] = useState(groups);
+  return (
+    <ul>
+      <ProjectThreadTree
+        groups={orderedGroups}
+        collapsed={new Set(["project:Middle"])}
+        onToggle={() => {}}
+        onToggleAll={() => {}}
+        onReorder={(active, over) =>
+          setOrderedGroups((current) =>
+            arrayMove(
+              current,
+              current.findIndex((group) => group.key === active),
+              current.findIndex((group) => group.key === over),
+            ),
+          )
+        }
+        onNewThread={() => {}}
+        onSettings={() => {}}
+        renderThreads={(group) => <li>Content for {group.project.displayName}</li>}
+      />
+    </ul>
+  );
+}
+
 // jsdom has no layout. Model branches as 36px headers + 160px expanded content,
 // with real DOM expansion deciding their geometry. Fixed overlays honor their CSS
 // position/translation so we can detect cursor drift after preceding branches shrink.
@@ -66,6 +93,7 @@ function bounds(element: HTMLElement) {
       36,
     );
   }
+  if (element.parentElement?.style.position === "fixed") return bounds(element.parentElement);
   const branch = element.closest("li.group\\/project-branch");
   if (!branch) return new DOMRect(20, 100, 240, 600);
   let top = 100;
@@ -96,23 +124,43 @@ beforeEach(async () => {
     return bounds(this);
   });
   root = createRoot(container);
-  await act(() =>
-    root.render(
-      <ul>
-        <ProjectThreadTree
-          groups={groups}
-          collapsed={new Set(["project:Middle"])}
-          onToggle={() => {}}
-          onToggleAll={() => {}}
-          onReorder={() => {}}
-          onNewThread={() => {}}
-          onSettings={() => {}}
-          renderThreads={(group) => <li>Content for {group.project.displayName}</li>}
-        />
-      </ul>,
-    ),
-  );
+  await act(() => root.render(<TreeHarness />));
 });
+
+async function keyboardDrag(direction: "ArrowUp" | "ArrowDown" | null, name = "Middle") {
+  const handle = container.querySelector(`button[aria-label="Reorder ${name}"]`);
+  if (!(handle instanceof HTMLButtonElement)) throw new Error("Missing reorder handle");
+  await act(() => handle.focus());
+  if (direction)
+    await act(() =>
+      handle.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, code: direction, key: direction }),
+      ),
+    );
+  expect(document.activeElement).toBe(handle);
+  return [...container.querySelectorAll("li.group\\/project-branch button[aria-expanded]")].map(
+    (header) => header.textContent,
+  );
+}
+
+it.each(["First", "Middle", "Last"])(
+  "does not move focused %s until an arrow key is pressed",
+  async (name) => {
+    expect(await keyboardDrag(null, name)).toEqual(["First", "Middle", "Last"]);
+  },
+);
+
+it.each([
+  ["Middle", "ArrowUp", ["Middle", "First", "Last"]],
+  ["Middle", "ArrowDown", ["First", "Last", "Middle"]],
+  ["First", "ArrowDown", ["Middle", "First", "Last"]],
+  ["Last", "ArrowUp", ["First", "Last", "Middle"]],
+] as const)(
+  "moves focused %s exactly one position with %s among mixed expanded branches",
+  async (name, direction, expected) => {
+    expect(await keyboardDrag(direction, name)).toEqual(expected);
+  },
+);
 
 afterEach(async () => {
   await act(() => root.unmount());
