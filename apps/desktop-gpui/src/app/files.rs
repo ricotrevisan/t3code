@@ -319,24 +319,29 @@ impl NativeApp {
     /// Open the selected thread's worktree (or the project root) in the first
     /// available editor, preferring Zed to match the app's design language.
     pub(crate) fn open_in_editor(&mut self, cx: &mut Context<Self>) {
-        let cwd = self
-            .selected_thread
-            .as_ref()
-            .and_then(|id| {
-                self.shell
-                    .threads
-                    .iter()
-                    .chain(self.pending_threads.iter().map(|draft| &draft.thread))
-                    .find(|thread| &thread.id == id)
-            })
-            .and_then(|thread| thread.worktree_path.clone())
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| self.workspace.read(cx).value().to_string());
-        if cwd.trim().is_empty() {
-            self.set_status("Select a project or open a worktree first", cx);
+        if self.selected_thread.as_ref().is_some_and(|id| {
+            !self
+                .shell
+                .threads
+                .iter()
+                .chain(self.archived_shell.threads.iter())
+                .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                .any(|thread| {
+                    &thread.id == id && Some(&thread.project_id) == self.selected_project.as_ref()
+                })
+        }) {
+            self.set_status("Select a valid thread first", cx);
             cx.notify();
             return;
         }
+        let Some(cwd) = self
+            .selected_workspace()
+            .filter(|path| !path.trim().is_empty())
+        else {
+            self.set_status("Select a project or open a worktree first", cx);
+            cx.notify();
+            return;
+        };
         let editor = self
             .available_editors
             .iter()

@@ -357,20 +357,28 @@ impl NativeApp {
             cx.notify();
             return;
         };
-        let cwd = self
+        if !self
             .shell
             .threads
             .iter()
+            .chain(self.archived_shell.threads.iter())
             .chain(self.pending_threads.iter().map(|draft| &draft.thread))
-            .find(|thread| thread.id == id)
-            .and_then(|thread| thread.worktree_path.clone())
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| self.workspace.read(cx).value().to_string());
-        if cwd.trim().is_empty() {
-            self.set_status("Select a project or open a worktree first", cx);
+            .any(|thread| {
+                thread.id == id && Some(&thread.project_id) == self.selected_project.as_ref()
+            })
+        {
+            self.set_status("Select a valid thread first", cx);
             cx.notify();
             return;
         }
+        let Some(cwd) = self
+            .selected_workspace()
+            .filter(|path| !path.trim().is_empty())
+        else {
+            self.set_status("Select a project or open a worktree first", cx);
+            cx.notify();
+            return;
+        };
         let Some(sender) = self.commands.clone() else {
             self.set_status("Not connected", cx);
             cx.notify();

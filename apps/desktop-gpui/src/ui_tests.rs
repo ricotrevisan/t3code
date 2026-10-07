@@ -1,4 +1,6 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
+mod workspace_context;
+
 use super::*;
 use gpui_kit::component::Root;
 use gpui_kit::{AppContext, MouseButton, TestAppContext, VisualTestContext, point};
