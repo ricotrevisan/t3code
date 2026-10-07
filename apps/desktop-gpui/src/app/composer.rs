@@ -151,6 +151,8 @@ impl NativeApp {
             if let Some(text) = text {
                 self.composer
                     .update(cx, |input, cx| input.set_value(text, window, cx));
+            } else {
+                self.set_status("Nothing stashed yet", cx);
             }
         } else {
             if text.trim().is_empty() {

@@ -45,6 +45,32 @@ fn harness(
     (app, cx, requests)
 }
 
+#[test]
+fn native_asset_bundle_loads_the_composer_controls() {
+    use gpui_kit::{AssetSource as _, assets::IconName};
+
+    for icon in [
+        IconName::Paperclip,
+        IconName::ShieldOff,
+        IconName::ShieldCheck,
+        IconName::ListTodo,
+        IconName::MessageSquare,
+        IconName::Bot,
+        IconName::Ellipsis,
+        IconName::Bookmark,
+        IconName::Undo2,
+        IconName::Send,
+        IconName::Square,
+    ] {
+        let path = icon.path();
+        let bytes = NATIVE_ASSETS
+            .load(&path)
+            .unwrap_or_else(|error| panic!("visible control asset {path}: {error}"))
+            .unwrap_or_else(|| panic!("missing visible control asset {path}"));
+        assert!(!bytes.is_empty(), "empty visible control asset {path}");
+    }
+}
+
 #[gpui_kit::test]
 fn zed_one_dark_is_the_installed_theme(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -1382,6 +1408,10 @@ fn clipboard_roundtrip_preserves_multiline_unicode(cx: &mut TestAppContext) {
 fn stashing_and_restoring_preserves_prompt_without_overwriting_edits(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     cx.simulate_input("Saved prompt");
+    assert!(cx.debug_bounds("stash").is_none());
+    assert!(cx.debug_bounds("restore-stash").is_none());
+    let more = cx.debug_bounds("composer-more").unwrap();
+    cx.simulate_click(more.center(), Default::default());
     let stash = cx.debug_bounds("stash").unwrap();
     cx.simulate_click(stash.center(), Default::default());
     assert_eq!(
@@ -1393,7 +1423,9 @@ fn stashing_and_restoring_preserves_prompt_without_overwriting_edits(cx: &mut Te
             app.composer.update(cx, |input, cx| input.focus(window, cx))
         })
     });
+    assert!(cx.debug_bounds("stash").is_none(), "action dismisses the menu");
     cx.simulate_input("Keep this edit");
+    cx.simulate_click(more.center(), Default::default());
     let restore = cx.debug_bounds("restore-stash").unwrap();
     cx.simulate_click(restore.center(), Default::default());
     assert_eq!(
@@ -1406,11 +1438,122 @@ fn stashing_and_restoring_preserves_prompt_without_overwriting_edits(cx: &mut Te
                 .update(cx, |input, cx| input.set_value("", window, cx))
         })
     });
+    // Reopen to refresh availability after the draft changed.
+    cx.simulate_keystrokes("escape");
+    cx.simulate_click(more.center(), Default::default());
+    let restore = cx.debug_bounds("restore-stash").unwrap();
     cx.simulate_click(restore.center(), Default::default());
     assert_eq!(
         app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
         "Saved prompt"
     );
+    assert!(cx.debug_bounds("restore-stash").is_none());
+}
+
+#[gpui_kit::test]
+fn composer_more_dismisses_without_changing_the_draft(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_input("Keep my draft");
+    let more = cx.debug_bounds("composer-more").unwrap();
+    cx.simulate_click(more.center(), Default::default());
+    assert!(cx.debug_bounds("stash").is_some());
+    cx.simulate_keystrokes("escape");
+    assert!(cx.debug_bounds("stash").is_none());
+    cx.simulate_click(more.center(), Default::default());
+    assert!(cx.debug_bounds("stash").is_some());
+    cx.simulate_click(point(px(640.), px(300.)), Default::default());
+    assert!(cx.debug_bounds("stash").is_none());
+    assert_eq!(app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()), "Keep my draft");
+    assert!(requests.try_recv().is_err());
+}
+
+#[gpui_kit::test]
+fn composer_more_unavailable_operations_do_not_change_the_draft(cx: &mut TestAppContext) {
+    let (app, cx, _) = harness(cx);
+    let more = cx.debug_bounds("composer-more").unwrap();
+    cx.simulate_click(more.center(), Default::default());
+    for selector in ["stash", "restore-stash"] {
+        let bounds = cx.debug_bounds(selector).unwrap();
+        cx.simulate_click(bounds.center(), Default::default());
+        assert!(app.read_with(cx, |app, _| app.stash_memory.is_empty()));
+        assert!(app.read_with(cx, |app, cx| app.composer.read(cx).value().is_empty()));
+    }
+}
+
+#[gpui_kit::test]
+fn composer_more_restores_saved_prompts_and_reports_an_empty_saved_stash(cx: &mut TestAppContext) {
+    let (app, cx, _) = harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = drafts::Drafts::open(directory.path().join("drafts.json")).unwrap();
+    let scope = app.read_with(cx, |app, _| app.environment_scope.clone());
+    store.stash(&scope, "Saved in this environment".into());
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.draft_store = Some(store);
+        cx.notify();
+    }));
+    let more = cx.debug_bounds("composer-more").unwrap();
+    cx.simulate_click(more.center(), Default::default());
+    let restore = cx.debug_bounds("restore-stash").unwrap();
+    cx.simulate_click(restore.center(), Default::default());
+    assert_eq!(app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()), "Saved in this environment");
+    cx.update(|window, cx| app.update(cx, |app, cx| {
+        app.composer.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }));
+    cx.simulate_click(more.center(), Default::default());
+    let restore = cx.debug_bounds("restore-stash").unwrap();
+    cx.simulate_click(restore.center(), Default::default());
+    assert_eq!(app.read_with(cx, |app, _| app.status.clone()), "Nothing stashed yet");
+    assert!(app.read_with(cx, |app, cx| app.composer.read(cx).value().is_empty()));
+}
+
+#[gpui_kit::test]
+fn narrow_composer_keeps_model_more_and_send_usable_on_one_row(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.sidebar_open = false;
+        app.inspector_open = false;
+        cx.notify();
+    }));
+    cx.simulate_resize(size(px(480.), px(700.)));
+    cx.update(|window, cx| app.update(cx, |app, cx| {
+        app.model.update(cx, |input, cx| input.set_value("a-very-long-provider-model-identifier-with-a-version-suffix", window, cx));
+        app.detail.thread = Some(json!({"id":"t","activities":[{"kind":"context-window.updated","sequence":1,"payload":{"usedTokens":100_000,"maxTokens":200_000}}]}));
+        cx.notify();
+    }));
+    cx.simulate_input("A narrow-window prompt");
+    for (width, panels) in [(480., false), (960., true)] {
+        cx.update(|_, cx| app.update(cx, |app, cx| {
+            app.sidebar_open = panels;
+            app.inspector_open = panels;
+            cx.notify();
+        }));
+        cx.simulate_resize(size(px(width), px(700.)));
+        let row = cx.debug_bounds("composer-actions").unwrap();
+        let selectors = ["attach", "runtime-mode", "interaction-mode", "model-catalog", "composer-more", "context-meter", "send"];
+        let mut previous_right = row.left();
+        for selector in selectors {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            assert!(bounds.left() >= previous_right, "{selector} must not overlap its predecessor");
+            assert!(bounds.right() <= row.right(), "{selector} stays in the usable row");
+            assert!(bounds.size.width >= px(20.), "{selector} keeps a compact Kit hit target: {bounds:?}");
+            assert!((f32::from(bounds.center().y - row.center().y)).abs() <= 1., "{selector} must not wrap");
+            previous_right = bounds.right();
+        }
+        let model = cx.debug_bounds("model-catalog").unwrap();
+        assert!(model.size.width >= px(64.), "model identity retains space beside its icon");
+        cx.simulate_click(model.center(), Default::default());
+        assert!(app.read_with(cx, |app, _| app.catalog_open));
+        cx.simulate_keystrokes("escape");
+        let more = cx.debug_bounds("composer-more").unwrap();
+        cx.simulate_click(more.center(), Default::default());
+        assert!(cx.debug_bounds("stash").is_some());
+        cx.simulate_keystrokes("escape");
+    }
+    let send = cx.debug_bounds("send").unwrap();
+    cx.simulate_click(send.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else { panic!("expected send"); };
+    assert_eq!(payload["message"]["text"], "A narrow-window prompt");
 }
 
 #[gpui_kit::test]

@@ -1,7 +1,10 @@
+use gpui_kit::assets::IconName;
+use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable, Sizable,
+    ActiveTheme as _, Disableable, Icon, Sizable,
     button::{Button, ButtonVariants as _},
     input::Textarea,
+    menu::{DropdownMenu as _, PopupMenuItem},
     progress::Progress,
 };
 use gpui_kit::{Anchor, App, Context, Window, anchored, deferred, div, prelude::*, px};
@@ -86,6 +89,70 @@ impl NativeApp {
                         ))
                     }),
             )
+    }
+
+    /// Kit owns menu focus, arrow navigation, Escape and outside-click dismissal.
+    fn composer_more(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let app = cx.entity().downgrade();
+        Button::new("composer-more")
+            .debug_selector(|| "composer-more".into())
+            .icon(IconName::Ellipsis)
+            .accessibility_label("More composer actions")
+            .tooltip("More composer actions")
+            .ghost()
+            .small()
+            .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, cx| {
+                let Some(app) = app.upgrade() else {
+                    return menu;
+                };
+                let view = app.read(cx);
+                let text = view.composer.read(cx).value();
+                let empty = text.is_empty();
+                let blank = text.trim().is_empty();
+                // Persistent storage currently exposes only a destructive pop, not a
+                // peek. Do not claim that it is empty based on the in-memory stack.
+                let no_stash = view.draft_store.is_none() && view.stash_memory.is_empty();
+                let persistent = view.draft_store.is_some();
+                let stash_app = app.downgrade();
+                let restore_app = app.downgrade();
+                menu.item(
+                    PopupMenuItem::element(move |_, _| {
+                        div()
+                            .id("stash-label")
+                            .debug_selector(|| "stash".into())
+                            .aria_label("Stash prompt")
+                            .child("Stash prompt")
+                    })
+                    .icon(IconName::Bookmark)
+                    .action(Box::new(crate::StashPrompt))
+                    .disabled(blank)
+                    .on_click(move |_, window, cx| {
+                        _ = stash_app.update(cx, |app, cx| app.stash_prompt(false, window, cx));
+                    }),
+                )
+                .when(blank, |menu| menu.label("Type a prompt to stash it"))
+                .item(
+                    PopupMenuItem::element(move |_, _| {
+                        div()
+                            .id("restore-stash-label")
+                            .debug_selector(|| "restore-stash".into())
+                            .aria_label("Restore stashed prompt")
+                            .child("Restore stashed prompt")
+                    })
+                    .icon(IconName::Undo2)
+                    .disabled(!empty || no_stash)
+                    .on_click(move |_, window, cx| {
+                        _ = restore_app.update(cx, |app, cx| app.stash_prompt(true, window, cx));
+                    }),
+                )
+                .when(!empty, |menu| {
+                    menu.label("Stash or clear the current prompt first")
+                })
+                .when(empty && no_stash, |menu| menu.label("Nothing stashed yet"))
+                .when(empty && persistent, |menu| {
+                    menu.label("Restores the latest saved prompt, if any")
+                })
+            })
     }
 
     pub(crate) fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -330,15 +397,16 @@ impl NativeApp {
             })
             .child(
                 div()
+                    .debug_selector(|| "composer-actions".into())
                     .flex()
-                    .flex_wrap()
+                    .min_w_0()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .child(
                         Button::new("attach")
                             .debug_selector(|| "attach".into())
-                            .icon(gpui_kit::assets::IconName::Paperclip)
-                            .label("Attach")
+                            .icon(IconName::Paperclip)
+                            .accessibility_label("Attach files")
                             .ghost()
                             .small()
                             .tooltip("Attach files to the prompt")
@@ -347,14 +415,31 @@ impl NativeApp {
                     .child(
                         Button::new("runtime-mode")
                             .debug_selector(|| "runtime-mode".into())
-                            .label(if full_access {
+                            .child(
+                                Icon::new(if full_access {
+                                    IconName::ShieldOff
+                                } else {
+                                    IconName::ShieldCheck
+                                })
+                                .small()
+                                .text_color(if full_access {
+                                    cx.theme().warning
+                                } else {
+                                    muted_foreground
+                                }),
+                            )
+                            .accessibility_label(if full_access {
                                 "Full access"
                             } else {
                                 "Approval required"
                             })
                             .ghost()
                             .small()
-                            .tooltip("Toggle whether this thread may run tools without asking")
+                            .tooltip(if full_access {
+                                "Full access · click to require approval"
+                            } else {
+                                "Approval required · click to allow full access"
+                            })
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.change_thread_mode(
                                     "thread.runtime-mode.set",
@@ -371,10 +456,24 @@ impl NativeApp {
                     .child(
                         Button::new("interaction-mode")
                             .debug_selector(|| "interaction-mode".into())
-                            .label(if plan_mode { "Plan" } else { "Default" })
+                            .icon(if plan_mode {
+                                IconName::ListTodo
+                            } else {
+                                IconName::MessageSquare
+                            })
+                            .accessibility_label(if plan_mode {
+                                "Plan mode"
+                            } else {
+                                "Default mode"
+                            })
                             .ghost()
                             .small()
-                            .tooltip("Toggle plan-first interaction for this thread")
+                            .selected(plan_mode)
+                            .tooltip(if plan_mode {
+                                "Plan mode · click for default interaction"
+                            } else {
+                                "Default interaction · click to plan first"
+                            })
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.change_thread_mode(
                                     "thread.interaction-mode.set",
@@ -389,6 +488,8 @@ impl NativeApp {
                         div()
                             .flex()
                             .flex_col()
+                            .flex_1()
+                            .min_w_0()
                             .when_some(self.render_catalog(cx), |view, catalog| {
                                 view.child(deferred(
                                     anchored()
@@ -400,21 +501,30 @@ impl NativeApp {
                             .child(
                                 Button::new("model-catalog")
                                     .debug_selector(|| "model-catalog".into())
-                                    .label(if active_model.is_empty() {
-                                        "Select model".to_owned()
-                                    } else {
-                                        active_model.clone()
-                                    })
+                                    .icon(IconName::Bot)
+                                    .child(div().min_w_0().truncate().child(
+                                        if active_model.is_empty() {
+                                            "Select model".to_owned()
+                                        } else {
+                                            active_model.clone()
+                                        },
+                                    ))
+                                    .accessibility_label("Choose provider and model")
                                     .ghost()
                                     .small()
-                                    .tooltip("Choose the provider and model")
+                                    .selected(self.catalog_open)
+                                    .tooltip(if active_model.is_empty() {
+                                        "Choose the provider and model".to_owned()
+                                    } else {
+                                        format!("{} · choose provider and model", active_model)
+                                    })
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.catalog_open = !app.catalog_open;
                                         cx.notify();
                                     })),
                             ),
                     )
-                    .child(div().flex_1())
+                    .child(self.composer_more(cx))
                     .when_some(context_window, |view, snapshot| {
                         let label = snapshot.label();
                         view.child(
@@ -447,7 +557,9 @@ impl NativeApp {
                     .child(if turn_running {
                         Button::new("stop-turn")
                             .debug_selector(|| "stop-turn".into())
+                            .icon(IconName::Square)
                             .label("Stop")
+                            .small()
                             .danger()
                             .outline()
                             .tooltip("Interrupt the running turn (⌘⇧↩ steers with the prompt)")
@@ -457,8 +569,9 @@ impl NativeApp {
                     } else {
                         Button::new("send")
                             .debug_selector(|| "send".into())
-                            .icon(gpui_kit::assets::IconName::Send)
+                            .icon(IconName::Send)
                             .label("Send")
+                            .small()
                             .primary()
                             .loading(self.pending_actions > 0)
                             .disabled(
@@ -467,27 +580,7 @@ impl NativeApp {
                             )
                             .tooltip("Send the prompt (↩)")
                             .on_click(cx.listener(|app, _, window, cx| app.send_prompt(window, cx)))
-                    })
-                    .child(
-                        Button::new("stash")
-                            .debug_selector(|| "stash".into())
-                            .label("Stash")
-                            .ghost()
-                            .on_click(cx.listener(|app, _, window, cx| {
-                                app.stash_prompt(false, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("restore-stash")
-                            .debug_selector(|| "restore-stash".into())
-                            .label("Restore")
-                            .ghost()
-                            .on_click(
-                                cx.listener(|app, _, window, cx| {
-                                    app.stash_prompt(true, window, cx)
-                                }),
-                            ),
-                    ),
+                    }),
             )
     }
 }

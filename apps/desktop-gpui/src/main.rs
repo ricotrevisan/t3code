@@ -77,6 +77,9 @@ fn attachment_mime(name: &str) -> &'static str {
     }
 }
 
+// Kit's default bundle omits application icons such as Paperclip and ShieldOff.
+const NATIVE_ASSETS: gpui_kit::assets::AllAssets = gpui_kit::assets::AllAssets;
+
 const THREAD_ACTIONS: &[(&str, &str, &str)] = &[
     ("rename", "Rename", "thread.meta.update"),
     ("archive", "Archive", "thread.archive"),
@@ -857,7 +860,7 @@ fn bind_native_keys(cx: &mut App) {
 
 fn main() {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(NATIVE_ASSETS)
         .run(move |cx: &mut App| {
         gpui_kit::init(cx);
         theme::init(cx);
