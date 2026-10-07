@@ -2404,3 +2404,40 @@ fn a_queue_waits_for_its_own_thread_to_complete(cx: &mut TestAppContext) {
     assert_eq!(sent[0].0["threadId"], "t");
     assert_eq!(sent[0].0["message"]["text"], "for t");
 }
+
+#[gpui_kit::test]
+fn context_meter_follows_streamed_readings_and_the_setting_hides_it(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let reading = |id: &str, sequence: u64, used: u64| {
+        json!({"id":id,"kind":"context-window.updated","tone":"info","summary":"Context window updated","turnId":null,"sequence":sequence,"createdAt":"2026-01-01T00:00:00Z","payload":{"usedTokens":used,"maxTokens":200_000}})
+    };
+    assert!(cx.debug_bounds("context-meter").is_none(), "no reading, no meter");
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        let item = json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"thread":{"id":"t","title":"Thread","messages":[message(0)],"activities":[reading("a1",1,132_400)],"session":{"status":"running"}}}});
+        app.apply_thread_update("t", item, cx).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("context-meter").is_some());
+    assert!(cx.debug_bounds("context-meter-66%").is_some());
+
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        let item = json!({"kind":"event","event":{"sequence":2,"type":"thread.activity-appended","occurredAt":"2026-01-01T00:00:05Z","payload":{"threadId":"t","activity":reading("a2",2,190_000)}}});
+        app.apply_thread_update("t", item, cx).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("context-meter-66%").is_none());
+    assert!(cx.debug_bounds("context-meter-95%").is_some(), "streamed reading updates the meter");
+
+    let bounds = cx.debug_bounds("settings-open").expect("title bar settings button");
+    cx.simulate_click(bounds.center(), Default::default());
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("settings-context-meter")
+        .expect("appearance meter toggle");
+    cx.simulate_click(bounds.center(), Default::default());
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.context_meter_hidden));
+    assert!(cx.debug_bounds("context-meter").is_none(), "the setting hides the meter");
+}

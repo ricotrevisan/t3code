@@ -3,9 +3,11 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable, Sizable,
     button::{Button, ButtonVariants as _},
     input::Textarea,
+    progress::Progress,
 };
 use gpui_kit::{Anchor, App, Context, Window, anchored, deferred, div, prelude::*, px};
 use serde_json::json;
+use t3code_desktop_gpui::conversation::{ContextWindowLevel, context_window_snapshot};
 use t3code_desktop_gpui::palette;
 
 use crate::{NativeApp, SlashClear, SlashNext, SlashPrevious, SlashRun};
@@ -48,6 +50,21 @@ impl NativeApp {
         // A head that is not on the wire while the thread is idle waits on a
         // rejected send; Send now retries it.
         let stalled = !turn_running && !self.queues.dispatching(&thread_id);
+        let context_window = (!self.context_meter_hidden)
+            .then(|| {
+                self.detail
+                    .thread
+                    .as_ref()?
+                    .get("activities")?
+                    .as_array()
+                    .and_then(|activities| context_window_snapshot(activities))
+            })
+            .flatten();
+        let meter_color = match context_window.as_ref().map(|snapshot| snapshot.level()) {
+            Some(ContextWindowLevel::Danger) => cx.theme().danger,
+            Some(ContextWindowLevel::Warning) => cx.theme().warning,
+            _ => muted_foreground,
+        };
         div()
             // While the "/" menu shows, arrows, Enter, and Escape drive it instead of the text.
             .when(slash_entries.is_some(), |view| {
@@ -310,6 +327,34 @@ impl NativeApp {
                             ),
                     )
                     .child(div().flex_1())
+                    .when_some(context_window, |view, snapshot| {
+                        let label = snapshot.label();
+                        view.child(
+                            Button::new("context-meter")
+                                .debug_selector(|| "context-meter".into())
+                                .ghost()
+                                .small()
+                                .tooltip(snapshot.tooltip())
+                                .child(
+                                    div()
+                                        .debug_selector({
+                                            let label = label.clone();
+                                            move || format!("context-meter-{label}")
+                                        })
+                                        .text_color(meter_color)
+                                        .child(label),
+                                )
+                                .when_some(snapshot.used_percentage, |button, percentage| {
+                                    button.child(
+                                        Progress::new("context-meter-bar")
+                                            .value(percentage as f32)
+                                            .color(meter_color)
+                                            .xsmall()
+                                            .w(px(32.)),
+                                    )
+                                }),
+                        )
+                    })
                     // One slot: Send while idle, Stop while a turn runs.
                     .child(if turn_running {
                         Button::new("stop-turn")

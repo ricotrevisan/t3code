@@ -160,6 +160,116 @@ pub fn pending_approval(activities: &[Value]) -> Option<PendingApproval> {
     })
 }
 
+/// How full the context window is, as the meter colors it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextWindowLevel {
+    Normal,
+    Warning,
+    Danger,
+}
+
+/// The newest `context-window.updated` reading for a thread.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextWindowSnapshot {
+    pub used_tokens: f64,
+    pub max_tokens: Option<f64>,
+    pub remaining_tokens: Option<f64>,
+    /// Share of `max_tokens` in use, capped at 100; None without a positive max.
+    pub used_percentage: Option<f64>,
+    pub total_processed_tokens: Option<f64>,
+}
+
+impl ContextWindowSnapshot {
+    /// The meter chip's text: the used share, or the used tokens without a max.
+    pub fn label(&self) -> String {
+        match self.used_percentage {
+            Some(percentage) => format_context_window_percentage(percentage),
+            None => format_context_window_tokens(self.used_tokens),
+        }
+    }
+
+    pub fn level(&self) -> ContextWindowLevel {
+        match self.used_percentage.unwrap_or(0.) {
+            percentage if percentage > 90. => ContextWindowLevel::Danger,
+            percentage if percentage > 75. => ContextWindowLevel::Warning,
+            _ => ContextWindowLevel::Normal,
+        }
+    }
+
+    pub fn tooltip(&self) -> String {
+        let used = format_context_window_tokens(self.used_tokens);
+        let mut text = match (self.max_tokens, self.remaining_tokens) {
+            (Some(max), Some(remaining)) => format!(
+                "Context window: {used} / {} used, {} left",
+                format_context_window_tokens(max),
+                format_context_window_tokens(remaining)
+            ),
+            _ => format!("Context window: {used} tokens used"),
+        };
+        if let Some(total) = self.total_processed_tokens.filter(|total| *total > 0.) {
+            text.push_str(&format!(
+                " · {} processed in total",
+                format_context_window_tokens(total)
+            ));
+        }
+        text
+    }
+}
+
+/// The latest valid context-window reading; entries without a non-negative
+/// `usedTokens` are skipped in favour of older ones.
+pub fn context_window_snapshot(activities: &[Value]) -> Option<ContextWindowSnapshot> {
+    activities.iter().rev().find_map(|activity| {
+        if activity["kind"] != "context-window.updated" {
+            return None;
+        }
+        let payload = &activity["payload"];
+        let used_tokens = payload["usedTokens"].as_f64().filter(|used| *used >= 0.)?;
+        let max_tokens = payload["maxTokens"].as_f64();
+        let used_percentage = max_tokens
+            .filter(|max| *max > 0.)
+            .map(|max| (used_tokens / max * 100.).min(100.));
+        Some(ContextWindowSnapshot {
+            used_tokens,
+            max_tokens,
+            remaining_tokens: max_tokens.map(|max| (max - used_tokens).round().max(0.)),
+            used_percentage,
+            total_processed_tokens: payload["totalProcessedTokens"].as_f64(),
+        })
+    })
+}
+
+/// One decimal, ties rounded up as the reference's `toFixed(1)` does, without a trailing `.0`.
+fn trim_tenth(value: f64) -> String {
+    let text = format!("{:.1}", (value * 10.).round() / 10.);
+    text.strip_suffix(".0").map(str::to_owned).unwrap_or(text)
+}
+
+/// Token counts in the reference meter's style: `999`, `1k`, `9.5k`, `132k`, `1.3m`.
+pub fn format_context_window_tokens(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_owned();
+    }
+    if value < 1_000. {
+        format!("{}", value.round())
+    } else if value < 10_000. {
+        format!("{}k", trim_tenth(value / 1_000.))
+    } else if value < 1_000_000. {
+        format!("{}k", (value / 1_000.).round())
+    } else {
+        format!("{}m", trim_tenth(value / 1_000_000.))
+    }
+}
+
+/// `4.5%` below ten percent, whole percents above.
+pub fn format_context_window_percentage(value: f64) -> String {
+    if value < 10. {
+        format!("{}%", trim_tenth(value))
+    } else {
+        format!("{}%", value.round())
+    }
+}
+
 /// One choice of a [`UserInputQuestion`]. `value` is the answer it submits:
 /// the provider's option value, or its label when none is given.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -639,6 +749,73 @@ pub fn diff_rows(old: &[TimelineRow], new: &[TimelineRow]) -> RowsDiff {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn context_window_snapshot_takes_the_latest_valid_reading() {
+        let reading = |used: Value, max: Value| json!({"kind": "context-window.updated", "payload": {"usedTokens": used, "maxTokens": max}});
+        let activities = vec![
+            reading(json!(50_000), json!(200_000)),
+            reading(json!(132_400), json!(200_000)),
+            json!({"kind": "tool.completed", "payload": {"usedTokens": 1}}),
+            reading(json!(-1), json!(200_000)),
+            reading(Value::Null, json!(200_000)),
+        ];
+        let snapshot = context_window_snapshot(&activities).expect("a valid reading exists");
+        assert_eq!(snapshot.used_tokens, 132_400.);
+        assert_eq!(snapshot.remaining_tokens, Some(67_600.));
+        assert_eq!(snapshot.used_percentage, Some(66.2));
+        assert_eq!(snapshot.label(), "66%");
+        assert_eq!(snapshot.level(), ContextWindowLevel::Normal);
+        assert_eq!(
+            snapshot.tooltip(),
+            "Context window: 132k / 200k used, 68k left"
+        );
+        assert!(context_window_snapshot(&activities[2..]).is_none());
+        assert!(context_window_snapshot(&[]).is_none());
+    }
+
+    #[test]
+    fn context_window_percentage_needs_a_positive_max_and_caps_at_full() {
+        let snapshot = |payload: Value| {
+            context_window_snapshot(&[
+                json!({"kind": "context-window.updated", "payload": payload}),
+            ])
+            .unwrap()
+        };
+        let unbounded = snapshot(json!({"usedTokens": 1_500}));
+        assert_eq!(unbounded.used_percentage, None);
+        assert_eq!(unbounded.remaining_tokens, None);
+        assert_eq!(unbounded.label(), "1.5k");
+        assert_eq!(unbounded.tooltip(), "Context window: 1.5k tokens used");
+        assert_eq!(
+            snapshot(json!({"usedTokens": 10, "maxTokens": 0})).used_percentage,
+            None
+        );
+        let over = snapshot(json!({"usedTokens": 250_000, "maxTokens": 200_000}));
+        assert_eq!(over.used_percentage, Some(100.));
+        assert_eq!(over.remaining_tokens, Some(0.));
+        assert_eq!(over.level(), ContextWindowLevel::Danger);
+        let small = snapshot(json!({"usedTokens": 9_000, "maxTokens": 200_000}));
+        assert_eq!(small.label(), "4.5%");
+        assert_eq!(
+            snapshot(json!({"usedTokens": 0, "maxTokens": 100})).label(),
+            "0%"
+        );
+        let level = |used: u64| snapshot(json!({"usedTokens": used, "maxTokens": 100})).level();
+        assert_eq!(level(75), ContextWindowLevel::Normal);
+        assert_eq!(level(76), ContextWindowLevel::Warning);
+        assert_eq!(level(90), ContextWindowLevel::Warning);
+        assert_eq!(level(91), ContextWindowLevel::Danger);
+    }
+
+    #[test]
+    fn context_window_tokens_use_compact_units() {
+        assert_eq!(format_context_window_tokens(999.), "999");
+        assert_eq!(format_context_window_tokens(1_000.), "1k");
+        assert_eq!(format_context_window_tokens(132_400.), "132k");
+        assert_eq!(format_context_window_tokens(1_250_000.), "1.3m");
+        assert_eq!(format_context_window_tokens(f64::NAN), "0");
+    }
 
     #[test]
     fn durations_use_human_units() {

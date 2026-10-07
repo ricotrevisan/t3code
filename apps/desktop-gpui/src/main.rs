@@ -172,7 +172,9 @@ struct NativeApp {
     auth_callback: Entity<InputState>,
     right_tab: RightTab,
     available_editors: Vec<String>,
-    saved_window: Option<window_state::WindowSize>,
+    /// The persisted window state; None when the app runs without persistence.
+    saved_window: Option<window_state::WindowState>,
+    context_meter_hidden: bool,
     inspector_section: Option<InspectorSection>,
     project_settings: Option<Value>,
     action_name: Entity<InputState>,
@@ -361,11 +363,11 @@ impl NativeApp {
             ),
         );
         subscriptions.push(cx.observe_window_bounds(window, |app, window, _cx| {
-            if let gpui_kit::WindowBounds::Windowed(bounds) = window.window_bounds() {
-                app.saved_window = Some(window_state::WindowSize {
-                    width: bounds.size.width / px(1.),
-                    height: bounds.size.height / px(1.),
-                });
+            if let gpui_kit::WindowBounds::Windowed(bounds) = window.window_bounds()
+                && let Some(state) = &mut app.saved_window
+            {
+                state.width = bounds.size.width / px(1.);
+                state.height = bounds.size.height / px(1.);
             }
         }));
         let mut app = Self {
@@ -432,6 +434,7 @@ impl NativeApp {
             right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
             saved_window: None,
+            context_meter_hidden: false,
             inspector_section: Some(InspectorSection::Project),
             project_settings: None,
             action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
@@ -499,6 +502,9 @@ impl NativeApp {
             _subscriptions: subscriptions,
         };
         if auto_connect {
+            let state = window_state::load();
+            app.context_meter_hidden = state.context_meter_hidden;
+            app.saved_window = Some(state);
             match drafts::Drafts::open(drafts::default_path()) {
                 Ok(store) => app.draft_store = Some(store),
                 Err(_) => app.storage_error = Some(
@@ -3272,8 +3278,9 @@ impl Drop for NativeApp {
         {
             eprintln!("Could not flush native drafts during shutdown");
         }
-        if let Some(size) = self.saved_window {
-            window_state::save(size);
+        if let Some(mut state) = self.saved_window {
+            state.context_meter_hidden = self.context_meter_hidden;
+            window_state::save(state);
         }
     }
 }
@@ -3479,7 +3486,8 @@ fn main() {
             },
         ]);
         let window_size = window_state::load()
-            .map(|saved| size(px(saved.width), px(saved.height)))
+            .size()
+            .map(|(width, height)| size(px(width), px(height)))
             .unwrap_or_else(|| size(px(1280.), px(900.)));
         let bounds = Bounds::centered(None, window_size, cx);
         gpui_kit::open_window(

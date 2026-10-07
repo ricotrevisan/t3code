@@ -2,6 +2,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
     input::Input,
+    switch::Switch,
 };
 use gpui_kit::{Context, FontWeight, div, prelude::*, px};
 use serde_json::json;
@@ -213,7 +214,22 @@ impl NativeApp {
                         .child(div().text_sm().child("One Dark (Zed)"))
                         .child(div().text_xs().text_color(muted_foreground).child(
                             "The native client ships Zed's One Dark palette with semantic tokens.",
-                        )),
+                        ))
+                        .child(
+                            div()
+                                .debug_selector(|| "settings-context-meter".into())
+                                .pt_2()
+                                .child(
+                                    Switch::new("settings-context-meter")
+                                        .label("Show context window meter in the composer")
+                                        .checked(!self.context_meter_hidden)
+                                        .small()
+                                        .on_click(cx.listener(|app, shown: &bool, _, cx| {
+                                            app.context_meter_hidden = !shown;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
                 )
                 .child(
                     div()
