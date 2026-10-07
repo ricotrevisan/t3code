@@ -1,4 +1,3 @@
-use gpui_kit::base::Selectable;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable, Sizable,
     button::{Button, ButtonVariants as _},
@@ -10,6 +9,7 @@ use serde_json::json;
 use t3code_desktop_gpui::conversation::{ContextWindowLevel, context_window_snapshot};
 use t3code_desktop_gpui::palette;
 
+use super::list_row;
 use crate::{
     MentionClose, MentionNext, MentionPick, MentionPrevious, NativeApp, SlashClear, SlashNext,
     SlashPrevious, SlashRun,
@@ -55,7 +55,6 @@ impl NativeApp {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap_1()
             .p_2()
             .rounded_md()
             .bg(cx.theme().popover)
@@ -76,15 +75,15 @@ impl NativeApp {
                     .iter()
                     .enumerate()
                     .map(|(index, entry)| {
-                        Button::new(gpui_kit::SharedString::from(format!("mention-{index}")))
-                            .debug_selector(move || format!("mention-{index}"))
-                            .label(entry.path.clone())
-                            .ghost()
-                            .small()
-                            .selected(index == self.mention_index)
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.pick_mention(index, window, cx)
-                            }))
+                        list_row(
+                            format!("mention-{index}"),
+                            None,
+                            entry.path.clone(),
+                            index == self.mention_index,
+                        )
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| app.pick_mention(index, window, cx),
+                        ))
                     }),
             )
     }
@@ -299,7 +298,6 @@ impl NativeApp {
                         .id("slash-commands")
                         .flex()
                         .flex_col()
-                        .gap_1()
                         .max_h(px(200.))
                         .overflow_y_scroll()
                         .p_2()
@@ -310,6 +308,7 @@ impl NativeApp {
                         .when(entries.is_empty(), |view| {
                             view.child(
                                 div()
+                                    .px_2()
                                     .text_xs()
                                     .text_color(muted_foreground)
                                     .child("No matching commands"),
@@ -317,15 +316,15 @@ impl NativeApp {
                         })
                         .children(entries.into_iter().enumerate().map(|(index, entry)| {
                             let label = entry.label;
-                            Button::new(gpui_kit::SharedString::from(format!("slash-{label}")))
-                                .debug_selector(move || format!("slash-{label}"))
-                                .label(label)
-                                .ghost()
-                                .small()
-                                .selected(index == self.slash_index)
-                                .on_click(cx.listener(move |app, _, window, cx| {
-                                    app.run_slash(index, window, cx)
-                                }))
+                            list_row(
+                                format!("slash-{label}"),
+                                None,
+                                label,
+                                index == self.slash_index,
+                            )
+                            .on_click(cx.listener(
+                                move |app, _, window, cx| app.run_slash(index, window, cx),
+                            ))
                         })),
                 )
             })

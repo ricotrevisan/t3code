@@ -1,7 +1,9 @@
 //! `NativeApp` render surfaces. `Render for NativeApp` in `main.rs` composes
 //! them into the window layout; each surface resolves its own theme tokens.
 
-use gpui_kit::App;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{Icon, Sizable, list::ListItem};
+use gpui_kit::{App, Role, SharedString, div, prelude::*};
 
 use crate::NativeApp;
 
@@ -18,6 +20,45 @@ mod status_bar;
 mod thread_header;
 mod title_bar;
 mod toasts;
+
+/// A left-aligned row for menus, pickers and section headers. `selected` marks the
+/// keyboard-highlighted or current row with the theme's list-active background
+/// and exposes it as the row's selected state. The label keeps the selector
+/// `<id>-label`; callers add `on_click`, `disabled` or a trailing check.
+pub(crate) fn list_row(
+    id: impl Into<SharedString>,
+    icon: Option<IconName>,
+    label: impl Into<SharedString>,
+    selected: bool,
+) -> ListItem {
+    let id = id.into();
+    let label = label.into();
+    let label_selector = format!("{id}-label");
+    ListItem::new(id.clone())
+        .debug_selector(move || id.to_string())
+        .role(Role::ListBoxOption)
+        .aria_selected(selected)
+        .accessibility_label(label.clone())
+        .selected(selected)
+        .px_2()
+        .rounded_md()
+        .text_sm()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .children(icon.map(|icon| Icon::new(icon).xsmall()))
+                .child(
+                    div()
+                        .debug_selector(move || label_selector)
+                        .min_w_0()
+                        .truncate()
+                        .child(label),
+                ),
+        )
+}
 
 impl NativeApp {
     fn selected_thread_title(&self) -> String {

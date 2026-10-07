@@ -1,11 +1,12 @@
 use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable, Sizable,
+    ActiveTheme as _,
     button::{Button, ButtonVariants as _},
 };
-use gpui_kit::{Context, FontWeight, div, prelude::*, px};
+use gpui_kit::{Context, div, prelude::*, px};
 use serde_json::{Value, json};
 
+use super::list_row;
 use crate::NativeApp;
 
 impl NativeApp {
@@ -36,62 +37,40 @@ impl NativeApp {
                 .border_color(border)
                 .shadow_lg()
                 .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("Model"),
-                        )
-                        .child(
-                            Button::new("catalog-close")
-                                .label("Close")
-                                .ghost()
-                                .small()
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.catalog_open = false;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .child(
-                    Button::new("refresh-catalog")
-                        .label("Reload server catalog")
-                        .ghost()
-                        .on_click(cx.listener(|app, _, _, cx| {
+                    list_row("refresh-catalog", None, "Reload server catalog", false).on_click(
+                        cx.listener(|app, _, _, cx| {
                             app.perform("server.getConfig", json!({}), None, cx)
-                        })),
+                        }),
+                    ),
                 )
                 .children(self.provider_catalog.iter().map(|provider| {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .child(div().text_color(muted_foreground).child(format!(
-                            "{} · {} · {}",
-                            provider.label(),
-                            provider.instance_id,
-                            provider.explanation()
-                        )))
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child(format!(
+                                    "{} · {} · {}",
+                                    provider.label(),
+                                    provider.instance_id,
+                                    provider.explanation()
+                                )),
+                        )
                         .children(provider.models.iter().enumerate().map(|(index, model)| {
                             let instance = provider.instance_id.clone();
                             let slug = model.slug.clone();
                             let enabled = provider.selectable();
-                            Button::new(gpui_kit::SharedString::from(format!(
-                                "catalog-{}-{index}",
-                                provider.instance_id
-                            )))
-                            .debug_selector({
-                                let id = format!("catalog-{}-{index}", provider.instance_id);
-                                move || id.clone()
-                            })
-                            .ghost()
-                            .selected(model.slug == self.model.read(cx).value())
+                            list_row(
+                                format!("catalog-{}-{index}", provider.instance_id),
+                                None,
+                                model.name.clone(),
+                                model.slug == self.model.read(cx).value(),
+                            )
                             .disabled(!enabled)
-                            .label(model.name.clone())
                             .on_click(cx.listener(
                                 move |app, _, window, cx| {
                                     app.pick_model(&instance, &slug, window, cx)
@@ -186,17 +165,12 @@ impl NativeApp {
                                                     })
                                                     .ghost()
                                                     .selected(selected.as_ref() == Some(&value))
-                                                    .label(format!(
-                                                        "{}{}",
+                                                    .label(
                                                         choice["label"]
                                                             .as_str()
-                                                            .unwrap_or_default(),
-                                                        if selected.as_ref() == Some(&value) {
-                                                            " ✓"
-                                                        } else {
-                                                            ""
-                                                        }
-                                                    ))
+                                                            .unwrap_or_default()
+                                                            .to_owned(),
+                                                    )
                                                     .on_click(cx.listener(move |app, _, _, cx| {
                                                         app.choose_model_option(
                                                             &id,

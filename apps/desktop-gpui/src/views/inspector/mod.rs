@@ -12,6 +12,7 @@ use gpui_kit::{AnyElement, App, Context, Div, Window, div, prelude::*};
 use serde_json::json;
 use t3code_desktop_gpui::connection;
 
+use super::list_row;
 use crate::{InspectorSection, NativeApp, RightTab};
 
 mod actions;
@@ -222,20 +223,21 @@ impl NativeApp {
             .border_1()
             .border_color(cx.theme().border)
             .child(
-                Button::new(id)
-                    .debug_selector(move || id.into())
-                    .icon(if open {
+                list_row(
+                    id,
+                    Some(if open {
                         IconName::ChevronDown
                     } else {
                         IconName::ChevronRight
-                    })
-                    .label(label)
-                    .ghost()
-                    .small()
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        let next = (app.inspector_section != Some(section)).then_some(section);
-                        app.set_inspector_section(next, cx);
-                    })),
+                    }),
+                    label,
+                    false,
+                )
+                .aria_expanded(open)
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    let next = (app.inspector_section != Some(section)).then_some(section);
+                    app.set_inspector_section(next, cx);
+                })),
             )
             .children(content.map(|content| div().px_1().pb_1().child(content)))
     }

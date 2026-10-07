@@ -952,7 +952,12 @@ pub fn group_turns(thread: &Value) -> Vec<TurnGroup> {
 /// One renderable entry of the conversation timeline.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TimelineEntry {
-    Message(Value),
+    /// `show_header` is false for a message that continues a run of messages
+    /// from the same role, which renders without its role and time label.
+    Message {
+        message: Value,
+        show_header: bool,
+    },
     /// A settled turn's `Worked for …`, `Interrupted`, or `Failed` line.
     TurnStatus {
         label: String,
@@ -1039,7 +1044,13 @@ pub fn timeline_rows(
             let id = message["id"]
                 .as_str()
                 .map_or_else(|| format!("{key}:{position}"), str::to_owned);
-            push(format!("message:{id}"), TimelineEntry::Message(message));
+            push(
+                format!("message:{id}"),
+                TimelineEntry::Message {
+                    message,
+                    show_header: true,
+                },
+            );
         }
         let running = matches!(summary, Some((_, TurnState::Running)));
         match &summary {
@@ -1120,6 +1131,21 @@ pub fn timeline_rows(
     }
     if let Some(error) = thread["session"]["lastError"].as_str() {
         push("error".to_owned(), TimelineEntry::Error(error.to_owned()));
+    }
+    let mut previous_role = None;
+    for row in &mut rows {
+        let role = match &mut row.entry {
+            TimelineEntry::Message {
+                message,
+                show_header,
+            } => {
+                let role = message["role"].as_str().map(str::to_owned);
+                *show_header = previous_role.is_none() || previous_role != role;
+                role
+            }
+            _ => None,
+        };
+        previous_role = role;
     }
     rows
 }
@@ -1703,6 +1729,46 @@ mod tests {
                 inserted: 10,
                 changed: vec![]
             }
+        );
+    }
+
+    #[test]
+    fn timeline_rows_label_only_the_first_message_of_a_run() {
+        let message = |id: &str, role: &str, second: u32| json!({"id": id, "role": role, "text": id, "turnId": "t1", "createdAt": format!("2026-01-01T00:00:{second:02}Z")});
+        let thread = json!({
+            "messages": [
+                message("u1", "user", 1),
+                message("a1", "assistant", 2),
+                message("a2", "assistant", 3),
+                message("a3", "assistant", 4),
+                message("u2", "user", 6),
+                message("a4", "assistant", 7),
+            ],
+            "activities": [
+                {"id": "e1", "kind": "tool.completed", "tone": "tool", "summary": "Read", "turnId": "t1", "createdAt": "2026-01-01T00:00:05Z"},
+            ],
+        });
+        let rows = timeline_rows(&thread, &Default::default());
+        let headers: Vec<(&str, bool)> = rows
+            .iter()
+            .filter_map(|row| match &row.entry {
+                TimelineEntry::Message {
+                    message,
+                    show_header,
+                } => Some((message["id"].as_str().unwrap(), *show_header)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                ("u1", true),
+                ("a1", true),
+                ("a2", false),
+                ("a3", false),
+                ("u2", true),
+                ("a4", true),
+            ]
         );
     }
 

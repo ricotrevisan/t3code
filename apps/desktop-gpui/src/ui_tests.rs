@@ -3158,3 +3158,47 @@ fn escape_closes_the_mention_menu_and_keeps_the_typed_text(cx: &mut TestAppConte
     assert_eq!(composer_text(&app, cx), "see @src");
     assert!(requests.try_recv().is_err());
 }
+
+#[gpui_kit::test]
+fn palette_marks_the_highlighted_row_with_selection_not_a_prefix(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let (_app, cx, _requests) = harness(cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.run_until_parked();
+    let row = |cx: &mut VisualTestContext, id: &'static str| cx.update(|window, _| window.find(id));
+    let first = row(cx, "palette-0");
+    assert_eq!(first.selected(), Some(true));
+    assert!(!first.label().unwrap().contains('›'));
+    assert_eq!(row(cx, "palette-1").selected(), Some(false));
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert_eq!(row(cx, "palette-0").selected(), Some(false));
+    let second = row(cx, "palette-1");
+    assert_eq!(second.selected(), Some(true));
+    assert!(!second.label().unwrap().contains('›'));
+}
+
+#[gpui_kit::test]
+fn menu_and_palette_labels_start_at_the_same_inset(cx: &mut TestAppContext) {
+    let (_app, cx, _requests) = harness(cx);
+    let inset = |cx: &mut VisualTestContext, row: &'static str, label: &'static str| {
+        let row = cx.debug_bounds(row).expect("row is painted");
+        let label = cx.debug_bounds(label).expect("label is painted");
+        (label.left() - row.left(), label.left())
+    };
+    cx.simulate_keystrokes("cmd-k");
+    cx.run_until_parked();
+    let (palette_inset, first_left) = inset(cx, "palette-0", "palette-0-label");
+    let (_, second_left) = inset(cx, "palette-1", "palette-1-label");
+    assert!(
+        (first_left - second_left).abs() <= px(1.),
+        "labels of different widths share one left edge"
+    );
+    cx.simulate_keystrokes("escape");
+    let trigger = cx.debug_bounds("thread-menu").unwrap();
+    cx.simulate_click(trigger.center(), Default::default());
+    cx.run_until_parked();
+    let (menu_inset, _) = inset(cx, "pin", "pin-label");
+    assert!((menu_inset - palette_inset).abs() <= px(1.));
+    assert!(menu_inset < px(16.), "labels hug the row's leading edge");
+}

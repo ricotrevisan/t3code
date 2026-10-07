@@ -32,11 +32,7 @@ impl NativeApp {
                         Button::new("content-case")
                             .ghost()
                             .selected(self.content_options.case_sensitive)
-                            .label(if self.content_options.case_sensitive {
-                                "Case sensitive ✓"
-                            } else {
-                                "Case sensitive"
-                            })
+                            .label("Case sensitive")
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.content_options.case_sensitive =
                                     !app.content_options.case_sensitive;
@@ -47,11 +43,7 @@ impl NativeApp {
                         Button::new("content-word")
                             .ghost()
                             .selected(self.content_options.whole_word)
-                            .label(if self.content_options.whole_word {
-                                "Whole word ✓"
-                            } else {
-                                "Whole word"
-                            })
+                            .label("Whole word")
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.content_options.whole_word = !app.content_options.whole_word;
                                 app.search_contents(cx);
@@ -61,11 +53,7 @@ impl NativeApp {
                         Button::new("content-regex")
                             .ghost()
                             .selected(self.content_options.use_regex)
-                            .label(if self.content_options.use_regex {
-                                "Regex ✓"
-                            } else {
-                                "Regex"
-                            })
+                            .label("Regex")
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.content_options.use_regex = !app.content_options.use_regex;
                                 app.search_contents(cx);
@@ -105,17 +93,7 @@ impl NativeApp {
                                 .debug_selector(move || format!("content-hit-{index}"))
                                 .ghost()
                                 .selected(index == self.content_index)
-                                .label(format!(
-                                    "{}{}:{}  {}",
-                                    if index == self.content_index {
-                                        "› "
-                                    } else {
-                                        ""
-                                    },
-                                    hit.path,
-                                    hit.line_number,
-                                    ""
-                                ))
+                                .label(format!("{}:{}  ", hit.path, hit.line_number))
                                 .child(
                                     gpui_kit::StyledText::new(hit.line_content.clone())
                                         .with_highlights(hit.byte_ranges().into_iter().map(

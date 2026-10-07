@@ -7,6 +7,7 @@ use gpui_kit::component::{
 use gpui_kit::{Context, FontWeight, anchored, deferred, div, prelude::*, px};
 use t3code_desktop_gpui::{conversation, palette, sidebar};
 
+use super::list_row;
 use crate::{NativeApp, THREAD_ACTIONS};
 
 impl NativeApp {
@@ -268,7 +269,6 @@ impl NativeApp {
             .w(px(220.))
             .flex()
             .flex_col()
-            .gap_1()
             .p_2()
             .rounded_md()
             .bg(cx.theme().popover)
@@ -282,18 +282,19 @@ impl NativeApp {
                         menu_thread.is_none_or(|thread| sidebar::action_applies(thread, id, now))
                     })
                     .map(|(id, label, kind)| {
-                        Button::new(*id)
-                            .debug_selector(move || (*id).into())
-                            .label(if armed && *id == "delete" {
+                        list_row(
+                            *id,
+                            None,
+                            if armed && *id == "delete" {
                                 "Confirm delete"
                             } else {
                                 *label
-                            })
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.run_thread_menu_action(kind, window, cx)
-                            }))
+                            },
+                            false,
+                        )
+                        .on_click(cx.listener(
+                            move |app, _, window, cx| app.run_thread_menu_action(kind, window, cx),
+                        ))
                     }),
             )
     }

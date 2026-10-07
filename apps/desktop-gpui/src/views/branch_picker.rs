@@ -1,14 +1,11 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable,
-    button::{Button, ButtonVariants as _},
-    input::Input,
-    separator::Separator,
+    ActiveTheme as _, Icon, Sizable, input::Input, separator::Separator, tooltip::Tooltip,
 };
 use gpui_kit::{App, Context, div, prelude::*, px};
 use t3code_desktop_gpui::workspaces;
 
+use super::list_row;
 use crate::{InspectorSection, NativeApp};
 
 impl NativeApp {
@@ -51,17 +48,12 @@ impl NativeApp {
                 let branch = row.name.clone();
                 let path = row.worktree_path.clone();
                 let is_current = workspaces::is_current(row, current.as_deref());
-                Button::new(gpui_kit::SharedString::from(id.clone()))
-                    .debug_selector(move || id.clone())
-                    .ghost()
-                    .small()
-                    .selected(is_current)
-                    .when(is_current, |button| button.icon(IconName::Check))
-                    .label(row.name.clone())
-                    .when_some(row.worktree_path.clone(), |button, path| {
-                        button
-                            .tooltip(path)
-                            .child(Icon::new(IconName::FolderGit).xsmall())
+                list_row(id, None, row.name.clone(), false)
+                    .check_icon(IconName::Check)
+                    .confirmed(is_current)
+                    .when_some(row.worktree_path.clone(), |item, path| {
+                        item.tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
+                            .suffix(|_, _| Icon::new(IconName::FolderGit).xsmall())
                     })
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.pick_checkout(branch.clone(), path.clone(), window, cx)
@@ -92,7 +84,6 @@ impl NativeApp {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap_1()
                     .when_some(notice, |view, (text, is_error)| {
                         view.child(
                             div()
@@ -111,28 +102,22 @@ impl NativeApp {
                     .children(rows)
                     .when(self.refs_cursor.is_some(), |view| {
                         view.child(
-                            Button::new("branch-picker-more")
-                                .debug_selector(|| "branch-picker-more".into())
-                                .ghost()
-                                .small()
-                                .label("More branches")
-                                .on_click(cx.listener(|app, _, _, cx| {
+                            list_row("branch-picker-more", None, "More branches", false).on_click(
+                                cx.listener(|app, _, _, cx| {
                                     app.worktree_operation("vcs.listRefs", true, cx)
-                                })),
+                                }),
+                            ),
                         )
                     }),
             )
             .child(Separator::horizontal())
             .child(
-                Button::new("branch-picker-manage")
-                    .debug_selector(|| "branch-picker-manage".into())
-                    .ghost()
-                    .small()
-                    .label("Manage worktrees…")
-                    .on_click(cx.listener(|app, _, window, cx| {
+                list_row("branch-picker-manage", None, "Manage worktrees…", false).on_click(
+                    cx.listener(|app, _, window, cx| {
                         app.close_branch_picker(window, cx);
                         app.reveal_inspector(InspectorSection::Worktrees, window, cx);
-                    })),
+                    }),
+                ),
             )
     }
 }

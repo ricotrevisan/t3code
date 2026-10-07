@@ -129,11 +129,16 @@ impl NativeApp {
         let muted_foreground = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
         let message_id = match &row.entry {
-            TimelineEntry::Message(message) => message["id"].as_str().map(str::to_owned),
+            TimelineEntry::Message { message, .. } => message["id"].as_str().map(str::to_owned),
             _ => None,
         };
         let content = match &row.entry {
-            TimelineEntry::Message(message) => self.render_message(message, cx).into_any_element(),
+            TimelineEntry::Message {
+                message,
+                show_header,
+            } => self
+                .render_message(message, *show_header, cx)
+                .into_any_element(),
             TimelineEntry::TurnStatus {
                 label,
                 danger: true,
@@ -415,15 +420,20 @@ impl NativeApp {
         )
     }
 
-    fn render_message(&self, message: &Value, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// A message row. `show_header` puts the role and time above the first
+    /// message of a run; Copy shows while the pointer is over the message.
+    fn render_message(
+        &self,
+        message: &Value,
+        show_header: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let muted_foreground = cx.theme().muted_foreground;
-        let group_box = cx.theme().group_box;
         let muted = cx.theme().muted;
         let secondary = cx.theme().secondary;
-        let id = gpui_kit::SharedString::from(format!(
-            "message-{}",
-            message["id"].as_str().unwrap_or("unknown")
-        ));
+        let message_id = message["id"].as_str().unwrap_or("unknown");
+        let id = gpui_kit::SharedString::from(format!("message-{message_id}"));
+        let copy_id = format!("copy-{message_id}");
         let text = message["text"].as_str().unwrap_or("").to_owned();
         let copy_text = text.clone();
         let role = message["role"].as_str().unwrap_or("message");
@@ -431,7 +441,8 @@ impl NativeApp {
         let created = message["createdAt"]
             .as_str()
             .and_then(conversation::clock_time);
-        let meta = match (created, message["streaming"] == true) {
+        let streaming = message["streaming"] == true;
+        let meta = match (created, streaming) {
             (Some(time), true) => format!("{label} · {time} · streaming"),
             (Some(time), false) => format!("{label} · {time}"),
             (None, true) => format!("{label} · streaming"),
@@ -458,51 +469,53 @@ impl NativeApp {
                         .child(format!("{name} · {size} B"))
                 }))
         });
+        let copy = div()
+            .debug_selector({
+                let copy_id = copy_id.clone();
+                move || copy_id
+            })
+            .invisible()
+            .group_hover("message", |style| style.visible())
+            .child(
+                Button::new(gpui_kit::SharedString::from(copy_id))
+                    .label("Copy")
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                            copy_text.clone(),
+                        ))
+                    })),
+            );
+        let user = role == "user";
         let body = div()
             .flex()
             .flex_col()
             .gap_1()
-            .p_2()
-            .rounded_md()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(div().text_xs().text_color(muted_foreground).child(meta))
-                    .child(
-                        Button::new(gpui_kit::SharedString::from(format!(
-                            "copy-{}",
-                            message["id"].as_str().unwrap_or("unknown")
-                        )))
-                        .label("Copy")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                copy_text.clone(),
-                            ))
-                        })),
-                    ),
-            )
+            .min_w_0()
             .when_some(attachment_row, |view, row| view.child(row))
-            .child(TextView::markdown(id, text));
-        match role {
-            "user" => div()
-                .flex()
-                .justify_end()
-                .child(body.max_w(px(720.)).bg(secondary)),
-            "reasoning" => div()
-                .flex()
-                .justify_center()
-                .child(body.max_w(px(720.)).bg(muted)),
-            "system" => div()
-                .flex()
-                .justify_center()
-                .child(body.text_color(muted_foreground)),
-            _ => body.bg(group_box),
-        }
+            .child(TextView::markdown(id, text))
+            .map(|body| match role {
+                "user" => body
+                    .max_w(px(720.))
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(secondary),
+                "reasoning" | "system" => body.text_color(muted_foreground),
+                _ => body,
+            });
+        div()
+            .group("message")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .when(user, |view| view.items_end())
+            .when(show_header, |view| {
+                view.child(div().text_xs().text_color(muted_foreground).child(meta))
+            })
+            .child(body)
+            .child(copy)
     }
 
     fn render_activity_log(&self, items: &[ActivityItem], cx: &mut Context<Self>) -> gpui_kit::Div {
