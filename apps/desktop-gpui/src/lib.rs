@@ -6,6 +6,7 @@ pub mod credentials;
 pub mod dpop;
 pub mod drafts;
 pub mod files;
+pub mod notifications;
 pub mod palette;
 pub mod project_actions;
 pub mod protocol;

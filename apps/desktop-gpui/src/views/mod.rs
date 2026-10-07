@@ -16,6 +16,7 @@ mod sidebar;
 mod status_bar;
 mod thread_header;
 mod title_bar;
+mod toasts;
 
 impl NativeApp {
     fn selected_thread_title(&self) -> String {

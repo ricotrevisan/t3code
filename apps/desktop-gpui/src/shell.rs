@@ -23,6 +23,15 @@ pub struct Session {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LatestTurn {
+    pub turn_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub id: String,
     pub project_id: String,
@@ -48,6 +57,8 @@ pub struct Thread {
     // Shell-level live state, unset on older servers.
     #[serde(default)]
     pub session: Option<Session>,
+    #[serde(default)]
+    pub latest_turn: Option<LatestTurn>,
     #[serde(default)]
     pub has_pending_approvals: bool,
     #[serde(default)]

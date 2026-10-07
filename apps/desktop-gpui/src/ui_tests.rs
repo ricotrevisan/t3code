@@ -14,6 +14,7 @@ fn harness(
         gpui_kit::init(cx);
         theme::init(cx);
         bind_native_keys(cx);
+        cx.set_app_identity("codes.t3.native.test", "T3 Code Native");
     });
     let mut app = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
@@ -2618,4 +2619,161 @@ fn hiding_the_sidebar_keeps_an_open_row_menu_usable(cx: &mut TestAppContext) {
     };
     assert_eq!(payload["threadId"], "u");
     assert!(!app.read_with(cx, |app, _| app.thread_menu_open));
+}
+
+/// Arms and confirms the fixture checkpoint's revert, answering its call with `reply`.
+fn revert_checkpoint(
+    app: &Entity<NativeApp>,
+    cx: &mut VisualTestContext,
+    requests: &async_channel::Receiver<connection::Command>,
+    reply: Result<Value, String>,
+) {
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(json!({
+                "id": "t", "title": "Thread", "messages": [], "activities": [], "proposedPlans": [],
+                "checkpoints": [{"turnId": "turn-1", "checkpointTurnCount": 1, "checkpointRef": "ref", "status": "ready",
+                    "files": [{"path": "a.rs", "kind": "modified", "additions": 1, "deletions": 0}], "assistantMessageId": null, "completedAt": "2026-01-01T00:00:00Z"}],
+                "session": null,
+            }));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    for _ in 0..2 {
+        let bounds = cx.debug_bounds("revert-checkpoint").expect("revert button");
+        cx.simulate_click(bounds.center(), Default::default());
+    }
+    let mut sent = calls(requests);
+    assert_eq!(sent.len(), 1);
+    let (payload, sender) = sent.remove(0);
+    assert_eq!(payload["type"], "thread.checkpoint.revert");
+    sender.try_send(reply).unwrap();
+    cx.run_until_parked();
+}
+
+fn toast_messages(app: &Entity<NativeApp>, cx: &mut VisualTestContext) -> Vec<String> {
+    app.read_with(cx, |app, _| {
+        app.toasts
+            .iter()
+            .map(|toast| toast.message.clone())
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn an_error_outcome_raises_a_toast_that_stays_until_closed(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    revert_checkpoint(
+        &app,
+        cx,
+        &requests,
+        Err("Checkpoint revert rejected".into()),
+    );
+    assert_eq!(toast_messages(&app, cx), ["Checkpoint revert rejected"]);
+    assert_eq!(app.read_with(cx, |app, _| app.toasts[0].id), 1);
+    assert!(cx.debug_bounds("toast-1").is_some());
+
+    cx.background_executor
+        .advance_clock(notifications::TOAST_LIFETIME * 2);
+    cx.run_until_parked();
+    assert_eq!(toast_messages(&app, cx), ["Checkpoint revert rejected"]);
+
+    let close = cx
+        .debug_bounds("toast-close-1")
+        .expect("the toast has a close control");
+    cx.simulate_click(close.center(), Default::default());
+    cx.run_until_parked();
+    assert!(toast_messages(&app, cx).is_empty());
+    assert_eq!(
+        app.read_with(cx, |app, _| app.status.clone()),
+        "Checkpoint revert rejected"
+    );
+}
+
+#[gpui_kit::test]
+fn a_success_toast_leaves_when_its_dismissal_fires(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    revert_checkpoint(&app, cx, &requests, Ok(json!({"sequence": 3})));
+    assert_eq!(toast_messages(&app, cx), ["Checkpoint restored"]);
+
+    cx.background_executor
+        .advance_clock(notifications::TOAST_LIFETIME - std::time::Duration::from_millis(1));
+    cx.run_until_parked();
+    assert_eq!(toast_messages(&app, cx), ["Checkpoint restored"]);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(1));
+    cx.run_until_parked();
+    assert!(toast_messages(&app, cx).is_empty());
+    assert_eq!(
+        app.read_with(cx, |app, _| app.status.clone()),
+        "Checkpoint restored"
+    );
+}
+
+fn upsert_thread(
+    app: &Entity<NativeApp>,
+    cx: &mut VisualTestContext,
+    sequence: u64,
+    thread: Value,
+) {
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            let mut thread = thread;
+            thread.as_object_mut().unwrap().extend(
+                json!({"projectId": "p", "modelSelection": {"instanceId": "codex", "model": "gpt-5.4"}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+            let item = serde_json::from_value(
+                json!({"kind": "thread-upserted", "sequence": sequence, "thread": thread}),
+            )
+            .unwrap();
+            app.apply_shell_item(item, cx).unwrap();
+        })
+    });
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn approval_on_another_thread_notifies_and_the_click_selects_it(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    seed_second_thread(&app, cx, false);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.window_active));
+
+    upsert_thread(
+        &app,
+        cx,
+        2,
+        json!({"id": "t", "title": "Thread", "hasPendingApprovals": true}),
+    );
+    assert!(
+        cx.shown_system_notifications().is_empty(),
+        "the selected thread is in view"
+    );
+
+    upsert_thread(
+        &app,
+        cx,
+        3,
+        json!({"id": "u", "title": "Other", "hasPendingApprovals": true}),
+    );
+    let shown = cx.shown_system_notifications();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].title.as_ref(), "Approval needed");
+    assert_eq!(shown[0].body.as_ref(), "Other");
+
+    cx.simulate_system_notification_response(gpui_kit::SystemNotificationResponse {
+        tag: shown[0].tag.clone(),
+        action_id: None,
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_thread.clone())
+            .as_deref(),
+        Some("u")
+    );
 }

@@ -10,8 +10,8 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
-    auth, commands, connection, credentials, drafts, files, palette, project_actions,
-    providers, queue, shell, sidebar, thread, window_state, workspaces,
+    auth, commands, connection, credentials, drafts, files, notifications, palette,
+    project_actions, providers, queue, shell, sidebar, thread, window_state, workspaces,
 };
 
 gpui_kit::actions!(
@@ -237,6 +237,11 @@ struct NativeApp {
     stash_memory: Vec<String>,
     /// Prompts waiting for their thread's turn to finish, by thread.
     queues: queue::Queues,
+    /// The toast stack, oldest first.
+    toasts: Vec<notifications::Toast>,
+    toast_id: u64,
+    /// Whether the window has OS focus; a focused window still notifies for other threads.
+    window_active: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -369,6 +374,9 @@ impl NativeApp {
                 },
             ),
         );
+        subscriptions.push(cx.observe_window_activation(window, |app, window, _| {
+            app.window_active = window.is_window_active();
+        }));
         subscriptions.push(cx.observe_window_bounds(window, |app, window, cx| {
             app.reset_splits(cx);
             if let gpui_kit::WindowBounds::Windowed(bounds) = window.window_bounds()
@@ -512,8 +520,20 @@ impl NativeApp {
                 .unwrap_or_else(|| "disconnected".into()),
             stash_memory: Vec::new(),
             queues: queue::Queues::default(),
+            toasts: Vec::new(),
+            toast_id: 0,
+            window_active: window.is_window_active(),
             _subscriptions: subscriptions,
         };
+        let entity = cx.entity().downgrade();
+        let handle = window.window_handle();
+        cx.on_system_notification_response(move |response, cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                entity.update(cx, |app, cx| {
+                    app.open_notified_thread(&response.tag, window, cx)
+                })
+            });
+        });
         if auto_connect {
             let state = window_state::load();
             app.context_meter_hidden = state.context_meter_hidden;
@@ -545,6 +565,130 @@ impl NativeApp {
         self.detail.apply(thread_id, item)?;
         self.flush_queues(cx);
         Ok(())
+    }
+
+    /// Shows `status` in the status bar; a failure also raises an error toast.
+    fn set_status(&mut self, status: impl Into<String>, cx: &mut Context<Self>) {
+        self.status = status.into();
+        if notifications::is_error(&self.status) {
+            let message = self.status.clone();
+            self.push_toast(notifications::ToastKind::Error, message, None, cx);
+        }
+    }
+
+    /// Reports a finished destructive or long operation in the status bar and a toast.
+    fn report_success(&mut self, status: &str, cx: &mut Context<Self>) {
+        self.set_status(status, cx);
+        self.push_toast(notifications::ToastKind::Success, status.into(), None, cx);
+    }
+
+    /// Adds a toast unless the same one is showing. Errors stay until closed; the
+    /// rest leave when a timer task fires, with nothing repainting meanwhile.
+    fn push_toast(
+        &mut self,
+        kind: notifications::ToastKind,
+        message: String,
+        thread: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .toasts
+            .iter()
+            .any(|toast| toast.kind == kind && toast.message == message && toast.thread == thread)
+        {
+            return;
+        }
+        self.toast_id += 1;
+        let id = self.toast_id;
+        self.toasts.push(notifications::Toast {
+            id,
+            kind,
+            message,
+            thread,
+        });
+        if self.toasts.len() > notifications::MAX_TOASTS {
+            self.toasts.remove(0);
+        }
+        if kind != notifications::ToastKind::Error {
+            cx.spawn(async move |app, cx| {
+                cx.background_executor()
+                    .timer(notifications::TOAST_LIFETIME)
+                    .await;
+                let _ = app.update(cx, |app, cx| app.dismiss_toast(id, cx));
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.toasts.retain(|toast| toast.id != id);
+        cx.notify();
+    }
+
+    /// Applies a shell item, then sends a desktop notification for the thread
+    /// event it raises on a thread the user is not looking at. With the window
+    /// focused, a toast offers the same thread too.
+    fn apply_shell_item(
+        &mut self,
+        item: shell::ShellItem,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let prior = match &item {
+            shell::ShellItem::ThreadUpserted { thread, .. } => self
+                .shell
+                .threads
+                .iter()
+                .find(|known| known.id == thread.id)
+                .cloned(),
+            _ => None,
+        };
+        self.shell.apply(item)?;
+        let Some(prior) = prior else {
+            return Ok(());
+        };
+        let Some(next) = self
+            .shell
+            .threads
+            .iter()
+            .find(|thread| thread.id == prior.id)
+        else {
+            return Ok(());
+        };
+        let selected = self.selected_thread.as_deref() == Some(next.id.as_str());
+        let Some(event) = notifications::notification(&prior, next, selected, self.window_active)
+        else {
+            return Ok(());
+        };
+        let (id, title) = (next.id.clone(), next.title.clone());
+        cx.show_system_notification(gpui_kit::SystemNotification {
+            tag: notifications::tag(&id).into(),
+            title: event.title().into(),
+            body: title.clone().into(),
+            actions: Vec::new(),
+        });
+        if self.window_active {
+            let kind = if event == notifications::Event::TurnCompleted {
+                notifications::ToastKind::Success
+            } else {
+                notifications::ToastKind::Info
+            };
+            self.push_toast(kind, format!("{} · {title}", event.title()), Some(id), cx);
+        }
+        Ok(())
+    }
+
+    /// Selects the thread a clicked desktop notification or toast names.
+    fn open_notified_thread(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = notifications::thread_from_tag(tag) else {
+            return;
+        };
+        if self.shell.threads.iter().any(|thread| thread.id == id) {
+            let id = id.to_owned();
+            self.select_thread(&id, window, cx);
+            window.activate_window();
+            cx.notify();
+        }
     }
 
     fn turn_running(&self) -> bool {
@@ -679,7 +823,7 @@ impl NativeApp {
                 ) {
                     Ok(command) => self.dispatch(command, cx),
                     Err(error) => {
-                        self.status = error.into();
+                        self.set_status(error, cx);
                         cx.notify();
                     }
                 }
@@ -724,7 +868,7 @@ impl NativeApp {
 
     fn list_files(&mut self, search: bool, cx: &mut Context<Self>) {
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
@@ -733,7 +877,7 @@ impl NativeApp {
             .as_ref()
             .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
         else {
-            self.status = "Select a project first".into();
+            self.set_status("Select a project first", cx);
             cx.notify();
             return;
         };
@@ -773,11 +917,11 @@ impl NativeApp {
                         Ok(list) => {
                             app.file_entries = list.entries;
                             app.file_listing_truncated = list.truncated;
-                            app.status = "Workspace entries loaded".into();
+                            app.set_status("Workspace entries loaded", cx);
                         }
-                        Err(_) => app.status = "Invalid workspace listing".into(),
+                        Err(_) => app.set_status("Invalid workspace listing", cx),
                     },
-                    Err(error) => app.status = error,
+                    Err(error) => app.set_status(error, cx),
                 }
                 cx.notify();
             });
@@ -808,7 +952,7 @@ impl NativeApp {
             .iter()
             .find(|project| Some(&project.id) == self.selected_project.as_ref())
         else {
-            self.status = "Select a project first".into();
+            self.set_status("Select a project first", cx);
             cx.notify();
             return;
         };
@@ -828,7 +972,7 @@ impl NativeApp {
             match self.model_selection(previous, cx) {
                 Ok(selection) => selection,
                 Err(error) => {
-                    self.status = error.into();
+                    self.set_status(error, cx);
                     cx.notify();
                     return;
                 }
@@ -838,7 +982,7 @@ impl NativeApp {
         let mut command = match commands::create_thread(&project_id, &title, selection) {
             Ok(value) => value,
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
                 return;
             }
@@ -852,7 +996,7 @@ impl NativeApp {
         let prepare = if self.prepare_new_worktree {
             let base = self.worktree_ref.read(cx).value().trim().to_owned();
             if base.is_empty() {
-                self.status = "Select a base branch for the new worktree".into();
+                self.set_status("Select a base branch for the new worktree", cx);
                 cx.notify();
                 return;
             }
@@ -880,7 +1024,10 @@ impl NativeApp {
         self.pending_threads.push(draft);
         self.schedule_draft_save(cx);
         self.select_thread(&id, window, cx);
-        self.status = "New thread draft · sent to the server with the first message".into();
+        self.set_status(
+            "New thread draft · sent to the server with the first message",
+            cx,
+        );
         cx.notify();
     }
 
@@ -909,13 +1056,13 @@ impl NativeApp {
         if let Some(sender) = &self.commands {
             let _ = sender.try_send(connection::Command::SelectThread(None));
         }
-        self.status = "Checkout selected for the next new thread".into();
+        self.set_status("Checkout selected for the next new thread", cx);
         cx.notify();
     }
 
     fn update_draft_checkout(&mut self, cx: &mut Context<Self>) {
         if self.pending_actions > 0 {
-            self.status = "Wait for the pending server receipt".into();
+            self.set_status("Wait for the pending server receipt", cx);
             cx.notify();
             return;
         }
@@ -927,7 +1074,7 @@ impl NativeApp {
                     .iter()
                     .any(|thread| thread.id == draft.thread.id)
         }) else {
-            self.status = "Select an unsent draft to change its checkout".into();
+            self.set_status("Select an unsent draft to change its checkout", cx);
             cx.notify();
             return;
         };
@@ -941,7 +1088,7 @@ impl NativeApp {
         };
         let base = self.worktree_ref.read(cx).value().trim().to_owned();
         if self.prepare_new_worktree && base.is_empty() {
-            self.status = "Select a base branch for the new worktree".into();
+            self.set_status("Select a base branch for the new worktree", cx);
             cx.notify();
             return;
         }
@@ -966,13 +1113,13 @@ impl NativeApp {
         }
         self.setup_progress = None;
         self.schedule_draft_save(cx);
-        self.status = "Draft checkout updated; message retained".into();
+        self.set_status("Draft checkout updated; message retained", cx);
         cx.notify();
     }
 
     fn worktree_operation(&mut self, tag: &str, more: bool, cx: &mut Context<Self>) {
         if self.worktree_busy {
-            self.status = "Wait for the worktree operation to finish".into();
+            self.set_status("Wait for the worktree operation to finish", cx);
             cx.notify();
             return;
         }
@@ -982,12 +1129,12 @@ impl NativeApp {
             .iter()
             .find(|p| Some(&p.id) == self.selected_project.as_ref())
         else {
-            self.status = "Select a project first".into();
+            self.set_status("Select a project first", cx);
             cx.notify();
             return;
         };
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
@@ -1015,7 +1162,7 @@ impl NativeApp {
             ) {
                 Ok(value) => value,
                 Err(error) => {
-                    self.status = error.into();
+                    self.set_status(error, cx);
                     cx.notify();
                     return;
                 }
@@ -1026,16 +1173,17 @@ impl NativeApp {
             "vcs.removeWorktree" if !path.is_empty() => {
                 if self.confirm_worktree_removal.as_ref() != Some(&path) {
                     self.confirm_worktree_removal = Some(path.clone());
-                    self.status =
-                        "Click Remove again to confirm worktree removal; dirty files are preserved"
-                            .into();
+                    self.set_status(
+                        "Click Remove again to confirm worktree removal; dirty files are preserved",
+                        cx,
+                    );
                     cx.notify();
                     return;
                 }
                 json!({"cwd":cwd,"path":path,"force":false})
             }
             _ => {
-                self.status = "Enter a branch or worktree path".into();
+                self.set_status("Enter a branch or worktree path", cx);
                 cx.notify();
                 return;
             }
@@ -1065,24 +1213,30 @@ impl NativeApp {
                                     }
                                     app.refs.extend(rows.refs);
                                     app.refs_cursor = rows.next_cursor;
-                                    app.status = if rows.is_repo {
-                                        "Branches loaded"
-                                    } else {
-                                        "This directory is not a repository"
-                                    }
-                                    .into();
+                                    app.set_status(
+                                        if rows.is_repo {
+                                            "Branches loaded"
+                                        } else {
+                                            "This directory is not a repository"
+                                        },
+                                        cx,
+                                    );
                                 }
-                                Err(_) => app.status = "Invalid branch listing".into(),
+                                Err(_) => app.set_status("Invalid branch listing", cx),
                             }
                         } else {
                             app.confirm_worktree_removal = None;
-                            app.status = "Worktree operation completed".into();
+                            match tag.as_str() {
+                                "vcs.createWorktree" => app.report_success("Worktree created", cx),
+                                "vcs.removeWorktree" => app.report_success("Worktree removed", cx),
+                                _ => app.set_status("Worktree operation completed", cx),
+                            }
                             app.worktree_outcome = Some(value);
                             app.refs.clear();
                             app.refs_cursor = None;
                         }
                     }
-                    Err(error) => app.status = error,
+                    Err(error) => app.set_status(error, cx),
                 };
                 cx.notify();
             });
@@ -1126,7 +1280,7 @@ impl NativeApp {
 
     fn clone_project(&mut self, cx: &mut Context<Self>) {
         if self.pending_actions > 0 {
-            self.status = "Wait for the pending server receipt".into();
+            self.set_status("Wait for the pending server receipt", cx);
             cx.notify();
             return;
         }
@@ -1137,7 +1291,7 @@ impl NativeApp {
         ) {
             Ok(payload) => self.perform("projectClone.start", payload, None, cx),
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
             }
         }
@@ -1145,7 +1299,7 @@ impl NativeApp {
 
     fn search_contents(&mut self, cx: &mut Context<Self>) {
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
@@ -1154,7 +1308,7 @@ impl NativeApp {
             .as_ref()
             .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
         else {
-            self.status = "Select a project first".into();
+            self.set_status("Select a project first", cx);
             cx.notify();
             return;
         };
@@ -1166,7 +1320,7 @@ impl NativeApp {
         ) {
             Ok(payload) => payload,
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
                 return;
             }
@@ -1190,18 +1344,21 @@ impl NativeApp {
                 match result {
                     Ok(value) => match serde_json::from_value::<files::ContentResults>(value) {
                         Ok(results) => {
-                            app.status = results
-                                .regex_fallback_error
-                                .clone()
-                                .map(|error| {
-                                    format!("Regex failed; showing literal matches: {error}")
-                                })
-                                .unwrap_or_else(|| "Workspace content results loaded".into());
+                            app.set_status(
+                                results
+                                    .regex_fallback_error
+                                    .clone()
+                                    .map(|error| {
+                                        format!("Regex failed; showing literal matches: {error}")
+                                    })
+                                    .unwrap_or_else(|| "Workspace content results loaded".into()),
+                                cx,
+                            );
                             app.content_results = Some(results);
                         }
-                        Err(_) => app.status = "Invalid workspace content results".into(),
+                        Err(_) => app.set_status("Invalid workspace content results", cx),
                     },
-                    Err(error) => app.status = error,
+                    Err(error) => app.set_status(error, cx),
                 }
                 cx.notify();
             });
@@ -1262,19 +1419,22 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         if self.file_busy {
-            self.status = "A file operation is already pending".into();
+            self.set_status("A file operation is already pending", cx);
             cx.notify();
             return;
         }
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
         let text = self.file_contents.read(cx).value().to_string();
         let target = if write {
             if !self.file_editor.writable() {
-                self.status = "Read a complete workspace-relative text file before saving".into();
+                self.set_status(
+                    "Read a complete workspace-relative text file before saving",
+                    cx,
+                );
                 cx.notify();
                 return;
             }
@@ -1295,14 +1455,14 @@ impl NativeApp {
                             })
                 })
             {
-                self.status = "The file belongs to a disconnected workspace".into();
+                self.set_status("The file belongs to a disconnected workspace", cx);
                 cx.notify();
                 return;
             }
             self.file_editor.target.clone().unwrap()
         } else {
             if self.file_editor.dirty(&text) {
-                self.status = "Unsaved file edits: save before reading another file".into();
+                self.set_status("Unsaved file edits: save before reading another file", cx);
                 cx.notify();
                 return;
             }
@@ -1311,13 +1471,13 @@ impl NativeApp {
                 .as_ref()
                 .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
             else {
-                self.status = "Select a project first".into();
+                self.set_status("Select a project first", cx);
                 cx.notify();
                 return;
             };
             let path = self.file_path.read(cx).value().trim().to_owned();
             if path.is_empty() {
-                self.status = "Enter a file path".into();
+                self.set_status("Enter a file path", cx);
                 cx.notify();
                 return;
             }
@@ -1344,11 +1504,11 @@ impl NativeApp {
                 if app.generation!=generation || app.file_epoch!=epoch { return; }
                 app.file_busy=false;
                 match result {
-                    Ok(_) if write=>{ app.file_editor.saved=text;app.status="File saved".into(); }
+                    Ok(_) if write=>{ app.file_editor.saved=text;app.set_status("File saved", cx); }
                     Ok(value)=>match serde_json::from_value::<files::Read>(value) {
                         Ok(read)=>{
                             if app.file_contents.read(cx).value().as_str()!=text {
-                                app.status="File response arrived after an edit; edits preserved. Save or discard before retrying.".into();cx.notify();return;
+                                app.set_status("File response arrived after an edit; edits preserved. Save or discard before retrying.", cx);cx.notify();return;
                             }
                             app.file_contents.update(cx,|input,cx| {
                                 input.set_value(read.contents.clone(),window,cx);
@@ -1359,13 +1519,13 @@ impl NativeApp {
                                     input.set_cursor_position(position,window,cx);
                                 }
                             });
-                            app.status=if read.truncated { "File truncated; saving disabled" } else { "File loaded" }.into();
+                            app.set_status(if read.truncated { "File truncated; saving disabled" } else { "File loaded" }, cx);
                             app.file_environment=app.environment_scope.clone();
                             app.file_editor.loaded(target.cwd,read);
                         }
-                        Err(_)=>app.status="Invalid file response; existing edits preserved".into(),
+                        Err(_)=>app.set_status("Invalid file response; existing edits preserved", cx),
                     },
-                    Err(error)=>app.status=error,
+                    Err(error)=>app.set_status(error, cx),
                 }
                 cx.notify();
             }));
@@ -1386,7 +1546,7 @@ impl NativeApp {
             match self.model_selection(previous, cx) {
                 Ok(selection) => Some(selection),
                 Err(error) => {
-                    self.status = error.into();
+                    self.set_status(error, cx);
                     cx.notify();
                     return;
                 }
@@ -1400,13 +1560,13 @@ impl NativeApp {
 
     fn update_project(&mut self, remove: bool, cx: &mut Context<Self>) {
         let Some(id) = self.selected_project.clone() else {
-            self.status = "Select a project first".into();
+            self.set_status("Select a project first", cx);
             cx.notify();
             return;
         };
         if remove && self.confirm_project_removal.as_ref() != Some(&id) {
             self.confirm_project_removal = Some(id);
-            self.status="Remove project again to confirm. Project threads are removed; workspace files remain untouched.".into();
+            self.set_status("Remove project again to confirm. Project threads are removed; workspace files remain untouched.", cx);
             cx.notify();
             return;
         }
@@ -1421,7 +1581,7 @@ impl NativeApp {
                 self.dispatch(command, cx);
             }
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
             }
         }
@@ -1491,7 +1651,7 @@ impl NativeApp {
         self.new_thread_checkout = None;
         self.generation += 1;
         self.model_override = None;
-        self.status = "Disconnected".into();
+        self.set_status("Disconnected", cx);
         cx.notify();
     }
 
@@ -1503,7 +1663,7 @@ impl NativeApp {
             .update(cx, |input, cx| input.set_value("", window, cx));
         let receiver = auth::pair(server, credential);
         let generation = self.generation;
-        self.status = "Pairing…".into();
+        self.set_status("Pairing…", cx);
         self.pairing_task = Some(cx.spawn(async move |entity, cx| {
             if let Ok(result) = receiver.recv().await {
                 let _ = entity.update(cx, |app, cx| {
@@ -1518,8 +1678,8 @@ impl NativeApp {
                             app.access = Some(access);
                             app.connect(cx);
                         }
-                        Ok(_) => app.status = "Server changed while pairing; pair again".into(),
-                        Err(message) => app.status = message.into(),
+                        Ok(_) => app.set_status("Server changed while pairing; pair again", cx),
+                        Err(message) => app.set_status(message, cx),
                     }
                     cx.notify();
                 });
@@ -1537,7 +1697,7 @@ impl NativeApp {
         let origin = match auth::origin(&server) {
             Ok(origin) => origin,
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
                 return;
             }
@@ -1545,13 +1705,13 @@ impl NativeApp {
         let receiver = match self.vault.request(&server, operation) {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
                 return;
             }
         };
         let generation = self.generation;
-        self.status = "Updating Keychain…".into();
+        self.set_status("Updating Keychain…", cx);
         self.credential_task = Some(cx.spawn(async move |entity, cx| {
             if let Ok(result) = receiver.recv().await {
                 let _ = entity.update(cx, |app, cx| {
@@ -1567,15 +1727,15 @@ impl NativeApp {
                                     app.access = Some(access);
                                     app.connect(cx);
                                 }
-                                Err(error) => app.status = error.into(),
+                                Err(error) => app.set_status(error, cx),
                             }
                         }
-                        Ok(None) if loading => {
-                            app.status =
-                                "No remembered credential for this server. Pair to connect.".into()
-                        }
-                        Ok(_) => app.status = "Keychain updated".into(),
-                        Err(error) => app.status = error.into(),
+                        Ok(None) if loading => app.set_status(
+                            "No remembered credential for this server. Pair to connect.",
+                            cx,
+                        ),
+                        Ok(_) => app.set_status("Keychain updated", cx),
+                        Err(error) => app.set_status(error, cx),
                     }
                     cx.notify();
                 });
@@ -1596,7 +1756,10 @@ impl NativeApp {
                 cx,
             );
         } else {
-            self.status = "Pair with this server before remembering its credential".into();
+            self.set_status(
+                "Pair with this server before remembering its credential",
+                cx,
+            );
             cx.notify();
         }
     }
@@ -1610,7 +1773,7 @@ impl NativeApp {
 
     fn connect(&mut self, cx: &mut Context<Self>) {
         self.disconnect(cx);
-        self.status = "Enter the server origin and pair to connect".into();
+        self.set_status("Enter the server origin and pair to connect", cx);
         let base = self.server.read(cx).value().to_string();
         let origin = auth::origin(&base).ok();
         let token = self
@@ -1670,17 +1833,20 @@ impl NativeApp {
                                         app.clone_progress.clear();
                                         app.setup_progress = None;
                                         app.pending_history_attached = false;
-                                        app.status =
-                                            "Reconnecting — history is being synchronized".into();
+                                        app.set_status(
+                                            "Reconnecting — history is being synchronized",
+                                            cx,
+                                        );
                                         Ok(())
                                     }
                                     connection::Update::Status(status) => {
-                                        app.status = status;
+                                        app.set_status(status, cx);
                                         Ok(())
                                     }
                                     connection::Update::Shell(item) => {
                                         let was_synchronized = app.shell.synchronized;
-                                        let result = app.shell.apply(*item).map_err(str::to_owned);
+                                        let result =
+                                            app.apply_shell_item(*item, cx).map_err(str::to_owned);
                                         app.flush_queues(cx);
                                         app.attach_created_pending(cx);
                                         app.schedule_snooze_wake(cx);
@@ -1709,7 +1875,7 @@ impl NativeApp {
                                             }
                                         }
                                         if app.shell.synchronized {
-                                            app.status = "Connected · synchronized".into();
+                                            app.set_status("Connected · synchronized", cx);
                                         }
                                         result
                                     }
@@ -1730,7 +1896,7 @@ impl NativeApp {
                                                 }
                                                 Err(error) => {
                                                     app.project_settings = None;
-                                                    app.status = error;
+                                                    app.set_status(error, cx);
                                                     Ok(())
                                                 }
                                             }
@@ -1739,12 +1905,27 @@ impl NativeApp {
                                                 == Some(InspectorSection::Clone)
                                         {
                                             match item {
-                                                Ok(value) => workspaces::apply_clones(
-                                                    &mut app.clone_progress,
-                                                    value,
-                                                ),
+                                                Ok(value) => {
+                                                    let running: Vec<String> = app
+                                                        .clone_progress
+                                                        .iter()
+                                                        .filter(|clone| clone.phase == "running")
+                                                        .map(|clone| clone.project_id.clone())
+                                                        .collect();
+                                                    let result = workspaces::apply_clones(
+                                                        &mut app.clone_progress,
+                                                        value,
+                                                    );
+                                                    if app.clone_progress.iter().any(|clone| {
+                                                        clone.phase == "done"
+                                                            && running.contains(&clone.project_id)
+                                                    }) {
+                                                        app.report_success("Repository cloned", cx);
+                                                    }
+                                                    result
+                                                }
                                                 Err(error) => {
-                                                    app.status = error;
+                                                    app.set_status(error, cx);
                                                     app.clone_progress.clear();
                                                     Ok(())
                                                 }
@@ -1763,7 +1944,7 @@ impl NativeApp {
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    app.status = error;
+                                                    app.set_status(error, cx);
                                                     Ok(())
                                                 }
                                             }
@@ -1780,8 +1961,10 @@ impl NativeApp {
                                     }
                                 };
                                 if let Err(error) = result {
-                                    app.status =
-                                        format!("Projection failed — reconnect required: {error}");
+                                    app.set_status(
+                                        format!("Projection failed — reconnect required: {error}"),
+                                        cx,
+                                    );
                                     app.commands = None;
                                     cx.notify();
                                     return false;
@@ -1795,7 +1978,7 @@ impl NativeApp {
                         }
                     }));
                 }
-                Err(message) => self.status = message.into(),
+                Err(message) => self.set_status(message, cx),
             }
         }
         cx.notify();
@@ -1910,7 +2093,7 @@ impl NativeApp {
                 }))
                 .is_err()
         {
-            self.status = "Connection busy or closed; retry selection".into();
+            self.set_status("Connection busy or closed; retry selection", cx);
         }
         cx.notify();
     }
@@ -1953,17 +2136,17 @@ impl NativeApp {
 
     fn project_actions(&mut self, mutation: Option<Value>, cx: &mut Context<Self>) {
         if self.action_busy {
-            self.status = "Another action change is pending".into();
+            self.set_status("Another action change is pending", cx);
             cx.notify();
             return;
         }
         let Some(project) = self.selected_project.clone() else {
-            self.status = "Select a project first".into();
+            self.set_status("Select a project first", cx);
             cx.notify();
             return;
         };
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
@@ -1976,7 +2159,7 @@ impl NativeApp {
             .unwrap_or_default();
         let generation = self.generation;
         self.action_busy = true;
-        self.status = "Reading project actions…".into();
+        self.set_status("Reading project actions…", cx);
         self.action_task = Some(cx.spawn(async move |entity, cx| {
             let saved_change = mutation.clone();
             let result = async {
@@ -2055,9 +2238,9 @@ impl NativeApp {
                         }
                         app.project_settings = Some(settings);
                         app.confirm_action_delete = None;
-                        app.status = "Project actions loaded from this environment".into();
+                        app.set_status("Project actions loaded from this environment", cx);
                     }
-                    Err(error) => app.status = error,
+                    Err(error) => app.set_status(error, cx),
                 }
                 cx.notify();
             });
@@ -2069,7 +2252,7 @@ impl NativeApp {
         let name = self.action_name.read(cx).value().to_string();
         let command = self.action_command.read(cx).value().to_string();
         if name.trim().is_empty() || command.trim().is_empty() {
-            self.status = "Action name and command are required".into();
+            self.set_status("Action name and command are required", cx);
             cx.notify();
             return;
         }
@@ -2084,15 +2267,16 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
         let generation = self.generation;
         let thread_id = self.selected_thread.clone();
         let tag = tag.to_owned();
+        let reverting = payload["type"] == "thread.checkpoint.revert";
         self.pending_actions += 1;
-        self.status = "Waiting for server receipt…".into();
+        self.set_status("Waiting for server receipt…", cx);
         cx.spawn(async move |entity, cx| {
             let result = connection::call(&sender, &tag, payload).await;
             if result.is_ok()
@@ -2147,7 +2331,7 @@ impl NativeApp {
                             match serde_json::from_value::<providers::Config>(value.clone()) {
                                 Ok(config) => app.provider_catalog = config.providers,
                                 Err(_) => {
-                                    app.status = "Invalid provider catalog response".into();
+                                    app.set_status("Invalid provider catalog response", cx);
                                     cx.notify();
                                     return;
                                 }
@@ -2182,7 +2366,7 @@ impl NativeApp {
                                         .apply(shell::ShellItem::Snapshot { snapshot });
                                 }
                                 Err(_) => {
-                                    app.status = "Invalid archive snapshot".into();
+                                    app.set_status("Invalid archive snapshot", cx);
                                     cx.notify();
                                     return;
                                 }
@@ -2212,22 +2396,28 @@ impl NativeApp {
                                 app.schedule_draft_save(cx);
                             }
                         }
-                        app.status = if tag == "server.getConfig" {
-                            format!(
-                                "Connected · provider catalog loaded ({} instances)",
-                                app.provider_catalog.len()
-                            )
-                        } else {
-                            format!(
-                                "Server accepted · sequence {}",
-                                value["sequence"]
-                                    .as_u64()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| "—".into())
-                            )
-                        };
+                        app.set_status(
+                            if tag == "server.getConfig" {
+                                format!(
+                                    "Connected · provider catalog loaded ({} instances)",
+                                    app.provider_catalog.len()
+                                )
+                            } else {
+                                format!(
+                                    "Server accepted · sequence {}",
+                                    value["sequence"]
+                                        .as_u64()
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| "—".into())
+                                )
+                            },
+                            cx,
+                        );
+                        if reverting {
+                            app.report_success("Checkpoint restored", cx);
+                        }
                     }
-                    Err(error) => app.status = error,
+                    Err(error) => app.set_status(error, cx),
                 }
                 cx.notify();
             });
@@ -2246,7 +2436,7 @@ impl NativeApp {
         };
         if self.confirm_delete.as_ref() != Some(&id) {
             self.confirm_delete = Some(id);
-            self.status = "Click Delete again to discard this unsent thread".into();
+            self.set_status("Click Delete again to discard this unsent thread", cx);
             cx.notify();
             return;
         }
@@ -2265,7 +2455,7 @@ impl NativeApp {
             let _ = sender.try_send(connection::Command::Unsubscribe("worktree-setup".into()));
         }
         self.schedule_draft_save(cx);
-        self.status = "Unsent thread discarded".into();
+        self.set_status("Unsent thread discarded", cx);
         cx.notify();
     }
 
@@ -2337,7 +2527,7 @@ impl NativeApp {
                 self.select_thread(&target, window, cx);
             }
             self.reveal_inspector(InspectorSection::Project, window, cx);
-            self.status = "Edit the title, then choose Rename from More".into();
+            self.set_status("Edit the title, then choose Rename from More", cx);
             cx.notify();
             return;
         }
@@ -2376,7 +2566,7 @@ impl NativeApp {
             if kind == "thread.meta.update" {
                 let title = self.title.read(cx).value().trim().to_owned();
                 if title.is_empty() {
-                    self.status = "A title is required".into();
+                    self.set_status("A title is required", cx);
                     cx.notify();
                     return;
                 }
@@ -2385,9 +2575,9 @@ impl NativeApp {
                     store.put_pending(&self.environment_scope, draft.clone());
                 }
                 self.schedule_draft_save(cx);
-                self.status = "Draft renamed".into();
+                self.set_status("Draft renamed", cx);
             } else {
-                self.status = "Send the first message before changing thread status".into();
+                self.set_status("Send the first message before changing thread status", cx);
             }
             cx.notify();
             return;
@@ -2397,7 +2587,7 @@ impl NativeApp {
             "thread.meta.update" => {
                 let title = self.title.read(cx).value();
                 if title.trim().is_empty() {
-                    self.status = "A title is required".into();
+                    self.set_status("A title is required", cx);
                     cx.notify();
                     return;
                 }
@@ -2415,7 +2605,10 @@ impl NativeApp {
             }
             "thread.delete" if self.confirm_delete.as_deref() != Some(id) => {
                 self.confirm_delete = Some(id.to_owned());
-                self.status = "Click Delete again to confirm permanent thread deletion".into();
+                self.set_status(
+                    "Click Delete again to confirm permanent thread deletion",
+                    cx,
+                );
                 cx.notify();
                 return;
             }
@@ -2444,7 +2637,7 @@ impl NativeApp {
         let until = match chrono::DateTime::parse_from_rfc3339(value.trim()) {
             Ok(until) if until > chrono::Utc::now() => until,
             _ => {
-                self.status = "Choose a future ISO date/time with timezone".into();
+                self.set_status("Choose a future ISO date/time with timezone", cx);
                 cx.notify();
                 return;
             }
@@ -2461,7 +2654,7 @@ impl NativeApp {
     fn search_threads(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).value();
         if !(2..=200).contains(&query.trim().chars().count()) {
-            self.status = "Search needs 2–200 characters".into();
+            self.set_status("Search needs 2–200 characters", cx);
             cx.notify();
             return;
         }
@@ -2500,7 +2693,7 @@ impl NativeApp {
         let text = self.composer.read(cx).value().to_string();
         if restore {
             if !text.is_empty() {
-                self.status = "Stash or clear the current prompt before restoring".into();
+                self.set_status("Stash or clear the current prompt before restoring", cx);
                 cx.notify();
                 return;
             }
@@ -2563,7 +2756,7 @@ impl NativeApp {
         let mut selection = match self.model_selection(previous, cx) {
             Ok(selection) => selection,
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
                 return;
             }
@@ -2588,7 +2781,7 @@ impl NativeApp {
                         .is_some_and(|choices| choices.iter().any(|choice| choice["id"] == value)))
         });
         if !valid {
-            self.status = "Model option is unavailable; refresh the catalog".into();
+            self.set_status("Model option is unavailable; refresh the catalog", cx);
             cx.notify();
             return;
         }
@@ -2623,12 +2816,12 @@ impl NativeApp {
             .iter()
             .find(|provider| provider.instance_id == instance)
         else {
-            self.status = "Provider instance no longer available".into();
+            self.set_status("Provider instance no longer available", cx);
             cx.notify();
             return;
         };
         if !provider.selectable() || !provider.models.iter().any(|entry| entry.slug == model) {
-            self.status = "Provider or model is unavailable; refresh its catalog".into();
+            self.set_status("Provider or model is unavailable; refresh its catalog", cx);
             cx.notify();
             return;
         }
@@ -2641,7 +2834,7 @@ impl NativeApp {
                         || thread["modelSelection"]["model"] != model)
             })
         {
-            self.status = "This provider requires a new thread for a model change".into();
+            self.set_status("This provider requires a new thread for a model change", cx);
             cx.notify();
             return;
         }
@@ -2711,7 +2904,7 @@ impl NativeApp {
             return;
         }
         if self.pending_actions > 0 {
-            self.status = "Wait for the pending server receipt".into();
+            self.set_status("Wait for the pending server receipt", cx);
             cx.notify();
             return;
         }
@@ -2721,7 +2914,7 @@ impl NativeApp {
         let (id, message) = match self.composer_message(cx) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
                 return;
             }
@@ -2748,7 +2941,7 @@ impl NativeApp {
                 );
             }
             Err(message) => {
-                self.status = message.into();
+                self.set_status(message, cx);
                 cx.notify();
             }
         }
@@ -2761,7 +2954,7 @@ impl NativeApp {
         let (thread_id, message) = match self.composer_message(cx) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
                 return;
             }
@@ -2771,17 +2964,20 @@ impl NativeApp {
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.remember_composer_draft(cx);
-        self.status = if steer {
-            "Interrupting to steer…".into()
-        } else {
-            "Queued — sends when the turn finishes".into()
-        };
+        self.set_status(
+            if steer {
+                "Interrupting to steer…"
+            } else {
+                "Queued — sends when the turn finishes"
+            },
+            cx,
+        );
         cx.notify();
         if !steer {
             return;
         }
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             return;
         };
         let mut payload = commands::command("thread.turn.interrupt", &thread_id);
@@ -2791,7 +2987,7 @@ impl NativeApp {
             let _ = entity.update(cx, |app, cx| match result {
                 Ok(_) => app.send_queued(&thread_id, id, cx),
                 Err(error) => {
-                    app.status = error;
+                    app.set_status(error, cx);
                     cx.notify();
                 }
             });
@@ -2854,7 +3050,7 @@ impl NativeApp {
     ) {
         let Some(sender) = self.commands.clone() else {
             self.queues.settle(&thread_id, message.id, false);
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
@@ -2862,21 +3058,24 @@ impl NativeApp {
             Ok(payload) => payload,
             Err(error) => {
                 self.queues.settle(&thread_id, message.id, false);
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
                 return;
             }
         };
-        self.status = "Sending queued message…".into();
+        self.set_status("Sending queued message…", cx);
         cx.notify();
         cx.spawn(async move |entity, cx| {
             let result = connection::call(&sender, "orchestration.dispatchCommand", payload).await;
             let _ = entity.update(cx, |app, cx| {
                 app.queues.settle(&thread_id, message.id, result.is_ok());
-                app.status = match result {
-                    Ok(_) => "Queued message sent".into(),
-                    Err(error) => format!("Queued message not sent: {error}"),
-                };
+                app.set_status(
+                    match result {
+                        Ok(_) => "Queued message sent".into(),
+                        Err(error) => format!("Queued message not sent: {error}"),
+                    },
+                    cx,
+                );
                 cx.notify();
             });
         })
@@ -2981,8 +3180,10 @@ impl NativeApp {
         };
         if self.confirm_revert != Some(turn_count) {
             self.confirm_revert = Some(turn_count);
-            self.status =
-                "Click again to restore the working tree to this checkpoint".into();
+            self.set_status(
+                "Click again to restore the working tree to this checkpoint",
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -3089,7 +3290,7 @@ impl NativeApp {
         ) {
             Ok(payload) => self.dispatch(payload, cx),
             Err(error) => {
-                self.status = error.into();
+                self.set_status(error, cx);
                 cx.notify();
             }
         }
@@ -3123,7 +3324,7 @@ impl NativeApp {
         let flow = state["flowId"].as_str().unwrap_or_default().to_owned();
         let callback = self.auth_callback.read(cx).value().trim().to_owned();
         if callback.is_empty() {
-            self.status = "Paste the callback URL first".into();
+            self.set_status("Paste the callback URL first", cx);
             cx.notify();
             return;
         }
@@ -3139,7 +3340,7 @@ impl NativeApp {
     /// an attachment for the next turn.
     fn attach_files(&mut self, cx: &mut Context<Self>) {
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
@@ -3151,7 +3352,7 @@ impl NativeApp {
             prompt: Some("Attach files".into()),
         });
         self.pending_actions += 1;
-        self.status = "Uploading attachments…".into();
+        self.set_status("Uploading attachments…", cx);
         cx.notify();
         cx.spawn(async move |entity, cx| {
             let paths = match receiver.await {
@@ -3168,7 +3369,7 @@ impl NativeApp {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         let _ = entity.update(cx, |app, cx| {
-                            app.status = format!("Could not read {name}: {error}");
+                            app.set_status(format!("Could not read {name}: {error}"), cx);
                             cx.notify();
                         });
                         continue;
@@ -3190,7 +3391,7 @@ impl NativeApp {
                             Ok(()) => Some(json!({"id": id, "name": name, "mimeType": mime, "sizeBytes": size})),
                             Err(error) => {
                                 let _ = entity.update(cx, |app, cx| {
-                                    app.status = error;
+                                    app.set_status(error, cx);
                                     cx.notify();
                                 });
                                 None
@@ -3199,7 +3400,7 @@ impl NativeApp {
                     }
                     Err(error) => {
                         let _ = entity.update(cx, |app, cx| {
-                            app.status = error;
+                            app.set_status(error, cx);
                             cx.notify();
                         });
                         None
@@ -3209,7 +3410,7 @@ impl NativeApp {
                     let label = attachment["name"].as_str().unwrap_or("attachment").to_owned();
                     let _ = entity.update(cx, |app, cx| {
                         app.attachments.push(attachment);
-                        app.status = format!("Attached {label}");
+                        app.set_status(format!("Attached {label}"), cx);
                         cx.notify();
                     });
                 }
@@ -3223,10 +3424,11 @@ impl NativeApp {
     }
 
     /// Commit, push, and open a pull request for the selected thread. Streams the
-    /// server's progress events and reports the final phase.
+    /// server's progress events and reports the server's result toast when the
+    /// action finishes.
     fn push_and_create_pr(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.selected_thread.clone() else {
-            self.status = "Select a thread first".into();
+            self.set_status("Select a thread first", cx);
             cx.notify();
             return;
         };
@@ -3240,17 +3442,17 @@ impl NativeApp {
             .filter(|path| !path.is_empty())
             .unwrap_or_else(|| self.workspace.read(cx).value().to_string());
         if cwd.trim().is_empty() {
-            self.status = "Select a project or open a worktree first".into();
+            self.set_status("Select a project or open a worktree first", cx);
             cx.notify();
             return;
         }
         let Some(sender) = self.commands.clone() else {
-            self.status = "Not connected".into();
+            self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
         self.pending_actions += 1;
-        self.status = "Running git action\u{2026}".into();
+        self.set_status("Running git action\u{2026}", cx);
         cx.notify();
         cx.spawn(async move |entity, cx| {
             let result = connection::call_stream(
@@ -3268,14 +3470,26 @@ impl NativeApp {
             let _ = entity.update(cx, |app, cx| {
                 app.pending_actions = app.pending_actions.saturating_sub(1);
                 match result {
-                    Ok(events) => {
-                        app.status = events
-                            .last()
-                            .and_then(|event| event["phase"].as_str())
-                            .map(|phase| format!("Git action finished ({phase})"))
-                            .unwrap_or_else(|| "Git action finished".into());
-                    }
-                    Err(error) => app.status = error,
+                    Ok(events) => match events.last() {
+                        Some(event) if event["kind"] == "action_failed" => app.set_status(
+                            format!(
+                                "Git action failed: {}",
+                                event["message"].as_str().unwrap_or("unknown error")
+                            ),
+                            cx,
+                        ),
+                        Some(event) if event["kind"] == "action_finished" => {
+                            let toast = &event["result"]["toast"];
+                            let title = toast["title"].as_str().unwrap_or("Git action finished");
+                            let status = match toast["description"].as_str() {
+                                Some(description) => format!("{title} · {description}"),
+                                None => title.to_owned(),
+                            };
+                            app.report_success(&status, cx);
+                        }
+                        _ => app.set_status("Git action failed: ended without a result", cx),
+                    },
+                    Err(error) => app.set_status(error, cx),
                 }
                 cx.notify();
             });
@@ -3300,7 +3514,7 @@ impl NativeApp {
             .filter(|path| !path.is_empty())
             .unwrap_or_else(|| self.workspace.read(cx).value().to_string());
         if cwd.trim().is_empty() {
-            self.status = "Select a project or open a worktree first".into();
+            self.set_status("Select a project or open a worktree first", cx);
             cx.notify();
             return;
         }
@@ -3384,6 +3598,7 @@ impl Render for NativeApp {
                                 .child(self.render_conversation(cx))
                                 .child(self.render_composer(cx))
                                 .child(self.render_status_bar(cx))
+                                .children(self.render_toasts(cx))
                                 .into_any_element(),
                         ),
                     )
@@ -3565,6 +3780,7 @@ fn main() {
         gpui_kit::init(cx);
         theme::init(cx);
         bind_native_keys(cx);
+        cx.set_app_identity("codes.t3.native", "T3 Code Native");
         cx.on_action(|_: &QuitNative, cx| cx.quit());
         cx.set_menus(vec![
             gpui_kit::Menu {

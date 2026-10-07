@@ -3,7 +3,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
 };
 use gpui_kit::{Context, div, prelude::*, px};
-use t3code_desktop_gpui::palette;
+use t3code_desktop_gpui::{notifications, palette};
 
 use crate::NativeApp;
 
@@ -38,14 +38,7 @@ impl NativeApp {
                     .find(|segment| !segment.is_empty())
             })
             .map(str::to_owned);
-        let status_is_error = {
-            let status = self.status.to_lowercase();
-            status.contains("failed")
-                || status.contains("error")
-                || status.contains("rejected")
-                || status.contains("could not")
-                || status.contains("cannot")
-        };
+        let status_is_error = notifications::is_error(&self.status);
         div()
             .id("status-bar")
             .flex()
