@@ -741,7 +741,16 @@ impl NativeApp {
             );
         }
         card.child(
-            div().flex().justify_end().pt_1().child(
+            div().flex().justify_end().gap_2().pt_1()
+                .child(
+                    Button::new(gpui_kit::SharedString::from(format!("view-checkpoint-{turn_count}")))
+                        .debug_selector(move || format!("view-checkpoint-{turn_count}"))
+                        .label("View changes")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(move |app, _, _, cx| app.view_checkpoint_diff(turn_count, cx))),
+                )
+                .child(
                 Button::new(gpui_kit::SharedString::from(selector.clone()))
                     .debug_selector(move || selector.clone())
                     .label(if confirm {

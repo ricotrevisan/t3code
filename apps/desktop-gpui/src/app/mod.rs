@@ -3,6 +3,7 @@
 
 mod composer;
 mod connection;
+pub(crate) mod diffs;
 mod files;
 mod models;
 mod notifications;

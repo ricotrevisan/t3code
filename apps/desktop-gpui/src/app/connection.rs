@@ -9,6 +9,7 @@ use t3code_desktop_gpui::{
 
 impl NativeApp {
     pub(crate) fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.diffs.invalidate();
         self.connection_task = None;
         self.pairing_task = None;
         self.credential_task = None;

@@ -1,6 +1,7 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
 mod workspace_context;
 mod checkout_context;
+mod checkpoint_diffs;
 
 use super::*;
 use gpui_kit::component::Root;
