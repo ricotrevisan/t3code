@@ -296,6 +296,27 @@ fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn header_diff_chip_hides_when_the_checkpoint_changed_nothing(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let detail = |files: Value| json!({
+        "id": "t", "title": "Thread", "messages": [], "activities": [], "proposedPlans": [],
+        "checkpoints": [{"turnId": "turn-1", "checkpointTurnCount": 1, "checkpointRef": "ref",
+            "status": "ready", "files": files, "assistantMessageId": null,
+            "completedAt": "2026-01-01T00:00:00Z"}],
+        "session": null,
+    });
+    cx.update(|_, cx| app.update(cx, |app, cx| { app.detail.thread = Some(detail(json!([]))); cx.notify(); }));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("header-diff").is_none());
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.detail.thread = Some(detail(json!([{"path": "a.rs", "kind": "modified", "additions": 1, "deletions": 0}])));
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("header-diff").is_some());
+}
+
+#[gpui_kit::test]
 fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
@@ -365,7 +386,11 @@ fn right_panel_tabs_switch_tools(cx: &mut TestAppContext) {
     cx.simulate_click(changes.center(), Default::default());
     assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Changes);
     cx.run_until_parked();
-    assert!(cx.debug_bounds("changes-panel").is_some());
+    let panel = cx.debug_bounds("changes-panel").expect("changes panel");
+    // The Inspector body leaves the tree, so the panel sits right under the tabs
+    // instead of below a hidden body that still took the space.
+    assert!(cx.debug_bounds("section-project").is_none());
+    assert!(panel.top() < changes.bottom() + px(40.));
 
     let agents = cx
         .debug_bounds("right-tab-agents")

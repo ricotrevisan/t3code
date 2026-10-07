@@ -44,7 +44,8 @@ impl NativeApp {
                 let files = checkpoint["files"].as_array().cloned().unwrap_or_default();
                 let (additions, deletions) = conversation::diff_totals(&files);
                 (files.len(), additions, deletions)
-            });
+            })
+            .filter(|(files, _, _)| *files > 0);
         let header_project = self
             .selected_project
             .as_ref()
@@ -132,6 +133,7 @@ impl NativeApp {
                     .when_some(header_diff, |view, (files, additions, deletions)| {
                         view.child(
                             div()
+                                .debug_selector(|| "header-diff".into())
                                 .flex()
                                 .items_center()
                                 .gap_1()

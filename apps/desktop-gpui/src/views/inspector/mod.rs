@@ -161,7 +161,11 @@ impl NativeApp {
                     }),
                 ),
             )
-            .child(self.render_inspector_body(cx))
+            // Only the active tab's body is in the tree: a hidden body would still
+            // take its flex_1 space and push the other panels below the fold.
+            .when(self.right_tab == RightTab::Inspector, |view| {
+                view.child(self.render_inspector_body(cx))
+            })
             .when(self.right_tab == RightTab::Changes, |view| {
                 view.child(self.render_changes_panel(cx))
             })
@@ -174,7 +178,6 @@ impl NativeApp {
         let danger = cx.theme().danger;
         let mut body = div()
             .id("inspector-body")
-            .when(self.right_tab != RightTab::Inspector, |view| view.hidden())
             .flex()
             .flex_col()
             .gap_2()

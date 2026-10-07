@@ -93,6 +93,14 @@ pub fn turn_summary(turn: &Value) -> Option<(String, TurnState)> {
 }
 
 /// Added/deleted line totals for a checkpoint's changed files.
+fn step_count(count: usize) -> String {
+    if count == 1 {
+        "1 step".to_owned()
+    } else {
+        format!("{count} steps")
+    }
+}
+
 pub fn diff_totals(files: &[Value]) -> (u64, u64) {
     files.iter().fold((0, 0), |(additions, deletions), file| {
         (
@@ -1054,9 +1062,9 @@ pub fn timeline_rows(
         if !activities.is_empty() {
             let label = match &summary {
                 Some((label, TurnState::Completed)) => {
-                    format!("{label} · {} steps", items.len())
+                    format!("{label} · {}", step_count(items.len()))
                 }
-                _ => format!("{} activity steps", items.len()),
+                _ => step_count(items.len()),
             };
             push(
                 format!("activity:{key}"),

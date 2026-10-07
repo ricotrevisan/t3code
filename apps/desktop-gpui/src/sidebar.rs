@@ -139,7 +139,20 @@ pub fn grouped<'a>(
     let (pinned, active) = rows
         .into_iter()
         .partition(|thread| thread.pinned_at.is_some());
-    [("pinned", "Pinned", pinned), ("active", "Active", active)]
+    [
+        ("pinned", "Pinned", pinned),
+        ("active", group_label(view), active),
+    ]
+}
+
+/// The unpinned group's label in each view; only the Active view's rows are active.
+pub fn group_label(view: View) -> &'static str {
+    match view {
+        View::Active => "Active",
+        View::Settled => "Settled",
+        View::Snoozed => "Snoozed",
+        View::Archived => "Archived",
+    }
 }
 
 /// Collapse-state key for one project's thread group.
@@ -373,6 +386,17 @@ mod tests {
             .map(|(key, _, rows)| (key, rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>()))
             .collect();
         assert_eq!(ids, vec![("pinned", vec!["pinned"]), ("active", vec!["t"])]);
+    }
+
+    #[test]
+    fn group_label_names_the_view_not_the_active_state() {
+        let now = Utc::now();
+        let mut settled = thread();
+        settled.settled_override = Some("settled".into());
+        let threads = vec![settled];
+        assert_eq!(grouped(&threads, "p", View::Settled, now)[1].1, "Settled");
+        assert_eq!(grouped(&threads, "p", View::Active, now)[1].1, "Active");
+        assert_eq!(group_label(View::Archived), "Archived");
     }
 
     #[test]
