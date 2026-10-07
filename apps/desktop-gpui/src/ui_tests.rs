@@ -129,6 +129,107 @@ fn runtime_and_interaction_mode_chips_dispatch_the_toggled_command(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn statusbar_long_values_resize_without_overlap_and_keep_entry_points(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    let environment = "ws://very-long-environment-name.tailnet.example:3773/ws";
+    let worktree = "/tmp/a-very-long-project-directory/worktrees/an-even-longer-worktree-checkout-name";
+    let branch = "feature/a-very-long-branch-name-for-native-responsive-statusbar";
+    let message = "Failed to reconnect to the selected environment; check the connection settings and retry";
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.environment_scope = environment.into();
+        app.shell.threads[0].branch = Some(branch.into());
+        app.shell.threads[0].worktree_path = Some(worktree.into());
+        app.status = message.into();
+        app.pending_actions = 1;
+        cx.notify();
+    }));
+    for width in [1280., 960., 1100., 960.] {
+        cx.simulate_resize(size(px(width), px(1000.)));
+        cx.run_until_parked();
+        assert!(app.read_with(cx, |app, _| app.sidebar_open && app.inspector_open));
+        let bar = cx.debug_bounds("status-bar").expect("status bar painted");
+        let mut previous_right = bar.left();
+        for selector in ["environment-chip", "worktree-chip", "branch-chip", "status-message"] {
+            let bounds = cx.debug_bounds(selector).expect(selector);
+            assert!(bounds.left() >= previous_right, "{selector} overlaps at {width}");
+            assert!(bounds.right() <= bar.right(), "{selector} outside bar at {width}");
+            assert!(bounds.top() >= bar.top() && bounds.bottom() <= bar.bottom());
+            assert!(bounds.size.width >= px(if selector == "status-message" { 96. } else { 24. }), "{selector} too narrow at {width}: {bounds:?}");
+            previous_right = bounds.right();
+        }
+    }
+
+    let environment_chip = cx.debug_bounds("environment-chip").unwrap();
+    cx.simulate_click(environment_chip.center(), Default::default());
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.settings_open));
+    assert!(cx.debug_bounds("pairing-input").is_some(), "connection controls reachable");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    for trigger in ["worktree-chip", "branch-chip"] {
+        let reply = open_branch_picker_at(cx, &requests, trigger, worktree);
+        assert_eq!(app.read_with(cx, |app, _| app.branch_picker), Some(trigger));
+        reply.send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[]}))).unwrap();
+        cx.run_until_parked();
+        let manage = cx.debug_bounds("branch-picker-manage").unwrap();
+        cx.simulate_click(manage.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Inspector);
+        assert_eq!(app.read_with(cx, |app, _| app.inspector_section), Some(InspectorSection::Worktrees));
+        assert!(cx.debug_bounds("draft-checkout-update").is_some());
+    }
+}
+
+#[gpui_kit::test]
+fn statusbar_error_and_offline_keep_readable_text_and_full_tooltip(cx: &mut TestAppContext) {
+    let (app, cx, _) = harness(cx);
+    let message = "Failed to reconnect: the selected remote machine rejected the saved credential; pair again in Connection settings";
+    let mut connected_tooltip_width = px(0.);
+    for offline in [false, true] {
+        cx.simulate_mouse_move(point(px(1.), px(1.)), None, Default::default());
+        cx.update(|_, cx| app.update(cx, |app, cx| {
+            app.status = message.into();
+            if offline { app.commands = None; }
+            app.pending_actions = 1;
+            cx.notify();
+        }));
+        cx.simulate_resize(size(px(960.), px(1000.)));
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("status-message").expect("status message painted");
+        assert!(bounds.size.width >= px(96.), "readable message lane: {bounds:?}");
+        cx.simulate_mouse_move(bounds.center(), None, Default::default());
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        let tooltip = cx.debug_bounds("status-tooltip-text").expect("hover reveals status tooltip");
+        let viewport = cx.update(|window, _| window.viewport_size());
+        assert!(tooltip.size.width > bounds.size.width * 3., "tooltip retains the long message");
+        assert!(tooltip.left() >= px(0.) && tooltip.right() <= viewport.width);
+        assert!(tooltip.top() >= px(0.) && tooltip.bottom() <= viewport.height);
+        if offline {
+            assert!(tooltip.size.width > connected_tooltip_width, "Offline prefix remains in full tooltip");
+        } else {
+            connected_tooltip_width = tooltip.size.width;
+        }
+    }
+    // A message longer than the viewport wraps in the tooltip, not in the bar.
+    cx.simulate_mouse_move(point(px(1.), px(1.)), None, Default::default());
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.status = message.repeat(4);
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("status-message").unwrap();
+    cx.simulate_mouse_move(bounds.center(), None, Default::default());
+    cx.run_until_parked();
+    cx.executor().advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    let tooltip = cx.debug_bounds("status-tooltip-text").unwrap();
+    assert!(tooltip.size.height > bounds.size.height * 2.);
+    assert!(tooltip.left() >= px(0.) && tooltip.right() <= px(960.));
+}
+
+#[gpui_kit::test]
 fn settings_surface_opens_and_closes(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     let bounds = cx
@@ -2513,6 +2614,15 @@ fn open_branch_picker(
     requests: &async_channel::Receiver<connection::Command>,
     trigger: &'static str,
 ) -> async_channel::Sender<Result<Value, String>> {
+    open_branch_picker_at(cx, requests, trigger, "/tmp/fixture")
+}
+
+fn open_branch_picker_at(
+    cx: &mut VisualTestContext,
+    requests: &async_channel::Receiver<connection::Command>,
+    trigger: &'static str,
+    cwd: &str,
+) -> async_channel::Sender<Result<Value, String>> {
     let chip = cx.debug_bounds(trigger).expect("branch picker trigger");
     cx.simulate_click(chip.center(), Default::default());
     cx.run_until_parked();
@@ -2525,7 +2635,7 @@ fn open_branch_picker(
         panic!("expected a branch listing")
     };
     assert_eq!(tag, "vcs.listRefs");
-    assert_eq!(payload["cwd"], "/tmp/fixture");
+    assert_eq!(payload["cwd"], cwd);
     reply
 }
 
