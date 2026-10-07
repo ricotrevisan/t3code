@@ -96,8 +96,7 @@ impl NativeApp {
                 }
             }
         };
-        let title = self.title.read(cx).value().to_string();
-        let mut command = match commands::create_thread(&project_id, &title, selection) {
+        let mut command = match commands::create_thread(&project_id, "New thread", selection) {
             Ok(value) => value,
             Err(error) => {
                 self.set_status(error, cx);

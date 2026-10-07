@@ -317,6 +317,61 @@ fn header_diff_chip_hides_when_the_checkpoint_changed_nothing(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn new_draft_is_titled_new_thread_whatever_the_title_field_holds(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.title
+                .update(cx, |input, cx| input.set_value("Other", window, cx))
+        })
+    });
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    app.read_with(cx, |app, _| {
+        assert_eq!(app.pending_threads.len(), 1);
+        assert_eq!(app.pending_threads[0].thread.title, "New thread");
+        assert_eq!(app.shell.threads[0].title, "Thread");
+        assert_eq!(app.selected_thread, Some(app.pending_threads[0].thread.id.clone()));
+    });
+}
+
+#[gpui_kit::test]
+fn header_thread_toolbar_needs_a_selected_thread(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        theme::init(cx);
+        bind_native_keys(cx);
+    });
+    let mut app = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| NativeApp::new(window, cx, false));
+        app = Some(entity.clone());
+        Root::new(entity, window, cx)
+    });
+    cx.simulate_resize(size(px(1280.), px(1000.)));
+    let app = app.unwrap();
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.shell.apply(serde_json::from_value(json!({"kind":"snapshot","snapshot":{"snapshotSequence":0,"projects":[{"id":"p","title":"Fixture","workspaceRoot":"/tmp/fixture"}],"threads":[{"id":"t","projectId":"p","title":"Thread","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access","interactionMode":"default","archivedAt":null,"branch":"main"}]}})).unwrap()).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    let toolbar = ["push-pr", "open-editor", "thread-menu", "branch-selector"];
+    for id in toolbar {
+        assert!(cx.debug_bounds(id).is_none(), "{id} without a thread");
+    }
+    assert!(cx.debug_bounds("toggle-inspector").is_some());
+    cx.update(|window, cx| app.update(cx, |app, cx| app.select_thread("t", window, cx)));
+    cx.run_until_parked();
+    for id in toolbar {
+        assert!(cx.debug_bounds(id).is_some(), "{id} with a thread");
+    }
+    cx.update(|window, cx| app.update(cx, |app, cx| app.new_thread(window, cx)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("push-pr").is_some());
+    assert!(cx.debug_bounds("branch-selector").is_none(), "a draft without a branch");
+}
+
+#[gpui_kit::test]
 fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
@@ -2340,7 +2395,12 @@ fn picker_names(app: &Entity<NativeApp>, cx: &mut VisualTestContext) -> Vec<Stri
 #[gpui_kit::test]
 fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
-    cx.update(|_, cx| app.update(cx, |app, _| app.shell.threads[0].branch = Some("main".into())));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.shell.threads[0].branch = Some("main".into());
+            cx.notify();
+        })
+    });
     cx.run_until_parked();
     let chip = cx.debug_bounds("branch-selector").expect("branch chip");
     let reply = open_branch_picker(cx, &requests, "branch-selector");
@@ -2408,7 +2468,12 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
 #[gpui_kit::test]
 fn branch_picker_sets_an_unsent_draft_checkout_without_a_request(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
-    cx.update(|window, cx| app.update(cx, |app, cx| app.new_thread(window, cx)));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.new_thread(window, cx);
+            app.pending_threads[0].thread.branch = Some("main".into());
+        })
+    });
     cx.run_until_parked();
     while requests.try_recv().is_ok() {}
     let reply = open_branch_picker(cx, &requests, "branch-selector");
@@ -2433,7 +2498,12 @@ fn branch_picker_sets_an_unsent_draft_checkout_without_a_request(cx: &mut TestAp
 #[gpui_kit::test]
 fn branch_picker_closes_on_escape_and_outside_click_without_a_request(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
-    cx.update(|_, cx| app.update(cx, |app, _| app.shell.threads[0].branch = Some("main".into())));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.shell.threads[0].branch = Some("main".into());
+            cx.notify();
+        })
+    });
     cx.run_until_parked();
     let reply = open_branch_picker(cx, &requests, "branch-selector");
     reply

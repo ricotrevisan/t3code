@@ -16,6 +16,7 @@ impl NativeApp {
         let muted = cx.theme().muted;
         let green = cx.theme().green;
         let danger = cx.theme().danger;
+        let has_thread = self.selected_thread.is_some();
         let header_title = self.selected_thread_title();
         let header_branch = self.selected_thread_branch();
         let header_worktree = self.selected_thread_worktree().is_some();
@@ -65,126 +66,141 @@ impl NativeApp {
             .py_2()
             .border_b_1()
             .border_color(border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .when_some(header_project, |view, project| {
-                        view.child(
+            .when(has_thread, |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .min_w_0()
+                        .when_some(header_project, |view, project| {
+                            view.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(muted_foreground)
+                                    .child(format!("{project} /")),
+                            )
+                        })
+                        .child(
                             div()
-                                .text_sm()
-                                .text_color(muted_foreground)
-                                .child(format!("{project} /")),
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(header_title),
                         )
-                    })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(header_title),
-                    )
-                    .when(self.selected_thread.is_some(), |view| {
-                        view.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    Button::new("branch-selector")
-                                        .debug_selector(|| "branch-selector".into())
-                                        .icon(IconName::GitBranch)
-                                        .label(header_branch.unwrap_or_else(|| "No branch".into()))
-                                        .when(header_worktree, |button| {
-                                            button.child(Icon::new(IconName::FolderGit).xsmall())
-                                        })
-                                        .ghost()
-                                        .small()
-                                        .selected(branch_picker)
-                                        .tooltip("Switch the branch or worktree for this thread")
-                                        .on_click(cx.listener(|app, _, window, cx| {
-                                            app.open_branch_picker("branch-selector", window, cx)
-                                        })),
-                                )
-                                // The wrapper puts the picker below the chip, not at the column's top.
-                                .when(branch_picker, |view| {
-                                    view.child(
-                                        div().child(deferred(
-                                            anchored()
-                                                .snap_to_window()
-                                                .child(self.render_branch_picker(false, cx)),
-                                        )),
+                        .when_some(header_branch, |view, branch| {
+                            view.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        Button::new("branch-selector")
+                                            .debug_selector(|| "branch-selector".into())
+                                            .icon(IconName::GitBranch)
+                                            .label(branch)
+                                            .when(header_worktree, |button| {
+                                                button
+                                                    .child(Icon::new(IconName::FolderGit).xsmall())
+                                            })
+                                            .ghost()
+                                            .small()
+                                            .selected(branch_picker)
+                                            .tooltip(
+                                                "Switch the branch or worktree for this thread",
+                                            )
+                                            .on_click(cx.listener(|app, _, window, cx| {
+                                                app.open_branch_picker(
+                                                    "branch-selector",
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
                                     )
-                                }),
-                        )
-                    })
-                    .when_some(header_session, |view, (label, is_danger)| {
-                        view.child(
-                            div()
-                                .px_2()
-                                .rounded_sm()
-                                .bg(muted)
-                                .text_xs()
-                                .text_color(if is_danger { danger } else { muted_foreground })
-                                .child(label),
-                        )
-                    })
-                    .when_some(header_diff, |view, (files, additions, deletions)| {
-                        view.child(
-                            div()
-                                .debug_selector(|| "header-diff".into())
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_2()
-                                .rounded_sm()
-                                .bg(muted)
-                                .text_xs()
-                                .text_color(muted_foreground)
-                                .child(format!("{files} files"))
-                                .child(div().text_color(green).child(format!("+{additions}")))
-                                .child(div().text_color(danger).child(format!("-{deletions}"))),
-                        )
-                    }),
-            )
+                                    // The wrapper puts the picker below the chip, not at the column's top.
+                                    .when(branch_picker, |view| {
+                                        view.child(
+                                            div().child(deferred(
+                                                anchored()
+                                                    .snap_to_window()
+                                                    .child(self.render_branch_picker(false, cx)),
+                                            )),
+                                        )
+                                    }),
+                            )
+                        })
+                        .when_some(header_session, |view, (label, is_danger)| {
+                            view.child(
+                                div()
+                                    .px_2()
+                                    .rounded_sm()
+                                    .bg(muted)
+                                    .text_xs()
+                                    .text_color(if is_danger { danger } else { muted_foreground })
+                                    .child(label),
+                            )
+                        })
+                        .when_some(header_diff, |view, (files, additions, deletions)| {
+                            view.child(
+                                div()
+                                    .debug_selector(|| "header-diff".into())
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .px_2()
+                                    .rounded_sm()
+                                    .bg(muted)
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child(format!("{files} files"))
+                                    .child(div().text_color(green).child(format!("+{additions}")))
+                                    .child(div().text_color(danger).child(format!("-{deletions}"))),
+                            )
+                        }),
+                )
+            })
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap_1()
                     .items_center()
-                    .child(
-                        Button::new("open-editor")
-                            .debug_selector(|| "open-editor".into())
-                            .icon(gpui_kit::assets::IconName::ExternalLink)
-                            .label("Open")
-                            .secondary()
-                            .small()
-                            .tooltip("Open the worktree in an editor")
-                            .on_click(cx.listener(|app, _, _, cx| app.open_in_editor(cx))),
-                    )
-                    .child(
-                        Button::new("project-actions-header")
-                            .debug_selector(|| "project-actions-header".into())
-                            .label("Actions")
-                            .ghost()
-                            .small()
-                            .tooltip("Edit project actions and setup scripts")
-                            .on_click(cx.listener(|app, _, window, cx| {
-                                app.execute_command(palette::Command::ProjectActions, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("push-pr")
-                            .debug_selector(|| "push-pr".into())
-                            .icon(gpui_kit::assets::IconName::GitPullRequest)
-                            .label("Push & create PR")
-                            .secondary()
-                            .small()
-                            .tooltip("Commit, push, and open a pull request")
-                            .on_click(cx.listener(|app, _, _, cx| app.push_and_create_pr(cx))),
-                    )
+                    .when(has_thread, |view| {
+                        view.child(
+                            Button::new("open-editor")
+                                .debug_selector(|| "open-editor".into())
+                                .icon(gpui_kit::assets::IconName::ExternalLink)
+                                .label("Open")
+                                .secondary()
+                                .small()
+                                .tooltip("Open the worktree in an editor")
+                                .on_click(cx.listener(|app, _, _, cx| app.open_in_editor(cx))),
+                        )
+                        .child(
+                            Button::new("project-actions-header")
+                                .debug_selector(|| "project-actions-header".into())
+                                .label("Actions")
+                                .ghost()
+                                .small()
+                                .tooltip("Edit project actions and setup scripts")
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.execute_command(
+                                        palette::Command::ProjectActions,
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
+                            Button::new("push-pr")
+                                .debug_selector(|| "push-pr".into())
+                                .icon(gpui_kit::assets::IconName::GitPullRequest)
+                                .label("Push & create PR")
+                                .secondary()
+                                .small()
+                                .tooltip("Commit, push, and open a pull request")
+                                .on_click(cx.listener(|app, _, _, cx| app.push_and_create_pr(cx))),
+                        )
+                    })
                     .child(
                         Button::new("toggle-inspector")
                             .debug_selector(|| "toggle-inspector".into())
@@ -201,32 +217,34 @@ impl NativeApp {
                             })),
                     )
                     // The menu hangs off its trigger rather than a fixed window position.
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                Button::new("thread-menu")
-                                    .debug_selector(|| "thread-menu".into())
-                                    .icon(gpui_kit::assets::IconName::Ellipsis)
-                                    .label("More")
-                                    .ghost()
-                                    .small()
-                                    .selected(
-                                        self.thread_menu_open && self.thread_menu_row.is_none(),
-                                    )
-                                    .tooltip("More thread actions")
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        let open = !app.thread_menu_open;
-                                        app.close_thread_menu();
-                                        app.thread_menu_open = open;
-                                        cx.notify();
-                                    })),
-                            )
-                            .when_some(thread_menu, |view, menu| {
-                                view.child(deferred(anchored().snap_to_window().child(menu)))
-                            }),
-                    ),
+                    .when(has_thread, |view| {
+                        view.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    Button::new("thread-menu")
+                                        .debug_selector(|| "thread-menu".into())
+                                        .icon(gpui_kit::assets::IconName::Ellipsis)
+                                        .label("More")
+                                        .ghost()
+                                        .small()
+                                        .selected(
+                                            self.thread_menu_open && self.thread_menu_row.is_none(),
+                                        )
+                                        .tooltip("More thread actions")
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            let open = !app.thread_menu_open;
+                                            app.close_thread_menu();
+                                            app.thread_menu_open = open;
+                                            cx.notify();
+                                        })),
+                                )
+                                .when_some(thread_menu, |view, menu| {
+                                    view.child(deferred(anchored().snap_to_window().child(menu)))
+                                }),
+                        )
+                    }),
             )
     }
 
