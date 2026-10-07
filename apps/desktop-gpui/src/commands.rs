@@ -1,6 +1,10 @@
 //! Construct only fork-owned client commands; the server remains the decider.
+use std::collections::HashMap;
+
 use chrono::{SecondsFormat, Utc};
 use serde_json::{Value, json};
+
+use crate::conversation::UserInputQuestion;
 use uuid::Uuid;
 
 pub fn id() -> String {
@@ -119,9 +123,115 @@ pub fn approval_response(thread_id: &str, request_id: &str, decision: &str) -> V
     command
 }
 
+/// Answer a pending user-input request, keyed by question id as the web
+/// does: custom text outranks selected options, a multi-select question
+/// answers with a list, and every question needs an answer.
+pub fn user_input_response(
+    thread_id: &str,
+    request_id: &str,
+    questions: &[UserInputQuestion],
+    selected: &HashMap<String, Vec<String>>,
+    custom: &HashMap<String, String>,
+) -> Result<Value, &'static str> {
+    let mut answers = serde_json::Map::new();
+    for question in questions {
+        let text = custom
+            .get(&question.id)
+            .map(|text| text.trim())
+            .filter(|text| question.allow_custom_answer && !text.is_empty());
+        let chosen: Vec<&String> = selected
+            .get(&question.id)
+            .into_iter()
+            .flatten()
+            .filter(|value| {
+                question
+                    .options
+                    .iter()
+                    .any(|option| &option.value == *value)
+            })
+            .collect();
+        let answer = match (text, question.multi_select) {
+            (Some(text), _) => json!(text),
+            (None, true) if !chosen.is_empty() => json!(chosen),
+            (None, false) if !chosen.is_empty() => json!(chosen[0]),
+            _ => return Err("Answer every question first"),
+        };
+        answers.insert(question.id.clone(), answer);
+    }
+    let mut command = command("thread.user-input.respond", thread_id);
+    command["requestId"] = json!(request_id);
+    command["answers"] = Value::Object(answers);
+    command["createdAt"] = json!(now());
+    Ok(command)
+}
+
+/// Close an async user-input request without answering it.
+pub fn user_input_dismiss(thread_id: &str, request_id: &str) -> Value {
+    let mut command = command("thread.user-input.dismiss", thread_id);
+    command["requestId"] = json!(request_id);
+    command["createdAt"] = json!(now());
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation::UserInputOption;
+
+    fn question(id: &str, multi_select: bool, allow_custom_answer: bool) -> UserInputQuestion {
+        let option = |value: &str| UserInputOption {
+            label: value.to_uppercase(),
+            description: String::new(),
+            value: value.to_owned(),
+        };
+        UserInputQuestion {
+            id: id.to_owned(),
+            header: "Header".to_owned(),
+            question: "Question?".to_owned(),
+            options: vec![option("a"), option("b")],
+            multi_select,
+            allow_custom_answer,
+        }
+    }
+
+    #[test]
+    fn user_input_answers_are_keyed_by_question_id() {
+        let questions = [question("one", false, false), question("many", true, true)];
+        let mut selected = HashMap::from([
+            ("one".to_owned(), vec!["b".to_owned()]),
+            (
+                "many".to_owned(),
+                vec!["a".to_owned(), "gone".to_owned(), "b".to_owned()],
+            ),
+        ]);
+        let mut custom = HashMap::from([("one".to_owned(), "ignored".to_owned())]);
+        let response = user_input_response("t", "req", &questions, &selected, &custom).unwrap();
+        assert_eq!(response["type"], "thread.user-input.respond");
+        assert_eq!(response["threadId"], "t");
+        assert_eq!(response["requestId"], "req");
+        assert_eq!(response["answers"], json!({"one": "b", "many": ["a", "b"]}));
+        assert!(response["createdAt"].is_string());
+
+        custom.insert("many".to_owned(), "  my own  ".to_owned());
+        let response = user_input_response("t", "req", &questions, &selected, &custom).unwrap();
+        assert_eq!(
+            response["answers"]["many"], "my own",
+            "custom text outranks options"
+        );
+
+        selected.remove("one");
+        assert!(user_input_response("t", "req", &questions, &selected, &custom).is_err());
+    }
+
+    #[test]
+    fn user_input_dismiss_names_the_request() {
+        let dismiss = user_input_dismiss("t", "req");
+        assert_eq!(dismiss["type"], "thread.user-input.dismiss");
+        assert_eq!(dismiss["threadId"], "t");
+        assert_eq!(dismiss["requestId"], "req");
+        assert!(dismiss["createdAt"].is_string());
+        assert!(dismiss.get("answers").is_none());
+    }
     #[test]
     fn empty_form_input_never_becomes_a_destructive_or_send_command() {
         assert!(create_project("", "/tmp").is_err());

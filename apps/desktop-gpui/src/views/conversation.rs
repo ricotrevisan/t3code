@@ -1,15 +1,19 @@
 use std::rc::Rc;
 
+use gpui_kit::base::Selectable;
 use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
+    input::{Input, InputEvent},
     text::TextView,
 };
-use gpui_kit::{AnyElement, Context, FontWeight, div, list, prelude::*, px};
+use gpui_kit::{AnyElement, Context, FontWeight, Window, div, list, prelude::*, px};
 use serde_json::Value;
-use t3code_desktop_gpui::conversation::{self, PendingApproval, TimelineEntry, TimelineRow};
+use t3code_desktop_gpui::conversation::{
+    self, PendingApproval, PendingUserInput, TimelineEntry, TimelineRow,
+};
 
-use crate::NativeApp;
+use crate::{NativeApp, single_line_input};
 
 impl NativeApp {
     pub(crate) fn render_conversation(
@@ -35,18 +39,30 @@ impl NativeApp {
             for index in diff.changed {
                 self.conversation_scroll.remeasure_items(index..index + 1);
             }
+            let open_request = rows.iter().find_map(|row| match &row.entry {
+                TimelineEntry::UserInput(request) => Some(request.request_id.clone()),
+                _ => None,
+            });
+            if open_request != self.user_input_request {
+                self.user_input_request = open_request;
+                self.user_input_selected.clear();
+                self.user_input_custom.clear();
+            }
             self.conversation_rows = Rc::new(rows);
             // Only rows near the viewport are built; each frame renders them afresh.
             let rows = self.conversation_rows.clone();
             let app = cx.weak_entity();
             return conversation.py_2().child(
-                list(self.conversation_scroll.clone(), move |index, _, cx| {
-                    let Some(row) = rows.get(index) else {
-                        return div().into_any_element();
-                    };
-                    app.update(cx, |app, cx| app.render_row(row, cx))
-                        .unwrap_or_else(|_| div().into_any_element())
-                })
+                list(
+                    self.conversation_scroll.clone(),
+                    move |index, window, cx| {
+                        let Some(row) = rows.get(index) else {
+                            return div().into_any_element();
+                        };
+                        app.update(cx, |app, cx| app.render_row(row, window, cx))
+                            .unwrap_or_else(|_| div().into_any_element())
+                    },
+                )
                 .flex_1()
                 .min_h_0(),
             );
@@ -102,7 +118,12 @@ impl NativeApp {
         }
     }
 
-    fn render_row(&self, row: &TimelineRow, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(
+        &mut self,
+        row: &TimelineRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted_foreground = cx.theme().muted_foreground;
         let danger = cx.theme().danger;
         let message_id = match &row.entry {
@@ -177,6 +198,9 @@ impl NativeApp {
             TimelineEntry::Approval(approval) => {
                 self.render_approval(approval, cx).into_any_element()
             }
+            TimelineEntry::UserInput(request) => self
+                .render_user_input(request, window, cx)
+                .into_any_element(),
             TimelineEntry::Error(error) => div()
                 .text_xs()
                 .text_color(danger)
@@ -253,6 +277,140 @@ impl NativeApp {
                         }))
                     })),
             )
+    }
+
+    fn render_user_input(
+        &mut self,
+        request: &PendingUserInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let muted_foreground = cx.theme().muted_foreground;
+        let group_box = cx.theme().group_box;
+        let accent = cx.theme().blue;
+        let mut card = div()
+            .debug_selector(|| "user-input-card".to_owned())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .rounded_md()
+            .bg(group_box)
+            .border_1()
+            .border_color(accent)
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(accent)
+                    .child("QUESTION"),
+            );
+        for (question_index, question) in request.questions.iter().enumerate() {
+            let custom = question.allow_custom_answer.then(|| {
+                self.user_input_custom
+                    .entry(question.id.clone())
+                    .or_insert_with(|| {
+                        let input = cx
+                            .new(|cx| single_line_input(window, cx).placeholder("Your own answer"));
+                        let question_id = question.id.clone();
+                        cx.subscribe_in(&input, window, move |app, _, event, _, cx| {
+                            if matches!(event, InputEvent::Change) {
+                                app.type_user_input_custom(&question_id, cx);
+                            }
+                        })
+                        .detach();
+                        input
+                    })
+                    .clone()
+            });
+            // A typed custom answer outranks the chips, so they show unselected.
+            let custom_active = custom
+                .as_ref()
+                .is_some_and(|input| !input.read(cx).value().trim().is_empty());
+            let selected = self
+                .user_input_selected
+                .get(&question.id)
+                .filter(|_| !custom_active)
+                .cloned()
+                .unwrap_or_default();
+            let options = question.options.iter().enumerate().map(|(index, option)| {
+                let selector = format!("user-input-option-{question_index}-{index}");
+                let question_id = question.id.clone();
+                let value = option.value.clone();
+                let multi_select = question.multi_select;
+                Button::new(gpui_kit::SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .ghost()
+                    .small()
+                    .selected(selected.contains(&option.value))
+                    .label(option.label.clone())
+                    .when(!option.description.is_empty(), |button| {
+                        button.tooltip(option.description.clone())
+                    })
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.select_user_input_option(&question_id, &value, multi_select, window, cx)
+                    }))
+            });
+            card = card.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(muted_foreground)
+                            .child(question.header.clone()),
+                    )
+                    .child(div().text_sm().child(question.question.clone()))
+                    .when(question.multi_select, |view| {
+                        view.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child("Select one or more options."),
+                        )
+                    })
+                    .child(div().flex().flex_wrap().gap_2().children(options))
+                    .when_some(custom, |view, input| {
+                        let selector = format!("user-input-custom-{question_index}");
+                        view.child(
+                            div()
+                                .debug_selector(move || selector.clone())
+                                .child(Input::new(&input).small()),
+                        )
+                    }),
+            );
+        }
+        let submitted = request.clone();
+        let request_id = request.request_id.clone();
+        card.child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    Button::new("user-input-submit")
+                        .debug_selector(|| "user-input-submit".to_owned())
+                        .small()
+                        .label("Submit")
+                        .on_click(
+                            cx.listener(move |app, _, _, cx| app.submit_user_input(&submitted, cx)),
+                        ),
+                )
+                .when(request.dismissible, |view| {
+                    view.child(
+                        Button::new("user-input-dismiss")
+                            .debug_selector(|| "user-input-dismiss".to_owned())
+                            .ghost()
+                            .small()
+                            .label("Dismiss")
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.dismiss_user_input(&request_id, cx)
+                            })),
+                    )
+                }),
+        )
     }
 
     fn render_message(&self, message: &Value, cx: &mut Context<Self>) -> impl IntoElement + use<> {

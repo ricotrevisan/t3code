@@ -161,6 +161,11 @@ struct NativeApp {
     conversation_scroll: gpui_kit::ListState,
     /// The rows `conversation_scroll` currently holds, diffed on each render.
     conversation_rows: std::rc::Rc<Vec<t3code_desktop_gpui::conversation::TimelineRow>>,
+    /// The open user-input request the answer drafts below belong to.
+    user_input_request: Option<String>,
+    /// Chosen option values and custom-answer inputs, by question id.
+    user_input_selected: std::collections::HashMap<String, Vec<String>>,
+    user_input_custom: std::collections::HashMap<String, Entity<InputState>>,
     attachments: Vec<Value>,
     auth_state: Option<Value>,
     auth_callback: Entity<InputState>,
@@ -319,14 +324,7 @@ impl NativeApp {
             cx.subscribe_in(&composer, window, |app, _, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
                     app.slash_index = 0;
-                    if let Some(id) = app.selected_thread.clone() {
-                        let text = app.composer.read(cx).value().to_string();
-                        app.drafts.insert(id.clone(), text.clone());
-                        if let Some(store) = &mut app.draft_store {
-                            store.set(&app.environment_scope, &id, text);
-                            app.schedule_draft_save(cx);
-                        }
-                    }
+                    app.remember_composer_draft(cx);
                 }
                 // Enter sends and Shift+Enter inserts a newline, as in the reference composer.
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
@@ -420,6 +418,9 @@ impl NativeApp {
                 list
             },
             conversation_rows: Default::default(),
+            user_input_request: None,
+            user_input_selected: Default::default(),
+            user_input_custom: Default::default(),
             attachments: Vec::new(),
             auth_state: None,
             auth_callback: cx.new(|cx| {
@@ -2758,6 +2759,109 @@ impl NativeApp {
             return;
         };
         let payload = commands::approval_response(&id, request_id, decision);
+        self.dispatch(payload, cx);
+    }
+
+    /// Choose an option of a pending question. Choosing clears the question's
+    /// custom answer, which would otherwise outrank the choice.
+    fn select_user_input_option(
+        &mut self,
+        question_id: &str,
+        value: &str,
+        multi_select: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self
+            .user_input_selected
+            .entry(question_id.to_owned())
+            .or_default();
+        if !multi_select {
+            selected.clear();
+            selected.push(value.to_owned());
+        } else if let Some(position) = selected.iter().position(|chosen| chosen == value) {
+            selected.remove(position);
+        } else {
+            selected.push(value.to_owned());
+        }
+        // The displaced custom answer moves into the composer rather than vanishing.
+        if let Some(input) = self.user_input_custom.get(question_id).cloned() {
+            let displaced = input.read(cx).value().trim().to_owned();
+            if !displaced.is_empty() {
+                input.update(cx, |input, cx| input.set_value("", window, cx));
+                let prompt = self.composer.read(cx).value().to_string();
+                let prompt = if prompt.trim().is_empty() {
+                    displaced
+                } else {
+                    format!("{}\n\n{displaced}", prompt.trim_end())
+                };
+                self.composer
+                    .update(cx, |input, cx| input.set_value(prompt, window, cx));
+                self.remember_composer_draft(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Typing a custom answer replaces the question's chosen options.
+    fn type_user_input_custom(&mut self, question_id: &str, cx: &mut Context<Self>) {
+        let Some(input) = self.user_input_custom.get(question_id) else {
+            return;
+        };
+        if !input.read(cx).value().trim().is_empty() {
+            self.user_input_selected.remove(question_id);
+            cx.notify();
+        }
+    }
+
+    /// Persist the composer text as the selected thread's draft.
+    fn remember_composer_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_thread.clone() else {
+            return;
+        };
+        let text = self.composer.read(cx).value().to_string();
+        self.drafts.insert(id.clone(), text.clone());
+        if let Some(store) = &mut self.draft_store {
+            store.set(&self.environment_scope, &id, text);
+            self.schedule_draft_save(cx);
+        }
+    }
+
+    /// Answer the pending user-input request. The card stays until the server
+    /// records the request as resolved.
+    fn submit_user_input(
+        &mut self,
+        request: &t3code_desktop_gpui::conversation::PendingUserInput,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.selected_thread.clone() else {
+            return;
+        };
+        let custom = self
+            .user_input_custom
+            .iter()
+            .map(|(question, input)| (question.clone(), input.read(cx).value().to_string()))
+            .collect();
+        match commands::user_input_response(
+            &id,
+            &request.request_id,
+            &request.questions,
+            &self.user_input_selected,
+            &custom,
+        ) {
+            Ok(payload) => self.dispatch(payload, cx),
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+            }
+        }
+    }
+
+    fn dismiss_user_input(&mut self, request_id: &str, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_thread.clone() else {
+            return;
+        };
+        let payload = commands::user_input_dismiss(&id, request_id);
         self.dispatch(payload, cx);
     }
 

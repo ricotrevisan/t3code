@@ -160,6 +160,105 @@ pub fn pending_approval(activities: &[Value]) -> Option<PendingApproval> {
     })
 }
 
+/// One choice of a [`UserInputQuestion`]. `value` is the answer it submits:
+/// the provider's option value, or its label when none is given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserInputOption {
+    pub label: String,
+    pub description: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub options: Vec<UserInputOption>,
+    pub multi_select: bool,
+    /// Custom text is allowed unless the provider sets `allowCustomAnswer: false`.
+    pub allow_custom_answer: bool,
+}
+
+/// A question the agent is still waiting on the user to answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingUserInput {
+    pub request_id: String,
+    pub questions: Vec<UserInputQuestion>,
+    /// Async (`responseMode: "message"`) questions can be dismissed unanswered;
+    /// native callbacks block the provider until they get a reply.
+    pub dismissible: bool,
+}
+
+fn user_input_questions(value: &Value) -> Vec<UserInputQuestion> {
+    let questions = value.as_array().map_or(&[][..], Vec::as_slice);
+    questions
+        .iter()
+        .filter_map(|question| {
+            let options: Vec<UserInputOption> = question["options"]
+                .as_array()?
+                .iter()
+                .filter_map(|option| {
+                    let label = option["label"].as_str()?.to_owned();
+                    Some(UserInputOption {
+                        value: option["value"].as_str().unwrap_or(&label).to_owned(),
+                        description: option["description"].as_str().unwrap_or("").to_owned(),
+                        label,
+                    })
+                })
+                .collect();
+            let allow_custom_answer = question["allowCustomAnswer"] != false;
+            if options.is_empty() && !allow_custom_answer {
+                return None;
+            }
+            Some(UserInputQuestion {
+                id: question["id"].as_str()?.to_owned(),
+                header: question["header"].as_str()?.to_owned(),
+                question: question["question"].as_str()?.to_owned(),
+                options,
+                multi_select: question["multiSelect"] == true,
+                allow_custom_answer,
+            })
+        })
+        .collect()
+}
+
+/// The oldest `user-input.requested` activity that no `user-input.resolved`
+/// (or stale-request reply failure) has closed, in activity order.
+pub fn pending_user_input(activities: &[Value]) -> Option<PendingUserInput> {
+    let mut open: Vec<PendingUserInput> = Vec::new();
+    let mut closed = std::collections::HashSet::new();
+    for activity in activities {
+        let payload = &activity["payload"];
+        let Some(request_id) = payload["requestId"].as_str() else {
+            continue;
+        };
+        let stale_failure = activity["kind"] == "provider.user-input.respond.failed"
+            && payload["detail"].as_str().is_some_and(|detail| {
+                let detail = detail.to_lowercase();
+                ["stale pending", "unknown pending"]
+                    .iter()
+                    .any(|fragment| detail.contains(fragment))
+            });
+        if activity["kind"] == "user-input.resolved" || stale_failure {
+            closed.insert(request_id.to_owned());
+            open.retain(|request| request.request_id != request_id);
+        } else if activity["kind"] == "user-input.requested" && !closed.contains(request_id) {
+            let questions = user_input_questions(&payload["questions"]);
+            if questions.is_empty() {
+                continue;
+            }
+            open.retain(|request| request.request_id != request_id);
+            open.push(PendingUserInput {
+                request_id: request_id.to_owned(),
+                questions,
+                dismissible: payload["responseMode"] == "message",
+            });
+        }
+    }
+    open.into_iter().next()
+}
+
 /// One turn of the conversation and the work it produced, in display order.
 ///
 /// User messages carry no `turnId`, so a turn adopts the user message that
@@ -358,6 +457,7 @@ pub enum TimelineEntry {
     /// The running turn's `Working…` indicator.
     Working(String),
     Approval(PendingApproval),
+    UserInput(PendingUserInput),
     Error(String),
 }
 
@@ -371,9 +471,9 @@ pub struct TimelineRow {
 
 /// Flattens a thread into timeline rows in display order: each turn's
 /// messages, its status, activity disclosure, plans, checkpoint, and working
-/// indicator, then the pending approval and the session error. `expanded`
-/// holds the activity disclosures the user toggled, by turn key; untouched
-/// ones are open while their turn runs.
+/// indicator, then the pending approval, the open user-input request, and the
+/// session error. `expanded` holds the activity disclosures the user toggled,
+/// by turn key; untouched ones are open while their turn runs.
 pub fn timeline_rows(
     thread: &Value,
     expanded: &std::collections::HashMap<String, bool>,
@@ -477,6 +577,15 @@ pub fn timeline_rows(
         push(
             format!("approval:{}", approval.request_id),
             TimelineEntry::Approval(approval),
+        );
+    }
+    if let Some(request) = thread["activities"]
+        .as_array()
+        .and_then(|activities| pending_user_input(activities))
+    {
+        push(
+            format!("user-input:{}", request.request_id),
+            TimelineEntry::UserInput(request),
         );
     }
     if let Some(error) = thread["session"]["lastError"].as_str() {
@@ -594,6 +703,56 @@ mod tests {
         let mut resolved = activities.clone();
         resolved.push(json!({"kind": "approval.resolved", "payload": {"requestId": "b"}}));
         assert!(pending_approval(&resolved).is_none());
+    }
+
+    fn question_request(id: &str) -> Value {
+        json!({"kind": "user-input.requested", "payload": {"requestId": id, "questions": [
+            {"id": "q", "header": "Scope", "question": "Which?", "options": [{"label": "A", "description": "first"}, {"label": "B", "description": "", "value": "b"}]}
+        ]}})
+    }
+
+    #[test]
+    fn pending_user_input_is_the_oldest_unresolved_request() {
+        let resolved = json!({"kind": "user-input.resolved", "payload": {"requestId": "a"}});
+        assert!(pending_user_input(&[question_request("a"), resolved.clone()]).is_none());
+
+        let pending = pending_user_input(&[question_request("a"), question_request("b"), resolved])
+            .expect("one request is open");
+        assert_eq!(pending.request_id, "b");
+        assert!(!pending.dismissible);
+        let question = &pending.questions[0];
+        assert_eq!(
+            (question.id.as_str(), question.header.as_str()),
+            ("q", "Scope")
+        );
+        assert_eq!(
+            question.options[0].value, "A",
+            "a label stands in for a missing value"
+        );
+        assert_eq!(question.options[1].value, "b");
+        assert!(question.allow_custom_answer && !question.multi_select);
+
+        let failed = json!({"kind": "provider.user-input.respond.failed", "payload": {"requestId": "b", "detail": "Stale pending user-input request"}});
+        assert!(pending_user_input(&[question_request("b"), failed]).is_none());
+        let mut message = question_request("c");
+        message["payload"]["responseMode"] = json!("message");
+        assert!(pending_user_input(&[message]).unwrap().dismissible);
+    }
+
+    #[test]
+    fn user_input_card_follows_the_approval_card() {
+        let mut question = question_request("q");
+        question["id"] = json!("y");
+        question["createdAt"] = json!("2026-01-01T00:00:01Z");
+        let thread = json!({"messages": [], "activities": [
+            {"id": "x", "kind": "approval.requested", "createdAt": "2026-01-01T00:00:00Z", "payload": {"requestId": "r"}},
+            question,
+        ]});
+        let keys: Vec<String> = timeline_rows(&thread, &Default::default())
+            .into_iter()
+            .map(|row| row.key)
+            .collect();
+        assert!(keys.ends_with(&["approval:r".to_owned(), "user-input:q".to_owned()]));
     }
 
     fn fixture(latest: Value) -> Value {

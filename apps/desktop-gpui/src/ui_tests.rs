@@ -366,6 +366,90 @@ fn pending_approval_renders_and_responds(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn user_input_card_submits_answers_and_closes_once_resolved(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    let requested = json!({
+        "id": "a1",
+        "kind": "user-input.requested",
+        "tone": "info",
+        "summary": "User input requested",
+        "payload": {"requestId": "req-1", "questions": [
+            {"id": "scope", "header": "Scope", "question": "Which package?", "allowCustomAnswer": false, "options": [
+                {"label": "Web", "description": "apps/web", "value": "web"},
+                {"label": "Server", "description": "apps/server"}
+            ]},
+            {"id": "checks", "header": "Checks", "question": "What should run?", "multiSelect": true, "allowCustomAnswer": true, "options": [
+                {"label": "Tests", "description": ""},
+                {"label": "Lint", "description": ""},
+                {"label": "Types", "description": ""}
+            ]}
+        ]},
+        "createdAt": "2026-01-01T00:00:00Z",
+        "turnId": null
+    });
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        let item = json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"thread":{"id":"t","title":"Thread","messages":[],"activities":[requested],"proposedPlans":[],"checkpoints":[],"session":{"status":"running"}}}});
+        app.apply_thread_update("t", item).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("user-input-custom-0").is_none(), "the single-select question forbids custom text");
+    assert!(cx.debug_bounds("user-input-custom-1").is_some());
+    assert!(cx.debug_bounds("user-input-dismiss").is_none(), "a native callback cannot be dismissed");
+    for selector in ["user-input-option-0-0", "user-input-option-0-1", "user-input-option-1-0", "user-input-option-1-2", "user-input-option-1-1", "user-input-option-1-0"] {
+        let bounds = cx.debug_bounds(selector).expect("option chip is visible");
+        cx.simulate_click(bounds.center(), Default::default());
+    }
+    let submit = cx.debug_bounds("user-input-submit").expect("submit is visible");
+    cx.simulate_click(submit.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a user-input response");
+    };
+    assert_eq!(payload["type"], "thread.user-input.respond");
+    assert_eq!(payload["requestId"], "req-1");
+    assert_eq!(payload["answers"], json!({"scope": "Server", "checks": ["Types", "Lint"]}));
+
+    let custom = cx.debug_bounds("user-input-custom-1").unwrap();
+    cx.simulate_click(custom.center(), Default::default());
+    cx.simulate_input("Benchmarks");
+    cx.simulate_click(submit.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a user-input response");
+    };
+    assert_eq!(payload["answers"], json!({"scope": "Server", "checks": "Benchmarks"}));
+    assert!(
+        app.read_with(cx, |app, _| !app.user_input_selected.contains_key("checks")),
+        "typed text replaces the chosen chips, so they no longer show selected"
+    );
+
+    cx.update(|window, cx| app.update(cx, |app, cx| {
+        app.composer.update(cx, |input, cx| input.set_value("Draft ", window, cx));
+    }));
+    let tests = cx.debug_bounds("user-input-option-1-0").unwrap();
+    cx.simulate_click(tests.center(), Default::default());
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        "Draft\n\nBenchmarks",
+        "a chip click carries the displaced custom answer into the composer"
+    );
+    cx.simulate_click(submit.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a user-input response");
+    };
+    assert_eq!(payload["answers"], json!({"scope": "Server", "checks": ["Tests"]}));
+
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        let resolved = json!({"id":"a2","kind":"user-input.resolved","tone":"info","summary":"User input submitted","payload":{"requestId":"req-1","answers":{}},"createdAt":"2026-01-01T00:00:05Z","turnId":null});
+        let item = json!({"kind":"event","event":{"sequence":2,"type":"thread.activity-appended","occurredAt":"2026-01-01T00:00:05Z","payload":{"threadId":"t","activity":resolved}}});
+        app.apply_thread_update("t", item).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("user-input-card").is_none());
+    assert!(cx.debug_bounds("user-input-submit").is_none());
+}
+
+#[gpui_kit::test]
 fn push_and_create_pr_streams_the_stacked_action(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
