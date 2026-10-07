@@ -587,6 +587,10 @@ impl NativeApp {
                 })
             });
         });
+        // Keyboard shortcuts dispatch along the focus path, so an unfocused window
+        // has none; start in the composer, where the user types first anyway.
+        app.composer
+            .update(cx, |input, cx| input.focus(window, cx));
         if auto_connect {
             let state = window_state::load();
             app.context_meter_hidden = state.context_meter_hidden;

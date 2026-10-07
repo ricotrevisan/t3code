@@ -703,6 +703,33 @@ fn long_conversations_only_build_rows_near_the_viewport(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn fresh_window_has_keyboard_focus_without_a_click(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        theme::init(cx);
+        bind_native_keys(cx);
+    });
+    let mut app = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| NativeApp::new(window, cx, false));
+        app = Some(entity.clone());
+        Root::new(entity, window, cx)
+    });
+    let app = app.unwrap();
+    cx.run_until_parked();
+    // No click anywhere: the palette shortcut must still reach the app.
+    cx.simulate_keystrokes("cmd-k");
+    assert!(app.read_with(cx, |app, _| app.palette_open));
+    cx.simulate_keystrokes("escape");
+    assert!(app.read_with(cx, |app, _| !app.palette_open));
+    cx.simulate_input("typed without clicking");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        "typed without clicking"
+    );
+}
+
+#[gpui_kit::test]
 fn enter_sends_and_shift_enter_inserts_a_newline(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.simulate_input("first");
