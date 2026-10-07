@@ -183,9 +183,7 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let sidebar_focused = [&self.search, &self.server, &self.pairing]
-            .iter()
-            .any(|input| input.read(cx).focus_handle(cx).is_focused(window));
+        let sidebar_focused = self.search.read(cx).focus_handle(cx).is_focused(window);
         if !open && sidebar_focused {
             self.composer
                 .update(cx, |input, cx| input.focus(window, cx));

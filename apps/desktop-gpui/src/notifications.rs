@@ -33,6 +33,16 @@ pub fn is_error(status: &str) -> bool {
         .any(|word| status.contains(word))
 }
 
+/// The status bar's right-hand text: the last status message, prefixed with
+/// "Offline" when there is no connection. The status dot carries "connected".
+pub fn status_bar_text(connected: bool, status: &str) -> String {
+    match (connected, status.is_empty()) {
+        (true, _) => status.to_owned(),
+        (false, true) => "Offline".to_owned(),
+        (false, false) => format!("Offline · {status}"),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     ApprovalRequested,
@@ -100,6 +110,18 @@ pub fn thread_from_tag(tag: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn status_bar_shows_the_message_and_only_names_the_offline_state() {
+        let message = "Connected · provider catalog loaded (7 instances)";
+        assert_eq!(status_bar_text(true, message), message);
+        assert_eq!(status_bar_text(true, ""), "");
+        assert_eq!(
+            status_bar_text(false, "Pairing failed"),
+            "Offline · Pairing failed"
+        );
+        assert_eq!(status_bar_text(false, ""), "Offline");
+    }
 
     fn thread(extra: serde_json::Value) -> Thread {
         let mut value = json!({"id": "t", "projectId": "p", "title": "Fix the build"});

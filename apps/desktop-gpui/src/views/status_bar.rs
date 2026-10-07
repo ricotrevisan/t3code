@@ -119,13 +119,11 @@ impl NativeApp {
                             } else {
                                 muted_foreground
                             })
-                            .child(self.status.clone()),
-                    )
-                    .child(if self.commands.is_some() {
-                        "Connected"
-                    } else {
-                        "Offline"
-                    }),
+                            .child(notifications::status_bar_text(
+                                self.commands.is_some(),
+                                &self.status,
+                            )),
+                    ),
             )
     }
 

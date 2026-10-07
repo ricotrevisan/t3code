@@ -166,7 +166,6 @@ struct NativeApp {
     model_override: Option<Value>,
     provider_catalog: Vec<providers::Provider>,
     catalog_open: bool,
-    connection_expanded: bool,
     settings_open: bool,
     /// Activity disclosures the user toggled, keyed by turn.
     activity_expanded: std::collections::HashMap<String, bool>,
@@ -475,7 +474,6 @@ impl NativeApp {
             model_override: None,
             provider_catalog: vec![],
             catalog_open: false,
-            connection_expanded: false,
             settings_open: false,
             activity_expanded: Default::default(),
             inspector_open: true,

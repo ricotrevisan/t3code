@@ -4,10 +4,13 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable,
     button::{Button, ButtonVariants as _},
     input::Input,
+    list::ListItem,
 };
-use gpui_kit::{Context, FontWeight, MouseButton, MouseDownEvent, div, prelude::*, px};
+use gpui_kit::{
+    Context, FontWeight, MouseButton, MouseDownEvent, SharedString, div, prelude::*, px,
+};
 use serde_json::json;
-use t3code_desktop_gpui::{connection, credentials, palette, project_actions, sidebar, thread};
+use t3code_desktop_gpui::{connection, palette, project_actions, sidebar, thread};
 
 use crate::NativeApp;
 
@@ -83,6 +86,8 @@ impl NativeApp {
                         )))
                         .ghost()
                         .selected(project_selected)
+                        .accessibility_label(name.clone())
+                        .tooltip(workspace.clone())
                         .debug_selector({
                             let id = project_id.clone();
                             move || format!("project-{id}")
@@ -108,25 +113,15 @@ impl NativeApp {
                                 )
                                 .child(
                                     div()
-                                        .flex()
-                                        .flex_col()
+                                        .debug_selector({
+                                            let id = project_id.clone();
+                                            move || format!("project-{id}-name")
+                                        })
                                         .min_w_0()
                                         .flex_1()
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .truncate()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(name.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .truncate()
-                                                .text_xs()
-                                                .text_color(muted_foreground)
-                                                .child(workspace.clone()),
-                                        ),
+                                        .truncate()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(name.clone()),
                                 ),
                         )
                         .on_click(cx.listener(
@@ -257,37 +252,56 @@ impl NativeApp {
                     // rest alone.
                     let group_key = sidebar::group_key(&project.id, group_key);
                     let group_collapsed = self.collapsed_groups.contains(&group_key);
+                    // The chevron hangs in the gutter so the label starts at the
+                    // thread titles' inset.
                     group = group.child(
-                        div().pl_4().child(
-                            Button::new(gpui_kit::SharedString::from(format!(
-                                "group-toggle-{group_key}"
-                            )))
+                        ListItem::new(SharedString::from(format!("group-toggle-{group_key}")))
                             .debug_selector({
                                 let key = group_key.clone();
                                 move || format!("group-toggle-{key}")
                             })
-                            .label(format!(
-                                "{} {} ({})",
-                                if group_collapsed { "▸" } else { "▾" },
-                                group_label,
-                                group_threads.len()
-                            ))
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(
-                                move |app, _, _, cx| {
-                                    let key = group_key.clone();
-                                    if let Some(index) =
-                                        app.collapsed_groups.iter().position(|entry| entry == &key)
-                                    {
-                                        app.collapsed_groups.remove(index);
-                                    } else {
-                                        app.collapsed_groups.push(key);
-                                    }
-                                    cx.notify();
-                                },
-                            )),
-                        ),
+                            .aria_expanded(!group_collapsed)
+                            .px_2()
+                            .rounded_md()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w_0()
+                                    .text_color(muted_foreground)
+                                    .child(
+                                        Icon::new(if group_collapsed {
+                                            IconName::ChevronRight
+                                        } else {
+                                            IconName::ChevronDown
+                                        })
+                                        .xsmall(),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(format!(
+                                                "{} ({})",
+                                                group_label.to_uppercase(),
+                                                group_threads.len()
+                                            )),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                let key = group_key.clone();
+                                if let Some(index) =
+                                    app.collapsed_groups.iter().position(|entry| entry == &key)
+                                {
+                                    app.collapsed_groups.remove(index);
+                                } else {
+                                    app.collapsed_groups.push(key);
+                                }
+                                cx.notify();
+                            })),
                     );
                     if group_collapsed {
                         continue;
@@ -509,111 +523,22 @@ impl NativeApp {
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_2()
+                    .items_center()
                     .p_2()
                     .border_t_1()
                     .border_color(sidebar_border)
                     .child(
-                        Button::new("connection-toggle")
+                        Button::new("sidebar-settings")
+                            .debug_selector(|| "sidebar-settings".into())
+                            .icon(IconName::Settings)
+                            .label("Settings")
                             .ghost()
-                            .selected(self.connection_expanded)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .w_full()
-                                    .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(
-                                        if self.commands.is_some() {
-                                            green
-                                        } else {
-                                            muted_foreground
-                                        },
-                                    ))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(self.status.clone()),
-                                    )
-                                    .child(div().text_color(muted_foreground).child(
-                                        if self.connection_expanded {
-                                            "▾"
-                                        } else {
-                                            "▸"
-                                        },
-                                    )),
-                            )
+                            .small()
                             .on_click(cx.listener(|app, _, _, cx| {
-                                app.connection_expanded = !app.connection_expanded;
+                                app.settings_open = true;
                                 cx.notify();
                             })),
-                    )
-                    .when(self.connection_expanded, |view| {
-                        view.child(Input::new(&self.server))
-                            .child(Input::new(&self.pairing))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("pair")
-                                            .debug_selector(|| "pair".into())
-                                            .label("Pair and connect")
-                                            .primary()
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.pair(window, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("remember-credential")
-                                            .debug_selector(|| "remember-credential".into())
-                                            .label("Remember in Keychain")
-                                            .ghost()
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.remember_credential(cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("load-credential")
-                                            .debug_selector(|| "load-credential".into())
-                                            .label("Connect remembered")
-                                            .ghost()
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.credential_operation(
-                                                    credentials::Operation::Load,
-                                                    cx,
-                                                )
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("forget-credential")
-                                            .debug_selector(|| "forget-credential".into())
-                                            .label("Forget credential")
-                                            .ghost()
-                                            .on_click(cx.listener(|app, _, _, cx| {
-                                                app.forget_credential(cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("connect")
-                                            .label("Connect / retry")
-                                            .secondary()
-                                            .on_click(cx.listener(|app, _, _, cx| app.connect(cx))),
-                                    )
-                                    .child(
-                                        Button::new("disconnect")
-                                            .label("Disconnect")
-                                            .ghost()
-                                            .on_click(
-                                                cx.listener(|app, _, _, cx| app.disconnect(cx)),
-                                            ),
-                                    ),
-                            )
-                    }),
+                    ),
             )
     }
 }

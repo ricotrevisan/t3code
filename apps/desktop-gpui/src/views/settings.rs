@@ -6,6 +6,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{Context, FontWeight, div, prelude::*, px};
 use serde_json::json;
+use t3code_desktop_gpui::credentials;
 
 use crate::NativeApp;
 
@@ -76,11 +77,17 @@ impl NativeApp {
                         .child(Input::new(&self.server))
                         .child(
                             div()
+                                .debug_selector(|| "pairing-input".into())
+                                .child(Input::new(&self.pairing)),
+                        )
+                        .child(
+                            div()
                                 .flex()
                                 .flex_wrap()
                                 .gap_2()
                                 .child(
-                                    Button::new("settings-pair")
+                                    Button::new("pair")
+                                        .debug_selector(|| "pair".into())
                                         .label("Pair and connect")
                                         .primary()
                                         .on_click(
@@ -98,6 +105,44 @@ impl NativeApp {
                                         .label("Disconnect")
                                         .ghost()
                                         .on_click(cx.listener(|app, _, _, cx| app.disconnect(cx))),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    Button::new("remember-credential")
+                                        .debug_selector(|| "remember-credential".into())
+                                        .label("Remember in Keychain")
+                                        .ghost()
+                                        .on_click(
+                                            cx.listener(|app, _, _, cx| {
+                                                app.remember_credential(cx)
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("load-credential")
+                                        .debug_selector(|| "load-credential".into())
+                                        .label("Connect remembered")
+                                        .ghost()
+                                        .on_click(cx.listener(|app, _, _, cx| {
+                                            app.credential_operation(
+                                                credentials::Operation::Load,
+                                                cx,
+                                            )
+                                        })),
+                                )
+                                .child(
+                                    Button::new("forget-credential")
+                                        .debug_selector(|| "forget-credential".into())
+                                        .label("Forget credential")
+                                        .ghost()
+                                        .on_click(
+                                            cx.listener(|app, _, _, cx| app.forget_credential(cx)),
+                                        ),
                                 ),
                         ),
                 )

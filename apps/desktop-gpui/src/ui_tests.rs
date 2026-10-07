@@ -3202,3 +3202,69 @@ fn menu_and_palette_labels_start_at_the_same_inset(cx: &mut TestAppContext) {
     assert!((menu_inset - palette_inset).abs() <= px(1.));
     assert!(menu_inset < px(16.), "labels hug the row's leading edge");
 }
+
+#[gpui_kit::test]
+fn connection_controls_live_in_settings_not_the_sidebar(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let (app, cx, _requests) = harness(cx);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sidebar-settings").is_some());
+    let inputs = app.read_with(cx, |app, _| {
+        [app.server.entity_id(), app.pairing.entity_id()]
+    });
+    cx.update(|window, _| {
+        assert!(window.try_find("connection-toggle").is_none());
+        let sidebar = window.within("sidebar");
+        for input in inputs {
+            assert!(
+                sidebar.try_find(("input", input)).is_none(),
+                "connection inputs are not in the sidebar"
+            );
+        }
+        for id in [
+            "pair",
+            "remember-credential",
+            "load-credential",
+            "forget-credential",
+        ] {
+            assert!(sidebar.try_find(id).is_none(), "{id} is not in the sidebar");
+        }
+    });
+    cx.simulate_keystrokes("cmd-,");
+    cx.run_until_parked();
+    let settings = cx.debug_bounds("settings").expect("settings is open");
+    cx.update(|window, _| {
+        for input in inputs {
+            let bounds = window.find(("input", input)).bounds();
+            assert!(settings.contains(&bounds.center()), "connection inputs sit inside settings");
+        }
+    });
+    for id in [
+        "pairing-input",
+        "pair",
+        "remember-credential",
+        "load-credential",
+        "forget-credential",
+    ] {
+        let bounds = cx
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} is in settings"));
+        assert!(settings.contains(&bounds.center()), "{id} sits inside settings");
+    }
+}
+
+#[gpui_kit::test]
+fn project_rows_are_labelled_by_name_without_the_path(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+    let (_app, cx, _requests) = harness(cx);
+    cx.run_until_parked();
+    let row = cx.update(|window, _| window.find("project-p"));
+    assert_eq!(row.label(), Some("fixture"));
+    let project = cx.debug_bounds("project-p").unwrap();
+    let name = cx.debug_bounds("project-p-name").unwrap();
+    assert!(
+        (name.center().y - project.center().y).abs() <= px(2.)
+            && name.size.height * 1.5 < project.size.height,
+        "the name is the row's only line"
+    );
+}
