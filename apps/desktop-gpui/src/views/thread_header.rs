@@ -3,6 +3,7 @@ use gpui_kit::base::Selectable;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable,
     button::{Button, ButtonVariants as _},
+    tooltip::Tooltip,
 };
 use gpui_kit::{Context, FontWeight, anchored, deferred, div, prelude::*, px};
 use t3code_desktop_gpui::{conversation, palette, sidebar};
@@ -59,8 +60,10 @@ impl NativeApp {
         let thread_menu = (self.thread_menu_open && self.thread_menu_row.is_none())
             .then(|| self.render_thread_menu(cx));
         div()
+            .debug_selector(|| "thread-header".into())
             .flex()
             .flex_col()
+            .min_w_0()
             .gap_2()
             .flex_shrink_0()
             .px_3()
@@ -73,27 +76,59 @@ impl NativeApp {
                         .flex()
                         .items_center()
                         .gap_2()
+                        .w_full()
                         .min_w_0()
+                        // Identity never competes with branch/status intrinsic widths.
                         .when_some(header_project, |view, project| {
                             view.child(
                                 div()
+                                    .id("header-project")
+                                    .debug_selector(|| "header-project".into())
+                                    .w_24()
+                                    .flex_shrink_0()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_sm()
                                     .text_color(muted_foreground)
-                                    .child(format!("{project} /")),
+                                    .tooltip({
+                                        let project = project.clone();
+                                        move |window, cx| {
+                                            Tooltip::new(project.clone()).build(window, cx)
+                                        }
+                                    })
+                                    .child(project),
                             )
                         })
                         .child(
                             div()
+                                .id("header-title")
+                                .debug_selector(|| "header-title".into())
+                                .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .font_weight(FontWeight::SEMIBOLD)
+                                .tooltip({
+                                    let title = header_title.clone();
+                                    move |window, cx| Tooltip::new(title.clone()).build(window, cx)
+                                })
                                 .child(header_title),
-                        )
+                        ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "header-metadata".into())
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .min_w_0()
                         .when_some(header_branch, |view, branch| {
                             view.child(
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
                                     .child(
                                         Button::new("branch-selector")
                                             .debug_selector(|| "branch-selector".into())
@@ -105,10 +140,12 @@ impl NativeApp {
                                             })
                                             .ghost()
                                             .small()
+                                            .w_full()
                                             .selected(branch_picker)
-                                            .tooltip(
-                                                "Switch the branch or worktree for this thread",
-                                            )
+                                            .tooltip(format!(
+                                                "Switch branch or worktree · {}",
+                                                self.selected_thread_branch().unwrap_or_default()
+                                            ))
                                             .on_click(cx.listener(|app, _, window, cx| {
                                                 app.open_branch_picker(
                                                     "branch-selector",
@@ -132,32 +169,45 @@ impl NativeApp {
                         .when_some(header_session, |view, (label, is_danger)| {
                             view.child(
                                 div()
+                                    .id("header-session")
+                                    .debug_selector(|| "header-session".into())
+                                    .flex_shrink_0()
+                                    .max_w_32()
+                                    .min_w_0()
+                                    .truncate()
                                     .px_2()
                                     .rounded_sm()
                                     .bg(muted)
                                     .text_xs()
                                     .text_color(if is_danger { danger } else { muted_foreground })
+                                    .tooltip({
+                                        let label = label.clone();
+                                        move |window, cx| {
+                                            Tooltip::new(label.clone()).build(window, cx)
+                                        }
+                                    })
                                     .child(label),
-                            )
-                        })
-                        .when_some(header_diff, |view, (files, additions, deletions)| {
-                            view.child(
-                                div()
-                                    .debug_selector(|| "header-diff".into())
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .px_2()
-                                    .rounded_sm()
-                                    .bg(muted)
-                                    .text_xs()
-                                    .text_color(muted_foreground)
-                                    .child(format!("{files} files"))
-                                    .child(div().text_color(green).child(format!("+{additions}")))
-                                    .child(div().text_color(danger).child(format!("-{deletions}"))),
                             )
                         }),
                 )
+                // Diff totals have their own line rather than squeezing out runtime state.
+                .when_some(header_diff, |view, (files, additions, deletions)| {
+                    view.child(
+                        div()
+                            .debug_selector(|| "header-diff".into())
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .rounded_sm()
+                            .bg(muted)
+                            .text_xs()
+                            .text_color(muted_foreground)
+                            .child(format!("{files} files"))
+                            .child(div().text_color(green).child(format!("+{additions}")))
+                            .child(div().text_color(danger).child(format!("-{deletions}"))),
+                    )
+                })
             })
             .child(
                 div()

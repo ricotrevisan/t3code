@@ -2,6 +2,7 @@
 mod workspace_context;
 mod checkout_context;
 mod checkpoint_diffs;
+mod header_layout;
 
 use super::*;
 use gpui_kit::component::Root;
