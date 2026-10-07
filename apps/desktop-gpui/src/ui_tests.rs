@@ -2949,3 +2949,90 @@ fn approval_on_another_thread_notifies_and_the_click_selects_it(cx: &mut TestApp
         Some("u")
     );
 }
+
+fn composer_text(app: &Entity<NativeApp>, cx: &mut VisualTestContext) -> String {
+    app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string())
+}
+
+/// Types "@src" in a thread with its own worktree and answers the latest file search.
+fn type_mention_and_answer(
+    app: &Entity<NativeApp>,
+    cx: &mut VisualTestContext,
+    requests: &async_channel::Receiver<connection::Command>,
+) {
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| {
+            app.shell.threads[0].worktree_path = Some("/tmp/owned-worktree".into())
+        })
+    });
+    cx.simulate_input("see @src");
+    cx.run_until_parked();
+    let mut searches: Vec<_> = std::iter::from_fn(|| requests.try_recv().ok())
+        .filter_map(|command| match command {
+            connection::Command::Call {
+                tag,
+                payload,
+                reply,
+            } => Some((tag, payload, reply)),
+            _ => None,
+        })
+        .collect();
+    let (tag, payload, reply) = searches.pop().expect("a file search");
+    assert!(searches.iter().all(|(tag, ..)| tag == "projects.searchEntries"));
+    assert_eq!(tag, "projects.searchEntries");
+    assert_eq!(payload["cwd"], "/tmp/owned-worktree");
+    assert_eq!(payload["query"], "src");
+    reply.send_blocking(Ok(json!({"entries":[{"path":"src/main.rs","kind":"file"},{"path":"src/lib/a b.rs","kind":"file"}],"truncated":false}))).unwrap();
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("mention-menu").is_some());
+    assert!(cx.debug_bounds("mention-1").is_some());
+}
+
+#[gpui_kit::test]
+fn at_mention_searches_the_worktree_and_enter_inserts_the_chosen_path(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    type_mention_and_answer(&app, cx, &requests);
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err(), "picking a path sends no turn");
+    assert_eq!(composer_text(&app, cx), "see [a b.rs](src/lib/a%20b.rs) ");
+    assert!(cx.debug_bounds("mention-menu").is_none());
+}
+
+#[gpui_kit::test]
+fn a_sent_mention_reaches_the_turn_as_message_context(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    type_mention_and_answer(&app, cx, &requests);
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("now");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("expected turn start");
+    };
+    assert_eq!(payload["type"], "thread.turn.start");
+    assert_eq!(
+        payload["message"]["text"],
+        "see [a b.rs](t3-context://v1/mention/mention_1) now"
+    );
+    assert_eq!(
+        payload["message"]["context"],
+        json!({"version":1,"records":[{"version":1,"kind":"mention","contextId":"mention_1","label":"a b.rs","path":"src/lib/a b.rs"}]})
+    );
+    reply.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    cx.run_until_parked();
+    assert_eq!(composer_text(&app, cx), "");
+}
+
+#[gpui_kit::test]
+fn escape_closes_the_mention_menu_and_keeps_the_typed_text(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    type_mention_and_answer(&app, cx, &requests);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("mention-menu").is_none());
+    assert_eq!(composer_text(&app, cx), "see @src");
+    assert!(requests.try_recv().is_err());
+}

@@ -10,7 +10,10 @@ use serde_json::json;
 use t3code_desktop_gpui::conversation::{ContextWindowLevel, context_window_snapshot};
 use t3code_desktop_gpui::palette;
 
-use crate::{NativeApp, SlashClear, SlashNext, SlashPrevious, SlashRun};
+use crate::{
+    MentionClose, MentionNext, MentionPick, MentionPrevious, NativeApp, SlashClear, SlashNext,
+    SlashPrevious, SlashRun,
+};
 
 impl NativeApp {
     fn slash_entries(&self, cx: &App) -> Vec<&'static palette::Entry> {
@@ -33,6 +36,59 @@ impl NativeApp {
         self.execute_command(command, window, cx);
     }
 
+    /// The "@" file menu, opening upward from the composer text.
+    fn render_mention_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let notice = if self.mention_loading {
+            Some("Searching files…")
+        } else if self.mention_entries.is_empty() {
+            Some("No matching files or folders")
+        } else {
+            None
+        };
+        div()
+            .id("mention-menu")
+            .debug_selector(|| "mention-menu".into())
+            .occlude()
+            .mb_1()
+            .w(px(480.))
+            .max_h(px(240.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_lg()
+            .when_some(notice, |view, notice| {
+                view.child(
+                    div()
+                        .px_2()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(notice),
+                )
+            })
+            .children(
+                self.mention_entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        Button::new(gpui_kit::SharedString::from(format!("mention-{index}")))
+                            .debug_selector(move || format!("mention-{index}"))
+                            .label(entry.path.clone())
+                            .ghost()
+                            .small()
+                            .selected(index == self.mention_index)
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.pick_mention(index, window, cx)
+                            }))
+                    }),
+            )
+    }
+
     pub(crate) fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let muted_foreground = cx.theme().muted_foreground;
         let border = cx.theme().border;
@@ -45,6 +101,7 @@ impl NativeApp {
         let active_model = self.active_model_label(cx);
         let composer_value = self.composer.read(cx).value().to_string();
         let slash_entries = palette::slash_matches(&composer_value, self.selected_thread.is_some());
+        let mention_menu = self.mention_open(cx).then(|| self.render_mention_menu(cx));
         let thread_id = self.selected_thread.clone().unwrap_or_default();
         let queued = self.queues.messages(&thread_id);
         // A head that is not on the wire while the thread is idle waits on a
@@ -71,6 +128,24 @@ impl NativeApp {
             .when(slash_entries.is_some(), |view| {
                 view.key_context("NativeSlashMenu")
             })
+            // The "@" menu likewise takes arrows, Enter, Tab, and Escape while it shows.
+            .when(mention_menu.is_some(), |view| {
+                view.key_context("NativeMentionMenu")
+            })
+            .on_action(cx.listener(|app, _: &MentionNext, _, cx| {
+                let count = app.mention_entries.len();
+                app.mention_index = palette::step(app.mention_index, count, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &MentionPrevious, _, cx| {
+                let count = app.mention_entries.len();
+                app.mention_index = palette::step(app.mention_index, count, false);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|app, _: &MentionPick, window, cx| {
+                app.pick_mention(app.mention_index, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &MentionClose, _, cx| app.close_mention(cx)))
             .on_action(cx.listener(|app, _: &SlashNext, _, cx| {
                 let count = app.slash_entries(cx).len();
                 app.slash_index = palette::step(app.slash_index, count, true);
@@ -155,7 +230,20 @@ impl NativeApp {
                         })),
                 )
             })
-            .child(Textarea::new(&self.composer))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .when_some(mention_menu, |view, menu| {
+                        view.child(deferred(
+                            anchored()
+                                .anchor(Anchor::BottomLeft)
+                                .snap_to_window()
+                                .child(menu),
+                        ))
+                    })
+                    .child(Textarea::new(&self.composer)),
+            )
             .when(!self.attachments.is_empty(), |view| {
                 view.child(
                     div().flex().flex_wrap().gap_1().children(

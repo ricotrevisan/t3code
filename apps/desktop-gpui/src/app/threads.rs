@@ -180,6 +180,7 @@ impl NativeApp {
         }
         self.model_override = None;
         self.selected_thread = Some(id.into());
+        self.mention = None;
         self.pending_history_attached = false;
         self.close_thread_menu();
         self.detail = thread::ThreadDetail::default();

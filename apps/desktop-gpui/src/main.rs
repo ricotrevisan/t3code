@@ -37,6 +37,10 @@ gpui_kit::actions!(
         SlashPrevious,
         SlashRun,
         SlashClear,
+        MentionNext,
+        MentionPrevious,
+        MentionPick,
+        MentionClose,
         NewThread,
         StashPrompt,
         ToggleSettle,
@@ -122,6 +126,13 @@ struct NativeApp {
     palette_index: usize,
     /// Highlighted row of the composer's "/" menu.
     slash_index: usize,
+    /// The composer's "@" token (byte range and query) whose file menu is open.
+    mention: Option<(std::ops::Range<usize>, String)>,
+    mention_entries: Vec<files::Entry>,
+    mention_index: usize,
+    mention_loading: bool,
+    mention_epoch: u64,
+    mention_task: Option<Task<()>>,
     previous_focus: Option<FocusHandle>,
     shell: shell::Shell,
     archived_shell: shell::Shell,
@@ -357,6 +368,7 @@ impl NativeApp {
                 if matches!(event, InputEvent::Change) {
                     app.slash_index = 0;
                     app.remember_composer_draft(cx);
+                    app.update_mention(cx);
                 }
                 // Enter sends and Shift+Enter inserts a newline, as in the reference composer.
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
@@ -424,6 +436,12 @@ impl NativeApp {
             palette_query,
             palette_index: 0,
             slash_index: 0,
+            mention: None,
+            mention_entries: vec![],
+            mention_index: 0,
+            mention_loading: false,
+            mention_epoch: 0,
+            mention_task: None,
             previous_focus: None,
             shell: shell::Shell::default(),
             archived_shell: shell::Shell::default(),
@@ -827,6 +845,11 @@ fn bind_native_keys(cx: &mut App) {
         KeyBinding::new("up", SlashPrevious, Some("NativeSlashMenu > Input")),
         KeyBinding::new("enter", SlashRun, Some("NativeSlashMenu > Input")),
         KeyBinding::new("escape", SlashClear, Some("NativeSlashMenu > Input")),
+        KeyBinding::new("down", MentionNext, Some("NativeMentionMenu > Input")),
+        KeyBinding::new("up", MentionPrevious, Some("NativeMentionMenu > Input")),
+        KeyBinding::new("enter", MentionPick, Some("NativeMentionMenu > Input")),
+        KeyBinding::new("tab", MentionPick, Some("NativeMentionMenu > Input")),
+        KeyBinding::new("escape", MentionClose, Some("NativeMentionMenu > Input")),
     ]);
 }
 

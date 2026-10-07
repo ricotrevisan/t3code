@@ -3,9 +3,110 @@
 use crate::{NativeApp, attachment_mime};
 use gpui_kit::{App, Context, Window};
 use serde_json::json;
-use t3code_desktop_gpui::{commands, connection, queue};
+use t3code_desktop_gpui::{commands, connection, files, mentions, palette, queue};
 
 impl NativeApp {
+    /// Whether the "@" file menu shows: its token is still the one before the cursor.
+    pub(crate) fn mention_open(&self, cx: &App) -> bool {
+        let Some((range, query)) = &self.mention else {
+            return false;
+        };
+        let input = self.composer.read(cx);
+        let value = input.value();
+        mentions::path_trigger(&value, input.cursor())
+            .is_some_and(|(at, typed)| &at == range && typed == query)
+    }
+
+    /// Follows the composer's "@" token; a new query searches the selected
+    /// thread's workspace and only the latest request's reply is shown.
+    pub(crate) fn update_mention(&mut self, cx: &mut Context<Self>) {
+        let input = self.composer.read(cx);
+        let value = input.value();
+        let trigger = palette::slash_matches(&value, self.selected_thread.is_some())
+            .is_none()
+            .then(|| mentions::path_trigger(&value, input.cursor()))
+            .flatten()
+            .map(|(range, query)| (range, query.to_owned()));
+        let Some((range, query)) = trigger else {
+            self.close_mention(cx);
+            return;
+        };
+        let unchanged = self
+            .mention
+            .as_ref()
+            .is_some_and(|(_, current)| current == &query);
+        self.mention = Some((range, query.clone()));
+        if unchanged {
+            return;
+        }
+        self.mention_epoch += 1;
+        self.mention_entries.clear();
+        self.mention_index = 0;
+        self.mention_loading = false;
+        cx.notify();
+        let (Some(sender), Some(cwd)) = (self.commands.clone(), self.selected_workspace()) else {
+            return;
+        };
+        self.mention_loading = true;
+        let epoch = self.mention_epoch;
+        let generation = self.generation;
+        let payload = json!({"cwd": cwd, "query": query, "limit": 100});
+        self.mention_task = Some(cx.spawn(async move |entity, cx| {
+            let result = connection::call(&sender, "projects.searchEntries", payload).await;
+            let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation || app.mention_epoch != epoch {
+                    return;
+                }
+                app.mention_loading = false;
+                app.mention_entries = result
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<files::Listing>(value).ok())
+                    .map(|listing| listing.entries)
+                    .unwrap_or_default();
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Closes the "@" menu and drops its pending search; the text stays as typed.
+    pub(crate) fn close_mention(&mut self, cx: &mut Context<Self>) {
+        if self.mention.take().is_some() {
+            self.mention_epoch += 1;
+            self.mention_entries.clear();
+            self.mention_loading = false;
+            self.mention_task = None;
+            cx.notify();
+        }
+    }
+
+    /// Replaces the "@" token with row `index`'s file link, as the web composer does.
+    pub(crate) fn pick_mention(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some((range, query)), Some(entry)) =
+            (self.mention.clone(), self.mention_entries.get(index))
+        else {
+            return;
+        };
+        let link = format!("{} ", mentions::file_link(&entry.path));
+        let value = self.composer.read(cx).value().to_string();
+        if value.get(range.clone()) != Some(&format!("@{query}")) {
+            return;
+        }
+        // A space already after the token is reused rather than doubled.
+        let end = range.end + usize::from(value[range.end..].starts_with(' '));
+        self.close_mention(cx);
+        self.composer.update(cx, |input, cx| {
+            input.set_selected_range(range.start..end, cx);
+            input.replace(link, window, cx);
+        });
+        self.remember_composer_draft(cx);
+        cx.notify();
+    }
+
     pub(crate) fn schedule_draft_save(&mut self, cx: &mut Context<Self>) {
         self.draft_save = Some(cx.spawn(async move |entity, cx| {
             cx.background_executor()

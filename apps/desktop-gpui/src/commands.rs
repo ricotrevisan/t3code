@@ -88,8 +88,12 @@ pub fn start_turn(
         return Err("A prompt is required");
     }
     let mut result = command("thread.turn.start", thread_id);
+    let (text, context) = crate::mentions::message_context(text);
     result["message"] =
         json!({"messageId":id(),"role":"user","text":text,"attachments":attachments});
+    if let Some(context) = context {
+        result["message"]["context"] = context;
+    }
     result["modelSelection"] = selection;
     result["runtimeMode"] = json!(runtime);
     result["interactionMode"] = json!(interaction);
