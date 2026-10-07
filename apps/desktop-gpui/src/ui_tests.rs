@@ -225,6 +225,76 @@ fn each_turn_owns_its_activity_and_checkpoint_controls(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let activity = |id: &str, kind: &str, tone: &str, summary: &str, at: &str, payload: Value| {
+        json!({"id": id, "kind": kind, "tone": tone, "summary": summary, "payload": payload, "turnId": "turn-1", "createdAt": at})
+    };
+    let command = json!({"itemType": "command_execution", "toolCallId": "c1", "title": "Ran command", "data": {"item": {"command": "cargo test"}}});
+    let mut command_done = command.clone();
+    command_done["status"] = json!("completed");
+    command_done["data"]["item"]["aggregatedOutput"] = json!("test result: ok");
+    let edit = json!({"itemType": "file_change", "toolCallId": "f1", "title": "File change", "status": "failed", "detail": "patch rejected", "data": {"files": [{"path": "src/lib.rs"}]}});
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(json!({
+                "id": "t",
+                "title": "Thread",
+                "messages": [
+                    {"id": "u1", "role": "user", "text": "test it", "turnId": null, "streaming": false, "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"}
+                ],
+                "activities": [
+                    activity("e1", "tool.started", "tool", "Ran command started", "2026-01-01T00:00:01Z", command),
+                    activity("e2", "runtime.warning", "info", "Retrying the provider", "2026-01-01T00:00:02Z", json!({})),
+                    activity("e3", "tool.completed", "tool", "Ran command", "2026-01-01T00:00:03Z", command_done),
+                    activity("e4", "tool.completed", "tool", "File change", "2026-01-01T00:00:04Z", edit)
+                ],
+                "proposedPlans": [],
+                "checkpoints": [],
+                "latestTurn": {"turnId": "turn-1", "state": "completed", "requestedAt": "2026-01-01T00:00:00Z", "startedAt": "2026-01-01T00:00:00Z", "completedAt": "2026-01-01T00:00:05Z", "assistantMessageId": null},
+                "session": null,
+            }));
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("activity-toggle").expect("the turn has its disclosure");
+    cx.simulate_click(bounds.center(), Default::default());
+    cx.run_until_parked();
+
+    for id in ["tool-row-e1", "tool-name-e1", "tool-row-e4", "tool-name-e4", "activity-e2"] {
+        assert!(cx.debug_bounds(id).is_some(), "{id} renders");
+    }
+    assert!(cx.debug_bounds("activity-e3").is_none(), "the completion merges into its call's row");
+    let names: Vec<String> = app.read_with(cx, |app, _| {
+        app.conversation_rows
+            .iter()
+            .flat_map(|row| match &row.entry {
+                t3code_desktop_gpui::conversation::TimelineEntry::Activity { items, .. } => items.clone(),
+                _ => Vec::new(),
+            })
+            .filter_map(|item| match item {
+                t3code_desktop_gpui::conversation::ActivityItem::Tool(call) => Some(call.name),
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(names, ["Ran command", "File change"]);
+    assert!(cx.debug_bounds("tool-body-e1").is_none() && cx.debug_bounds("tool-body-e4").is_none());
+
+    let bounds = cx.debug_bounds("tool-toggle-e1").expect("the command call can expand");
+    cx.simulate_click(bounds.center(), Default::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tool-body-e1").is_some(), "the command output shows");
+    assert!(cx.debug_bounds("tool-body-e4").is_none(), "the other call stays collapsed");
+    assert!(cx.debug_bounds("activity-e2").is_some(), "the plain activity still renders");
+    app.read_with(cx, |app, _| {
+        assert_eq!(app.activity_expanded.get("tool:e1"), Some(&true));
+        assert_eq!(app.activity_expanded.get("turn-1"), Some(&true));
+    });
+}
+
+#[gpui_kit::test]
 fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {

@@ -369,6 +369,407 @@ pub fn pending_user_input(activities: &[Value]) -> Option<PendingUserInput> {
     open.into_iter().next()
 }
 
+/// Where a tool call stands, as its row marks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolState {
+    Running,
+    Completed,
+    Failed,
+}
+
+/// One tool call: the `tool.started`, `tool.updated`, and `tool.completed`
+/// activities that share a `toolCallId`, merged into a single row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCall {
+    /// The call id, or the first activity's id when the provider sent none.
+    pub id: String,
+    /// The first activity's id: unique per row even when a provider reuses
+    /// call ids, so it keys expansion and the row's debug selectors.
+    pub key: String,
+    pub name: String,
+    /// The key argument: command line, file path, search pattern, or URL.
+    pub headline: Option<String>,
+    pub state: ToolState,
+    /// Detail, output, diff, and touched files, shown when the row expands.
+    pub body: Option<String>,
+    /// Added and removed lines, when the payload reports them.
+    pub line_counts: Option<(u64, u64)>,
+    pub expanded: bool,
+    pub activities: Vec<Value>,
+}
+
+impl ToolCall {
+    fn new(activities: Vec<Value>) -> Self {
+        let latest = |read: fn(&Value) -> Option<String>| activities.iter().rev().find_map(read);
+        let name = latest(tool_name).unwrap_or_else(|| "Tool".to_owned());
+        let completed = activities
+            .iter()
+            .any(|activity| activity["kind"] == "tool.completed");
+        let errored = activities
+            .last()
+            .is_some_and(|activity| activity["tone"] == "error");
+        let state = match latest(|activity| text(&activity["payload"]["status"])).as_deref() {
+            Some("failed" | "declined" | "stopped" | "cancelled" | "interrupted") => {
+                ToolState::Failed
+            }
+            _ if errored => ToolState::Failed,
+            Some("completed") => ToolState::Completed,
+            _ if completed => ToolState::Completed,
+            _ => ToolState::Running,
+        };
+        let detail = latest(|activity| strip_exit_code(&text(&activity["payload"]["detail"])?));
+        let paths = latest(|activity| {
+            let paths = tool_paths(&activity["payload"]["data"]);
+            (!paths.is_empty()).then(|| paths.join("\n"))
+        });
+        let headline = latest(tool_command)
+            .or_else(|| Some(paths.as_deref()?.lines().next()?.to_owned()))
+            .or_else(|| latest(tool_pattern))
+            .or_else(|| latest(tool_url))
+            .or_else(|| {
+                let line = detail.as_deref()?.lines().next()?.trim();
+                (!same_text(line, &name)).then(|| line.to_owned())
+            });
+        let mut seen = vec![name.clone()];
+        seen.extend(headline.clone());
+        let mut blocks = Vec::new();
+        let candidates = [
+            detail,
+            latest(tool_output),
+            latest(tool_diff),
+            paths,
+            latest(mcp_arguments),
+        ];
+        for block in candidates.into_iter().flatten() {
+            if !seen.iter().any(|seen| same_text(seen, &block)) {
+                seen.push(block.clone());
+                blocks.push(block);
+            }
+        }
+        let first_id = activities
+            .first()
+            .and_then(|activity| text(&activity["id"]));
+        let id = activities
+            .iter()
+            .find_map(tool_call_id)
+            .or_else(|| first_id.clone())
+            .unwrap_or_else(|| "unknown".to_owned());
+        Self {
+            key: first_id.unwrap_or_else(|| id.clone()),
+            id,
+            name,
+            headline,
+            state,
+            body: (!blocks.is_empty()).then(|| blocks.join("\n\n")),
+            line_counts: activities.iter().rev().find_map(line_counts),
+            expanded: false,
+            activities,
+        }
+    }
+
+    /// The key its expansion is stored under, beside the turn disclosures.
+    pub fn expansion_key(&self) -> String {
+        format!("tool:{}", self.key)
+    }
+}
+
+/// One line of a turn's activity disclosure.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActivityItem {
+    Tool(ToolCall),
+    Activity(Value),
+    Error(Value),
+}
+
+/// Folds a turn's activities into disclosure lines, each at the position of
+/// its first activity. Tool lifecycle activities merge by call id until the
+/// call completes; an id-less one joins the open call just before it when it
+/// names the same tool. Nothing is dropped: other kinds stay plain lines, and
+/// error-toned ones become errors.
+pub fn activity_items(activities: &[Value]) -> Vec<ActivityItem> {
+    let mut items = Vec::new();
+    // Calls collect their activities here and are derived once all have arrived.
+    let mut calls: Vec<Vec<Value>> = Vec::new();
+    for activity in activities {
+        let kind = activity["kind"].as_str().unwrap_or("");
+        if !matches!(kind, "tool.started" | "tool.updated" | "tool.completed") {
+            items.push(if activity["tone"] == "error" {
+                ActivityItem::Error(activity.clone())
+            } else {
+                ActivityItem::Activity(activity.clone())
+            });
+            continue;
+        }
+        let open = |call: &Vec<Value>| !call.iter().any(|item| item["kind"] == "tool.completed");
+        let target = match tool_call_id(activity) {
+            Some(id) => calls.iter().rposition(|call| {
+                open(call) && call.iter().find_map(tool_call_id).as_ref() == Some(&id)
+            }),
+            None => match items.last() {
+                Some(ActivityItem::Tool(_)) => calls.len().checked_sub(1).filter(|&last| {
+                    let call = &calls[last];
+                    open(call)
+                        && call[0]["payload"]["itemType"] == activity["payload"]["itemType"]
+                        && tool_name(&call[0]) == tool_name(activity)
+                }),
+                _ => None,
+            },
+        };
+        match target {
+            Some(index) => calls[index].push(activity.clone()),
+            None => {
+                calls.push(vec![activity.clone()]);
+                items.push(ActivityItem::Tool(ToolCall::new(Vec::new())));
+            }
+        }
+    }
+    let mut calls = calls.into_iter();
+    for item in &mut items {
+        if let ActivityItem::Tool(call) = item {
+            *call = ToolCall::new(calls.next().unwrap_or_default());
+        }
+    }
+    items
+}
+
+fn text(value: &Value) -> Option<String> {
+    let text = value.as_str()?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Compares labels the way the reference does: whitespace-insensitive, and
+/// ignoring the trailing `complete` some providers append on completion.
+fn same_text(left: &str, right: &str) -> bool {
+    let normalize = |value: &str| {
+        let words = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        let lower = words.to_lowercase();
+        ["completed", "complete"]
+            .iter()
+            .find_map(|suffix| lower.strip_suffix(suffix))
+            .unwrap_or(&lower)
+            .trim()
+            .to_owned()
+    };
+    normalize(left) == normalize(right)
+}
+
+fn tool_call_id(activity: &Value) -> Option<String> {
+    let payload = &activity["payload"];
+    text(&payload["toolCallId"]).or_else(|| text(&payload["data"]["toolCallId"]))
+}
+
+fn tool_name(activity: &Value) -> Option<String> {
+    let payload = &activity["payload"];
+    let summary = || {
+        let summary = text(&activity["summary"])?;
+        match summary.strip_suffix(" started") {
+            Some(name) if activity["kind"] == "tool.started" => Some(name.to_owned()),
+            _ => Some(summary),
+        }
+    };
+    let name = text(&payload["title"])
+        .or_else(|| text(&payload["data"]["toolName"]))
+        .or_else(summary)?;
+    let lower = name.to_ascii_lowercase();
+    let cut = [" completed", " complete"]
+        .iter()
+        .find_map(|suffix| lower.strip_suffix(suffix).map(str::len))
+        .unwrap_or(name.len());
+    Some(name[..cut].trim_end().to_owned())
+}
+
+/// The output before a trailing `<exited with exit code N>` marker.
+fn strip_exit_code(value: &str) -> Option<String> {
+    let value = value.trim();
+    let output = value
+        .strip_suffix('>')
+        .and_then(|rest| rest.rfind("<exited with exit code ").map(|at| &value[..at]))
+        .unwrap_or(value)
+        .trim();
+    (!output.is_empty()).then(|| output.to_owned())
+}
+
+/// A command array or string, without a `bash -lc '…'` style wrapper.
+fn command_text(value: &Value) -> Option<String> {
+    if let Some(parts) = value.as_array() {
+        let parts: Vec<String> = parts
+            .iter()
+            .filter_map(text)
+            .map(|part| {
+                if part.contains(char::is_whitespace) || part.contains(['"', '\'']) {
+                    format!("\"{}\"", part.replace('"', "\\\""))
+                } else {
+                    part
+                }
+            })
+            .collect();
+        return (!parts.is_empty()).then(|| unwrap_shell(&parts.join(" ")));
+    }
+    Some(unwrap_shell(&text(value)?))
+}
+
+fn unwrap_shell(command: &str) -> String {
+    let unwrapped = command
+        .split_once(char::is_whitespace)
+        .and_then(|(shell, rest)| {
+            let shell = shell.trim_matches(['"', '\'']).rsplit('/').next()?;
+            if !matches!(shell, "bash" | "sh" | "zsh") {
+                return None;
+            }
+            let rest = rest.trim_start();
+            let script = rest
+                .strip_prefix("-lc")
+                .or_else(|| rest.strip_prefix("-c"))?
+                .trim();
+            let quoted = ['"', '\'']
+                .iter()
+                .find_map(|quote| script.strip_prefix(*quote)?.strip_suffix(*quote));
+            Some(quoted.unwrap_or(script).trim().to_owned())
+        });
+    unwrapped
+        .filter(|script| !script.is_empty())
+        .unwrap_or_else(|| command.to_owned())
+}
+
+fn tool_command(activity: &Value) -> Option<String> {
+    let payload = &activity["payload"];
+    let data = &payload["data"];
+    let item = &data["item"];
+    [
+        &item["command"],
+        &item["input"]["command"],
+        &item["result"]["command"],
+        &data["command"],
+        &data["input"]["command"],
+    ]
+    .into_iter()
+    .find_map(command_text)
+    .or_else(|| {
+        (payload["itemType"] == "command_execution")
+            .then(|| strip_exit_code(&text(&payload["detail"])?))?
+    })
+}
+
+fn tool_paths(data: &Value) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let listed = ["files", "changes"]
+        .iter()
+        .flat_map(|key| [&data[*key], &data["item"][*key]])
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|file| text(&file["path"]));
+    let input = &data["input"];
+    let single = [&input["file_path"], &input["filePath"], &input["path"]]
+        .into_iter()
+        .filter_map(text);
+    for path in listed.chain(single) {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn tool_pattern(activity: &Value) -> Option<String> {
+    let data = &activity["payload"]["data"];
+    [
+        &data["input"]["pattern"],
+        &data["input"]["query"],
+        &data["item"]["query"],
+        &data["query"],
+    ]
+    .into_iter()
+    .find_map(text)
+}
+
+fn tool_url(activity: &Value) -> Option<String> {
+    let data = &activity["payload"]["data"];
+    [&data["input"]["url"], &data["item"]["url"], &data["url"]]
+        .into_iter()
+        .find_map(text)
+}
+
+fn tool_output(activity: &Value) -> Option<String> {
+    let data = &activity["payload"]["data"];
+    let item = &data["item"];
+    let raw = &data["rawOutput"];
+    [
+        &item["aggregatedOutput"],
+        &item["result"]["content"],
+        raw,
+        &raw["content"],
+        &raw["stdout"],
+        &raw["stderr"],
+        &raw["output"],
+        &data["result"]["content"],
+        &data["result"],
+    ]
+    .into_iter()
+    .find_map(|value| strip_exit_code(&text(value)?))
+}
+
+/// A unified diff the payload carries, per changed file when it has several.
+fn tool_diff(activity: &Value) -> Option<String> {
+    let data = &activity["payload"]["data"];
+    let direct = [&data["diff"], &data["patch"], &data["item"]["diff"]]
+        .into_iter()
+        .find_map(text);
+    direct.or_else(|| {
+        let diffs: Vec<String> = [&data["changes"], &data["item"]["changes"]]
+            .into_iter()
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(|change| text(&change["diff"]))
+            .collect();
+        (!diffs.is_empty()).then(|| diffs.join("\n"))
+    })
+}
+
+fn mcp_arguments(activity: &Value) -> Option<String> {
+    if activity["payload"]["itemType"] != "mcp_tool_call" {
+        return None;
+    }
+    let data = &activity["payload"]["data"];
+    [&data["item"]["arguments"], &data["input"]]
+        .into_iter()
+        .find(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+        .and_then(|value| serde_json::to_string_pretty(value).ok())
+}
+
+/// Added and removed lines from explicit counts, per-file counts, or a diff.
+fn line_counts(activity: &Value) -> Option<(u64, u64)> {
+    let payload = &activity["payload"];
+    let data = &payload["data"];
+    let counts = |value: &Value| Some((value["additions"].as_u64()?, value["deletions"].as_u64()?));
+    if let Some(counts) = [payload, data, &data["item"]].into_iter().find_map(counts) {
+        return Some(counts);
+    }
+    let files: Vec<(u64, u64)> = ["files", "changes"]
+        .iter()
+        .flat_map(|key| [&data[*key], &data["item"][*key]])
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(counts)
+        .collect();
+    if !files.is_empty() {
+        return Some(
+            files
+                .iter()
+                .fold((0, 0), |(a, d), (fa, fd)| (a + fa, d + fd)),
+        );
+    }
+    let diff = tool_diff(activity)?;
+    Some(diff.lines().fold((0, 0), |(additions, deletions), line| {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            (additions + 1, deletions)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            (additions, deletions + 1)
+        } else {
+            (additions, deletions)
+        }
+    }))
+}
+
 /// One turn of the conversation and the work it produced, in display order.
 ///
 /// User messages carry no `turnId`, so a turn adopts the user message that
@@ -554,7 +955,7 @@ pub enum TimelineEntry {
     Activity {
         turn: String,
         label: String,
-        activities: Vec<Value>,
+        items: Vec<ActivityItem>,
         expanded: bool,
         latest: bool,
     },
@@ -615,7 +1016,18 @@ pub fn timeline_rows(
             ..
         } = group;
         let activities: Vec<Value> = activities.into_iter().filter(visible).collect();
+        let mut items = activity_items(&activities);
+        for item in &mut items {
+            if let ActivityItem::Tool(call) = item {
+                call.expanded = expanded.get(&call.expansion_key()) == Some(&true);
+            }
+        }
+        let empty_reasoning =
+            |message: &Value| message["role"] == "reasoning" && text(&message["text"]).is_none();
         for (position, message) in messages.into_iter().enumerate() {
+            if empty_reasoning(&message) {
+                continue;
+            }
             let id = message["id"]
                 .as_str()
                 .map_or_else(|| format!("{key}:{position}"), str::to_owned);
@@ -642,9 +1054,9 @@ pub fn timeline_rows(
         if !activities.is_empty() {
             let label = match &summary {
                 Some((label, TurnState::Completed)) => {
-                    format!("{label} · {} steps", activities.len())
+                    format!("{label} · {} steps", items.len())
                 }
-                _ => format!("{} activity steps", activities.len()),
+                _ => format!("{} activity steps", items.len()),
             };
             push(
                 format!("activity:{key}"),
@@ -652,7 +1064,7 @@ pub fn timeline_rows(
                     turn: key.clone(),
                     label,
                     expanded: expanded.get(&key).copied().unwrap_or(running),
-                    activities,
+                    items,
                     latest: latest_activity == Some(index),
                 },
             );
@@ -880,6 +1292,196 @@ mod tests {
         let mut resolved = activities.clone();
         resolved.push(json!({"kind": "approval.resolved", "payload": {"requestId": "b"}}));
         assert!(pending_approval(&resolved).is_none());
+    }
+
+    fn tool(kind: &str, id: &str, call: Option<&str>, payload: Value) -> Value {
+        let mut payload = payload;
+        if let Some(call) = call {
+            payload["toolCallId"] = json!(call);
+        }
+        json!({"id": id, "kind": kind, "tone": "tool", "summary": "Tool", "payload": payload})
+    }
+
+    fn tools(items: &[ActivityItem]) -> Vec<&ToolCall> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                ActivityItem::Tool(call) => Some(call),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn activity_items_merge_a_call_with_its_completion() {
+        let command = json!({"itemType": "command_execution", "title": "Ran command", "data": {"item": {"command": "/bin/zsh -lc 'cargo test'"}}});
+        let mut done = command.clone();
+        done["status"] = json!("completed");
+        done["data"]["item"]["aggregatedOutput"] = json!("test result: ok");
+        let items = activity_items(&[
+            tool("tool.started", "a", Some("c1"), command.clone()),
+            tool("tool.updated", "b", Some("c1"), command),
+            tool("tool.completed", "c", Some("c1"), done),
+        ]);
+        assert_eq!(items.len(), 1, "one call is one row");
+        let call = tools(&items)[0];
+        assert_eq!(call.id, "c1");
+        assert_eq!(call.expansion_key(), "tool:a");
+        assert_eq!(call.name, "Ran command");
+        assert_eq!(call.headline.as_deref(), Some("cargo test"));
+        assert_eq!(call.state, ToolState::Completed);
+        assert_eq!(call.body.as_deref(), Some("test result: ok"));
+        assert_eq!(
+            call.activities.len(),
+            3,
+            "the merged call keeps every activity"
+        );
+    }
+
+    #[test]
+    fn activity_items_keep_a_call_without_completion_running() {
+        let items = activity_items(&[tool(
+            "tool.started",
+            "a",
+            Some("c1"),
+            json!({"itemType": "web_search", "title": "Web search", "data": {"input": {"query": "gpui list"}}}),
+        )]);
+        let call = tools(&items)[0];
+        assert_eq!(call.state, ToolState::Running);
+        assert_eq!(call.name, "Web search");
+        assert_eq!(call.headline.as_deref(), Some("gpui list"));
+        assert_eq!(call.body, None);
+    }
+
+    #[test]
+    fn activity_items_mark_a_failed_completion_and_count_diff_lines() {
+        let edit = json!({"itemType": "file_change", "title": "File change", "data": {"item": {"changes": [{"path": "src/lib.rs", "diff": "--- a\n+++ b\n+one\n+two\n-three"}]}}});
+        let mut failed = edit.clone();
+        failed["status"] = json!("failed");
+        failed["detail"] = json!("patch rejected");
+        let items = activity_items(&[
+            tool("tool.started", "a", Some("f1"), edit),
+            tool("tool.completed", "b", Some("f1"), failed),
+        ]);
+        let call = tools(&items)[0];
+        assert_eq!(call.state, ToolState::Failed);
+        assert_eq!(call.headline.as_deref(), Some("src/lib.rs"));
+        assert_eq!(call.line_counts, Some((2, 1)));
+        let body = call.body.as_deref().unwrap();
+        assert!(body.starts_with("patch rejected") && body.contains("+one"));
+
+        let mut errored = tool("tool.completed", "c", Some("f2"), json!({"title": "Read"}));
+        errored["tone"] = json!("error");
+        assert_eq!(
+            tools(&activity_items(&[errored]))[0].state,
+            ToolState::Failed
+        );
+    }
+
+    #[test]
+    fn activity_items_preserve_unknown_kinds_and_errors() {
+        let unknown = json!({"id": "u", "kind": "brand.new-kind", "tone": "info", "summary": "Something new"});
+        let error = json!({"id": "e", "kind": "runtime.error", "tone": "error", "summary": "Provider crashed"});
+        assert_eq!(
+            activity_items(&[unknown.clone(), error.clone()]),
+            [ActivityItem::Activity(unknown), ActivityItem::Error(error)]
+        );
+    }
+
+    #[test]
+    fn activity_items_keep_first_arrival_order() {
+        let read = json!({"itemType": "dynamic_tool_call", "title": "Read"});
+        let grep = json!({"itemType": "dynamic_tool_call", "title": "Grep"});
+        let note =
+            json!({"id": "n", "kind": "task.progress", "tone": "info", "summary": "Thinking"});
+        let items = activity_items(&[
+            tool("tool.started", "a1", Some("a"), read.clone()),
+            note.clone(),
+            tool("tool.started", "b1", Some("b"), read.clone()),
+            tool("tool.completed", "b2", Some("b"), read.clone()),
+            tool("tool.completed", "a2", Some("a"), read.clone()),
+            tool("tool.updated", "a3", Some("a"), read.clone()),
+            tool("tool.updated", "x1", None, grep.clone()),
+            tool("tool.completed", "x2", None, grep),
+        ]);
+        let ids: Vec<&str> = items
+            .iter()
+            .map(|item| match item {
+                ActivityItem::Tool(call) => call.id.as_str(),
+                ActivityItem::Activity(activity) | ActivityItem::Error(activity) => {
+                    activity["id"].as_str().unwrap()
+                }
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            ["a", "n", "b", "a", "x1"],
+            "a completion stays at its call's row; a reused id after completion starts a new call; id-less updates join the open call before them"
+        );
+        let calls = tools(&items);
+        assert_eq!(calls[0].activities.len(), 2);
+        assert_eq!(calls[1].state, ToolState::Completed);
+        assert_eq!(calls[2].state, ToolState::Running);
+        assert_eq!(calls[2].activities.len(), 1);
+        assert_eq!(calls[3].activities.len(), 2);
+        assert_eq!(calls[3].state, ToolState::Completed);
+        let keys: Vec<String> = calls.iter().map(|call| call.expansion_key()).collect();
+        assert_eq!(keys, ["tool:a1", "tool:b1", "tool:a3", "tool:x1"]);
+    }
+
+    #[test]
+    fn timeline_rows_hide_empty_thinking_and_carry_tool_expansion() {
+        let thread = json!({
+            "messages": [
+                {"id": "r1", "role": "reasoning", "text": "  ", "turnId": "t1", "createdAt": "2026-01-01T00:00:01Z"},
+                {"id": "r2", "role": "reasoning", "text": "plan", "turnId": "t1", "createdAt": "2026-01-01T00:00:02Z"},
+            ],
+            "activities": [
+                {"id": "e1", "kind": "tool.completed", "tone": "tool", "summary": "Read", "turnId": "t1", "createdAt": "2026-01-01T00:00:03Z", "payload": {"toolCallId": "c1", "detail": "file body"}},
+            ],
+        });
+        let rows = timeline_rows(&thread, &[("tool:e1".to_owned(), true)].into());
+        let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, ["message:r2", "activity:t1"]);
+        let TimelineEntry::Activity { items, .. } = &rows[1].entry else {
+            panic!("the turn has an activity disclosure");
+        };
+        assert!(matches!(&items[0], ActivityItem::Tool(call) if call.expanded));
+    }
+
+    #[test]
+    fn timeline_rows_expand_one_of_two_calls_that_reuse_an_id() {
+        let read = |id: &str, kind: &str, turn: &str, at: &str| json!({"id": id, "kind": kind, "tone": "tool", "summary": "Read", "turnId": turn, "createdAt": at, "payload": {"toolCallId": "1", "title": "Read"}});
+        let thread = json!({
+            "messages": [],
+            "activities": [
+                read("a1", "tool.started", "t1", "2026-01-01T00:00:01Z"),
+                read("a2", "tool.completed", "t1", "2026-01-01T00:00:02Z"),
+                read("a3", "tool.started", "t1", "2026-01-01T00:00:03Z"),
+                read("b1", "tool.started", "t2", "2026-01-01T00:00:04Z"),
+            ],
+        });
+        let rows = timeline_rows(&thread, &[("tool:a3".to_owned(), true)].into());
+        let calls: Vec<(String, bool)> = rows
+            .iter()
+            .flat_map(|row| match &row.entry {
+                TimelineEntry::Activity { items, .. } => items.clone(),
+                _ => Vec::new(),
+            })
+            .filter_map(|item| match item {
+                ActivityItem::Tool(call) => Some((call.expansion_key(), call.expanded)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("tool:a1".to_owned(), false),
+                ("tool:a3".to_owned(), true),
+                ("tool:b1".to_owned(), false),
+            ],
+            "a reused call id, in the same turn or the next, gets its own expansion"
+        );
     }
 
     fn question_request(id: &str) -> Value {

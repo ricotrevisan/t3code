@@ -1,8 +1,9 @@
 use std::rc::Rc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable,
+    ActiveTheme as _, Icon, Sizable,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent},
     text::TextView,
@@ -10,7 +11,8 @@ use gpui_kit::component::{
 use gpui_kit::{AnyElement, Context, FontWeight, Window, div, list, prelude::*, px};
 use serde_json::Value;
 use t3code_desktop_gpui::conversation::{
-    self, PendingApproval, PendingUserInput, TimelineEntry, TimelineRow,
+    self, ActivityItem, PendingApproval, PendingUserInput, TimelineEntry, TimelineRow, ToolCall,
+    ToolState,
 };
 
 use crate::{NativeApp, single_line_input};
@@ -148,7 +150,7 @@ impl NativeApp {
             TimelineEntry::Activity {
                 turn,
                 label,
-                activities,
+                items,
                 expanded,
                 latest,
             } => {
@@ -177,7 +179,7 @@ impl NativeApp {
                             })),
                     )
                     .when(expanded, |view| {
-                        view.child(self.render_activity_log(activities, cx))
+                        view.child(self.render_activity_log(items, cx))
                     })
                     .into_any_element()
             }
@@ -503,31 +505,130 @@ impl NativeApp {
         }
     }
 
-    fn render_activity_log(&self, activities: &[Value], cx: &Context<Self>) -> gpui_kit::Div {
+    fn render_activity_log(&self, items: &[ActivityItem], cx: &mut Context<Self>) -> gpui_kit::Div {
         let muted_foreground = cx.theme().muted_foreground;
         let warning = cx.theme().warning;
         let blue = cx.theme().blue;
         let danger = cx.theme().danger;
         let mut log = div().flex().flex_col().gap_1();
-        for activity in activities {
+        for item in items {
+            let (activity, text_color) = match item {
+                ActivityItem::Tool(call) => {
+                    log = log.child(self.render_tool_call(call, cx));
+                    continue;
+                }
+                ActivityItem::Activity(activity) => (activity, muted_foreground),
+                ActivityItem::Error(activity) => (activity, danger),
+            };
             let color = match activity["tone"].as_str().unwrap_or("info") {
                 "error" => danger,
                 "approval" => warning,
                 "tool" => muted_foreground,
                 _ => blue,
             };
+            let selector = format!("activity-{}", activity["id"].as_str().unwrap_or("unknown"));
             log = log.child(
                 div()
+                    .debug_selector(move || selector)
                     .flex()
                     .items_center()
                     .gap_2()
                     .text_xs()
-                    .text_color(muted_foreground)
+                    .text_color(text_color)
                     .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(color))
                     .child(activity["summary"].as_str().unwrap_or("").to_owned()),
             );
         }
         log
+    }
+
+    /// One tool call: state, name, key argument, and a chevron that opens its body.
+    fn render_tool_call(&self, call: &ToolCall, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let theme = cx.theme();
+        let (marker, marker_color) = match call.state {
+            ToolState::Running => (IconName::Circle, theme.blue),
+            ToolState::Completed => (IconName::Check, theme.green),
+            ToolState::Failed => (IconName::CircleX, theme.danger),
+        };
+        let (foreground, muted_foreground, green, danger) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.green,
+            theme.danger,
+        );
+        let (code_background, mono_font) = (theme.group_box, theme.mono_font_family.clone());
+        let id = call.key.clone();
+        let row_selector = format!("tool-row-{id}");
+        let name_selector = format!("tool-name-{id}");
+        let toggle_selector = format!("tool-toggle-{id}");
+        let body_selector = format!("tool-body-{id}");
+        let key = call.expansion_key();
+        let expanded = call.expanded;
+        let row = div()
+            .debug_selector(move || row_selector)
+            .flex()
+            .items_center()
+            .gap_2()
+            .min_w_0()
+            .text_xs()
+            .child(Icon::new(marker).xsmall().text_color(marker_color))
+            .child(
+                div()
+                    .debug_selector(move || name_selector)
+                    .flex_shrink_0()
+                    .text_color(foreground)
+                    .child(call.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(muted_foreground)
+                    .child(call.headline.clone().unwrap_or_default()),
+            )
+            .when_some(call.line_counts, |row, (additions, deletions)| {
+                row.child(div().text_color(green).child(format!("+{additions}")))
+                    .child(div().text_color(danger).child(format!("-{deletions}")))
+            })
+            .when(call.body.is_some(), |row| {
+                row.child(
+                    Button::new(gpui_kit::SharedString::from(toggle_selector.clone()))
+                        .debug_selector(move || toggle_selector.clone())
+                        .icon(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            // The row grows in place; do not snap to the tail.
+                            app.conversation_scroll.pause_following_tail();
+                            app.activity_expanded.insert(key.clone(), !expanded);
+                            cx.notify();
+                        })),
+                )
+            });
+        div().flex().flex_col().gap_1().child(row).when_some(
+            call.body.clone().filter(|_| expanded),
+            |view, body| {
+                view.child(
+                    div()
+                        .id(gpui_kit::SharedString::from(body_selector.clone()))
+                        .debug_selector(move || body_selector.clone())
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
+                        .p_2()
+                        .rounded_md()
+                        .bg(code_background)
+                        .font_family(mono_font)
+                        .text_xs()
+                        .text_color(muted_foreground)
+                        .child(body),
+                )
+            },
+        )
     }
 
     fn render_plan(&self, plan: &Value, cx: &Context<Self>) -> gpui_kit::Div {
