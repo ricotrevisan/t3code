@@ -80,7 +80,7 @@ impl NativeApp {
             .unwrap_or_else(|| "No thread selected".to_owned())
     }
 
-    fn selected_thread_branch(&self) -> Option<String> {
+    pub(crate) fn selected_thread_branch(&self) -> Option<String> {
         self.detail
             .thread
             .as_ref()

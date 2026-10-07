@@ -14,7 +14,16 @@ impl NativeApp {
         item: Value,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let checkout = self.checkout_context();
+        let branch = self.selected_thread_branch();
         self.detail.apply(thread_id, item)?;
+        if self.checkout_context() != checkout || self.selected_thread_branch() != branch {
+            self.invalidate_checkout_context(cx);
+            self.set_status(
+                "Checkout changed on the server; reload files in the selected checkout",
+                cx,
+            );
+        }
         self.flush_queues(cx);
         Ok(())
     }

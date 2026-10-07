@@ -476,6 +476,98 @@ fn existing_worktree_waits_for_stop_without_switching_ref(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn remote_branch_change_retires_a_file_read_in_the_same_directory(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.shell.threads[0].branch = Some("before".into());
+            app.detail.thread = Some(json!({"id":"t","branch":"before","worktreePath":null}));
+            app.file_path
+                .update(cx, |input, cx| input.set_value("file.txt", window, cx));
+            app.file_operation(false, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let (payload, delayed) = call(&requests, "projects.readFile");
+    assert_eq!(payload["cwd"], "/tmp/fixture");
+    assert!(app.read_with(cx, |app, _| app.file_busy));
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.apply_thread_update("t", json!({"kind":"snapshot","snapshot":{"snapshotSequence":2,"thread":{"id":"t","branch":"after","worktreePath":null,"messages":[],"activities":[]}}}), cx).unwrap();
+    }));
+    delayed
+        .send_blocking(Ok(
+            json!({"relativePath":"file.txt","contents":"from the old branch","truncated":false}),
+        ))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, cx| !app.file_busy
+        && app.file_contents.read(cx).value().is_empty()));
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_workspace()),
+        Some("/tmp/fixture".into())
+    );
+    assert_eq!(
+        app.read_with(cx, |app, _| app.selected_thread_branch()),
+        Some("after".into())
+    );
+}
+
+#[gpui_kit::test]
+fn remote_shell_checkout_change_retires_refs_and_keeps_dirty_file_target(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = None;
+            app.shell.threads[0].branch = Some("before".into());
+            app.worktree_operation("vcs.listRefs", false, cx);
+        })
+    });
+    cx.run_until_parked();
+    let (_, delayed) = call(&requests, "vcs.listRefs");
+    assert!(app.read_with(cx, |app, _| app.worktree_busy));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.file_editor.loaded(
+                "/tmp/fixture".into(),
+                serde_json::from_value(
+                    json!({"relativePath":"edited.txt","contents":"saved","truncated":false}),
+                )
+                .unwrap(),
+            );
+            app.file_environment = app.environment_scope.clone();
+            app.file_contents
+                .update(cx, |input, cx| input.set_value("unsaved edit", window, cx));
+            let mut thread = app.shell.threads[0].clone();
+            thread.branch = Some("after".into());
+            thread.worktree_path = Some("/tmp/remote-checkout".into());
+            app.apply_shell_item(
+                shell::ShellItem::ThreadUpserted {
+                    sequence: 2,
+                    thread,
+                },
+                cx,
+            )
+            .unwrap();
+        })
+    });
+    let _ = delayed.send_blocking(Ok(
+        json!({"isRepo":true,"nextCursor":null,"refs":[{"name":"old-branch","current":true}]}),
+    ));
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| !app.worktree_busy && app.refs.is_empty()));
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.file_contents.read(cx).value().to_string()),
+        "unsaved edit"
+    );
+    cx.update(|window, cx| app.update(cx, |app, cx| app.file_operation(true, window, cx)));
+    cx.run_until_parked();
+    let (save, _) = call(&requests, "projects.writeFile");
+    assert_eq!(save["cwd"], "/tmp/fixture");
+    assert_eq!(save["relativePath"], "edited.txt");
+    assert_eq!(save["contents"], "unsaved edit");
+}
+
+#[gpui_kit::test]
 fn unsent_draft_checkout_stays_local_and_retains_prompt(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {

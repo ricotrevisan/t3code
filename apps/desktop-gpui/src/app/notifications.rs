@@ -81,7 +81,13 @@ impl NativeApp {
                 .cloned(),
             _ => None,
         };
+        let checkout = self.checkout_context();
+        let branch = self.selected_thread_branch();
         self.shell.apply(item)?;
+        if self.checkout_context() != checkout || self.selected_thread_branch() != branch {
+            self.invalidate_checkout_context(cx);
+            self.set_status("Checkout changed on the server; reload files in the selected checkout", cx);
+        }
         let Some(prior) = prior else {
             return Ok(());
         };
