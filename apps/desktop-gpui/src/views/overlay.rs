@@ -1,5 +1,5 @@
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::{AnyElement, Context, div, prelude::*, px};
+use gpui_kit::{AnyElement, Context, anchored, deferred, div, prelude::*, px};
 
 use crate::NativeApp;
 
@@ -47,6 +47,20 @@ impl NativeApp {
                 .children(
                     self.render_palette(cx)
                         .map(|panel| centred(panel.into_any_element())),
+                )
+                // A sidebar row's menu lives here so hiding the sidebar cannot strand it.
+                .children(
+                    self.thread_menu_row
+                        .as_ref()
+                        .filter(|_| self.thread_menu_open)
+                        .map(|(_, at)| {
+                            deferred(
+                                anchored()
+                                    .position(*at)
+                                    .snap_to_window()
+                                    .child(self.render_thread_menu(cx)),
+                            )
+                        }),
                 ),
         )
     }

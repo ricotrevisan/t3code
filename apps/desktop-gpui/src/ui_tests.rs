@@ -2511,3 +2511,111 @@ fn context_meter_follows_streamed_readings_and_the_setting_hides_it(cx: &mut Tes
     assert!(app.read_with(cx, |app, _| app.context_meter_hidden));
     assert!(cx.debug_bounds("context-meter").is_none(), "the setting hides the meter");
 }
+
+fn composer_focused(app: &Entity<NativeApp>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        let composer = app.read(cx).composer.clone();
+        composer.read(cx).focus_handle(cx).is_focused(window)
+    })
+}
+
+#[gpui_kit::test]
+fn cmd_b_hides_the_sidebar_and_the_title_bar_button_restores_it(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    let composer = cx.debug_bounds("composer").expect("composer");
+    let inspector = cx.debug_bounds("inspector").expect("inspector");
+    assert_eq!(
+        inspector.size.width,
+        px(window_state::RIGHT_PANEL_WIDTH.1),
+        "window resizes do not rescale the side panels"
+    );
+    assert!(cx.debug_bounds("sidebar").is_some());
+    assert!(cx.debug_bounds("sidebar-show").is_none());
+
+    cx.simulate_keystrokes("cmd-b");
+    assert!(cx.debug_bounds("sidebar").is_none());
+    let wide = cx.debug_bounds("composer").expect("composer");
+    assert!(wide.left() < composer.left() && wide.size.width > composer.size.width);
+    assert_eq!(
+        cx.debug_bounds("inspector").unwrap().size.width,
+        inspector.size.width,
+        "the right panel keeps its width"
+    );
+    assert!(composer_focused(&app, cx), "toggling leaves focus alone");
+
+    let restore = cx.debug_bounds("sidebar-show").expect("restore button");
+    cx.simulate_click(restore.center(), Default::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sidebar").is_some());
+    assert!(cx.debug_bounds("sidebar-show").is_none());
+    assert_eq!(cx.debug_bounds("composer").unwrap(), composer);
+    assert!(composer_focused(&app, cx));
+}
+
+fn drag(cx: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>) {
+    cx.simulate_mouse_down(from, MouseButton::Left, Default::default());
+    cx.simulate_mouse_move(
+        from + point(px(10.), px(0.)),
+        Some(MouseButton::Left),
+        Default::default(),
+    );
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), Default::default());
+    cx.simulate_mouse_up(to, MouseButton::Left, Default::default());
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn resizing_and_toggling_panels_update_the_saved_layout(cx: &mut TestAppContext) {
+    let (app, cx, _requests) = harness(cx);
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| {
+            app.saved_window = Some(window_state::WindowState::default())
+        })
+    });
+    let saved = |cx: &mut VisualTestContext| app.read_with(cx, |app, _| app.saved_window.unwrap());
+
+    let sidebar = cx.debug_bounds("sidebar").unwrap();
+    let y = sidebar.center().y;
+    drag(cx, point(sidebar.right() - px(2.), y), point(px(360.), y));
+    assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(360.));
+    assert_eq!(saved(cx).sidebar_width, 360.);
+
+    let inspector = cx.debug_bounds("inspector").unwrap();
+    drag(
+        cx,
+        point(inspector.left() - px(2.), y),
+        point(inspector.left() - px(80.), y),
+    );
+    let widened = cx.debug_bounds("inspector").unwrap().size.width;
+    assert!((widened - inspector.size.width - px(80.)).abs() < px(1.));
+    assert!((saved(cx).right_panel_width - widened / px(1.)).abs() < 1.);
+
+    cx.simulate_keystrokes("cmd-b");
+    assert!(!saved(cx).sidebar_open);
+    cx.simulate_keystrokes("cmd-alt-b");
+    assert!(!saved(cx).right_panel_open);
+    cx.simulate_keystrokes("cmd-b");
+    assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(360.));
+    let toggle = cx.debug_bounds("toggle-inspector").unwrap();
+    cx.simulate_click(toggle.center(), Default::default());
+    cx.run_until_parked();
+    let state = saved(cx);
+    assert!(state.sidebar_open && state.right_panel_open);
+    assert!((cx.debug_bounds("inspector").unwrap().size.width - widened).abs() < px(1.));
+}
+
+#[gpui_kit::test]
+fn hiding_the_sidebar_keeps_an_open_row_menu_usable(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    seed_second_thread(&app, cx, false);
+    right_click(cx, "thread-u");
+    cx.simulate_keystrokes("cmd-b");
+    assert!(cx.debug_bounds("sidebar").is_none());
+    let pin = cx.debug_bounds("pin").expect("the row menu stays open");
+    cx.simulate_click(pin.center(), Default::default());
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a pin command");
+    };
+    assert_eq!(payload["threadId"], "u");
+    assert!(!app.read_with(cx, |app, _| app.thread_menu_open));
+}

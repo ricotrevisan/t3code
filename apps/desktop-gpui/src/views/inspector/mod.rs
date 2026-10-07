@@ -8,7 +8,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
 };
-use gpui_kit::{AnyElement, App, Context, Div, Window, div, prelude::*, px};
+use gpui_kit::{AnyElement, App, Context, Div, Window, div, prelude::*};
 use serde_json::json;
 use t3code_desktop_gpui::connection;
 
@@ -100,7 +100,7 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.inspector_open = true;
+        self.set_inspector_open(true, cx);
         self.right_tab = RightTab::Inspector;
         // An already open section reloads what opening it would have loaded.
         let already_open = self.inspector_section == Some(section);
@@ -129,13 +129,12 @@ impl NativeApp {
         let group_box = cx.theme().group_box;
         div()
             .id("inspector")
+            .debug_selector(|| "inspector".into())
             .when(!self.inspector_open, |view| view.hidden())
             .flex()
             .flex_col()
             .gap_2()
-            .w(px(340.))
-            .flex_shrink_0()
-            .h_full()
+            .size_full()
             .p_3()
             .bg(group_box)
             .border_l_1()

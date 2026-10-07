@@ -66,6 +66,7 @@ impl NativeApp {
             _ => muted_foreground,
         };
         div()
+            .debug_selector(|| "composer".into())
             // While the "/" menu shows, arrows, Enter, and Escape drive it instead of the text.
             .when(slash_entries.is_some(), |view| {
                 view.key_context("NativeSlashMenu")

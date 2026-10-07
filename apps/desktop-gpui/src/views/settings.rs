@@ -244,6 +244,7 @@ impl NativeApp {
                                 ("↩", "Send or queue prompt (⇧↩ for a newline)"),
                                 ("⌘⇧↩", "Interrupt the turn and send the prompt"),
                                 ("⌘⇧[ / ⌘⇧]", "Previous / next thread"),
+                                ("⌘B", "Toggle sidebar"),
                                 ("⌘⌥B", "Toggle right panel"),
                                 ("⌘,", "Settings"),
                                 ("⌘P", "Workspace files"),

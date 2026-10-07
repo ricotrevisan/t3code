@@ -32,6 +32,7 @@ pub enum Command {
     Connect,
     Disconnect,
     Settings,
+    ToggleSidebar,
 }
 
 pub struct Entry {
@@ -193,6 +194,11 @@ pub const ENTRIES: &[Entry] = &[
     Entry {
         command: Command::Settings,
         label: "Open settings",
+        needs_thread: false,
+    },
+    Entry {
+        command: Command::ToggleSidebar,
+        label: "Toggle sidebar",
         needs_thread: false,
     },
 ];

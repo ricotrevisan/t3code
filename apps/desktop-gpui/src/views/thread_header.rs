@@ -173,8 +173,7 @@ impl NativeApp {
                             .small()
                             .tooltip("Show or hide the project inspector")
                             .on_click(cx.listener(|app, _, _, cx| {
-                                app.inspector_open = !app.inspector_open;
-                                cx.notify();
+                                app.set_inspector_open(!app.inspector_open, cx)
                             })),
                     )
                     // The menu hangs off its trigger rather than a fixed window position.

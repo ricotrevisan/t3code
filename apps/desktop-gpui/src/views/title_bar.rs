@@ -17,6 +17,19 @@ impl NativeApp {
                     .items_center()
                     .gap_3()
                     .min_w_0()
+                    .when(!self.sidebar_open, |row| {
+                        row.child(
+                            Button::new("sidebar-show")
+                                .debug_selector(|| "sidebar-show".into())
+                                .icon(gpui_kit::assets::IconName::PanelLeftOpen)
+                                .ghost()
+                                .small()
+                                .tooltip("Show sidebar ⌘B")
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.set_sidebar_open(true, window, cx)
+                                })),
+                        )
+                    })
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("T3 Code"))
                     .child(
                         div()

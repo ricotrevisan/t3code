@@ -5,9 +5,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     input::Input,
 };
-use gpui_kit::{
-    Context, FontWeight, MouseButton, MouseDownEvent, anchored, deferred, div, prelude::*, px,
-};
+use gpui_kit::{Context, FontWeight, MouseButton, MouseDownEvent, div, prelude::*, px};
 use serde_json::json;
 use t3code_desktop_gpui::{connection, credentials, palette, project_actions, sidebar, thread};
 
@@ -420,25 +418,12 @@ impl NativeApp {
                 );
             }
         }
-        let row_menu = self
-            .thread_menu_row
-            .as_ref()
-            .filter(|_| self.thread_menu_open)
-            .map(|(_, at)| {
-                deferred(
-                    anchored()
-                        .position(*at)
-                        .snap_to_window()
-                        .child(self.render_thread_menu(cx)),
-                )
-            });
         div()
             .id("sidebar")
+            .debug_selector(|| "sidebar".into())
             .flex()
             .flex_col()
-            .w(px(288.))
-            .flex_shrink_0()
-            .h_full()
+            .size_full()
             .bg(sidebar_color)
             .text_color(sidebar_foreground)
             .border_r_1()
@@ -630,6 +615,5 @@ impl NativeApp {
                             )
                     }),
             )
-            .children(row_menu)
     }
 }

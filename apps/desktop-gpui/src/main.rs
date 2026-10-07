@@ -1,12 +1,12 @@
 use gpui_kit::component::{
     ActiveTheme as _,
     input::{InputEvent, InputState, Position, TextareaState},
-    resizable::{h_resizable, resizable_panel},
+    resizable::{ResizableState, h_resizable, resizable_panel},
     TitleBar,
 };
 use gpui_kit::{
-    App, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, Point, Subscription, Task,
-    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, Focusable as _, KeyBinding, Pixels, Point,
+    Subscription, Task, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
@@ -39,6 +39,7 @@ gpui_kit::actions!(
         NextThread,
         OpenSettings,
         ToggleRightPanel,
+        ToggleSidebar,
         SteerPrompt,
         QuitNative
     ]
@@ -151,6 +152,12 @@ struct NativeApp {
     /// Activity disclosures the user toggled, keyed by turn.
     activity_expanded: std::collections::HashMap<String, bool>,
     inspector_open: bool,
+    inspector_width: f32,
+    sidebar_open: bool,
+    sidebar_width: f32,
+    /// Split states the app replaces whenever their container changes size.
+    sidebar_split: Entity<ResizableState>,
+    workspace_split: Entity<ResizableState>,
     thread_menu_open: bool,
     /// The sidebar row whose secondary click opened the thread menu, and the
     /// pointer position it opens at. None while the header menu is open.
@@ -362,7 +369,8 @@ impl NativeApp {
                 },
             ),
         );
-        subscriptions.push(cx.observe_window_bounds(window, |app, window, _cx| {
+        subscriptions.push(cx.observe_window_bounds(window, |app, window, cx| {
+            app.reset_splits(cx);
             if let gpui_kit::WindowBounds::Windowed(bounds) = window.window_bounds()
                 && let Some(state) = &mut app.saved_window
             {
@@ -413,6 +421,11 @@ impl NativeApp {
             settings_open: false,
             activity_expanded: Default::default(),
             inspector_open: true,
+            inspector_width: window_state::RIGHT_PANEL_WIDTH.1,
+            sidebar_open: true,
+            sidebar_width: window_state::SIDEBAR_WIDTH.1,
+            sidebar_split: cx.new(|_| ResizableState::default()),
+            workspace_split: cx.new(|_| ResizableState::default()),
             thread_menu_open: false,
             thread_menu_row: None,
             collapsed_projects: Vec::new(),
@@ -504,6 +517,10 @@ impl NativeApp {
         if auto_connect {
             let state = window_state::load();
             app.context_meter_hidden = state.context_meter_hidden;
+            app.sidebar_open = state.sidebar_open;
+            app.sidebar_width = state.sidebar_width;
+            app.inspector_open = state.right_panel_open;
+            app.inspector_width = state.right_panel_width;
             app.saved_window = Some(state);
             match drafts::Drafts::open(drafts::default_path()) {
                 Ok(store) => app.draft_store = Some(store),
@@ -680,6 +697,7 @@ impl NativeApp {
                 self.settings_open = true;
                 cx.notify();
             }
+            Command::ToggleSidebar => self.set_sidebar_open(!self.sidebar_open, window, cx),
             Command::Rename => {
                 self.reveal_inspector(InspectorSection::Project, window, cx);
                 self.lifecycle("thread.meta.update", cx);
@@ -2251,6 +2269,44 @@ impl NativeApp {
         cx.notify();
     }
 
+    /// Hides or shows the sidebar. Focus held by a sidebar input moves to the composer
+    /// rather than leaving the window without a focused view.
+    fn set_sidebar_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let sidebar_focused = [&self.search, &self.server, &self.pairing]
+            .iter()
+            .any(|input| input.read(cx).focus_handle(cx).is_focused(window));
+        if !open && sidebar_focused {
+            self.composer.update(cx, |input, cx| input.focus(window, cx));
+        }
+        self.sidebar_open = open;
+        self.remember_layout();
+        self.reset_splits(cx);
+        cx.notify();
+    }
+
+    /// A split rescales every panel in proportion when its container resizes; a fresh
+    /// state lays the side panels out at their remembered widths instead.
+    fn reset_splits(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_split = cx.new(|_| ResizableState::default());
+        self.workspace_split = cx.new(|_| ResizableState::default());
+    }
+
+    fn set_inspector_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.inspector_open = open;
+        self.remember_layout();
+        cx.notify();
+    }
+
+    /// Mirrors the panel layout into the state written on shutdown.
+    fn remember_layout(&mut self) {
+        if let Some(state) = &mut self.saved_window {
+            state.sidebar_open = self.sidebar_open;
+            state.sidebar_width = self.sidebar_width;
+            state.right_panel_open = self.inspector_open;
+            state.right_panel_width = self.inspector_width;
+        }
+    }
+
     fn close_thread_menu(&mut self) {
         self.thread_menu_open = false;
         self.thread_menu_row = None;
@@ -3278,6 +3334,7 @@ impl Drop for NativeApp {
         {
             eprintln!("Could not flush native drafts during shutdown");
         }
+        self.remember_layout();
         if let Some(mut state) = self.saved_window {
             state.context_meter_hidden = self.context_meter_hidden;
             window_state::save(state);
@@ -3289,6 +3346,60 @@ impl Render for NativeApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let background = cx.theme().background;
         let foreground = cx.theme().foreground;
+        // Workspace: the conversation is primary; controls live in the inspector.
+        let workspace = div()
+            .id("native-workspace")
+            .min_w_0()
+            .flex()
+            .flex_1()
+            .h_full()
+            .child(
+                h_resizable("workspace-split")
+                    .with_state(&self.workspace_split)
+                    .on_resize({
+                        let app = cx.entity().downgrade();
+                        move |split, _, cx| {
+                            let Some(&width) = split.read(cx).sizes().get(1) else {
+                                return;
+                            };
+                            let _ = app.update(cx, |app, _| {
+                                app.inspector_width = window_state::clamp_width(
+                                    width / px(1.),
+                                    window_state::RIGHT_PANEL_WIDTH,
+                                );
+                                app.remember_layout();
+                            });
+                        }
+                    })
+                    .child(
+                        resizable_panel().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .relative()
+                                .child(self.render_thread_header(cx))
+                                .child(self.render_conversation(cx))
+                                .child(self.render_composer(cx))
+                                .child(self.render_status_bar(cx))
+                                .into_any_element(),
+                        ),
+                    )
+                    .child(
+                        resizable_panel()
+                            .visible(self.inspector_open)
+                            .size(px(self.inspector_width))
+                            .size_range(
+                                px(window_state::RIGHT_PANEL_WIDTH.0)
+                                    ..px(window_state::RIGHT_PANEL_WIDTH.2),
+                            )
+                            .flex_none()
+                            .child(self.render_inspector(cx).into_any_element()),
+                    ),
+            )
+            .into_any_element();
 
         div()
             .relative()
@@ -3341,8 +3452,10 @@ impl Render for NativeApp {
             }))
             .on_action(cx.listener(|app, _: &SteerPrompt, window, cx| app.steer_prompt(window, cx)))
             .on_action(cx.listener(|app, _: &ToggleRightPanel, _, cx| {
-                app.inspector_open = !app.inspector_open;
-                cx.notify();
+                app.set_inspector_open(!app.inspector_open, cx)
+            }))
+            .on_action(cx.listener(|app, _: &ToggleSidebar, window, cx| {
+                app.execute_command(palette::Command::ToggleSidebar, window, cx)
             }))
             .flex()
             .flex_col()
@@ -3350,45 +3463,42 @@ impl Render for NativeApp {
             .bg(background)
             .text_color(foreground)
             .child(self.render_title_bar(cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_sidebar(cx))
-                    // Workspace: the conversation is primary; controls live in the inspector.
-                    .child(
-                        div()
-                            .id("native-workspace")
-                            .min_w_0()
-                            .flex()
-                            .flex_1()
-                            .h_full()
+            .child(div().flex().flex_1().min_h_0().map(|row| {
+                if self.sidebar_open {
+                    row.child(
+                        h_resizable("sidebar-split")
+                            .with_state(&self.sidebar_split)
+                            .on_resize({
+                                let app = cx.entity().downgrade();
+                                move |split, _, cx| {
+                                    let Some(&width) = split.read(cx).sizes().first() else {
+                                        return;
+                                    };
+                                    let _ = app.update(cx, |app, _| {
+                                        app.sidebar_width = window_state::clamp_width(
+                                            width / px(1.),
+                                            window_state::SIDEBAR_WIDTH,
+                                        );
+                                        app.remember_layout();
+                                    });
+                                }
+                            })
                             .child(
-                                h_resizable("workspace-split")
-                                    .child(
-                                        resizable_panel().child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .h_full()
-                                                .relative()
-                                                .child(self.render_thread_header(cx))
-                                                .child(self.render_conversation(cx))
-                                                .child(self.render_composer(cx))
-                                                .child(self.render_status_bar(cx))
-                                                .into_any_element(),
-                                        ),
+                                resizable_panel()
+                                    .size(px(self.sidebar_width))
+                                    .size_range(
+                                        px(window_state::SIDEBAR_WIDTH.0)
+                                            ..px(window_state::SIDEBAR_WIDTH.2),
                                     )
-                                    .child(
-                                        resizable_panel()
-                                            .child(self.render_inspector(cx).into_any_element()),
-                                    ),
-                            ),
-                    ),
-            )
+                                    .flex_none()
+                                    .child(self.render_sidebar(cx).into_any_element()),
+                            )
+                            .child(resizable_panel().child(workspace)),
+                    )
+                } else {
+                    row.child(workspace)
+                }
+            }))
             .children(self.render_overlay_layer(cx))
     }
 }
@@ -3424,6 +3534,7 @@ fn bind_native_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-]", NextThread, Some("NativeApp")),
         KeyBinding::new("cmd-,", OpenSettings, Some("NativeApp")),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some("NativeApp")),
+        KeyBinding::new("cmd-b", ToggleSidebar, Some("NativeApp")),
         KeyBinding::new("cmd-shift-enter", SteerPrompt, Some("NativeApp")),
         KeyBinding::new(
             "escape",
@@ -3479,6 +3590,7 @@ fn main() {
                 items: vec![
                     gpui_kit::MenuItem::action("Commands", TogglePalette),
                     gpui_kit::MenuItem::action("Settings", OpenSettings),
+                    gpui_kit::MenuItem::action("Toggle sidebar", ToggleSidebar),
                     gpui_kit::MenuItem::action("Toggle right panel", ToggleRightPanel),
                     gpui_kit::MenuItem::action("Workspace files", OpenFiles),
                     gpui_kit::MenuItem::action("Search contents", OpenContentSearch),
