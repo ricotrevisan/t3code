@@ -13,6 +13,10 @@ impl NativeApp {
             self.close_palette(window, cx);
             return true;
         }
+        if self.branch_picker.is_some() {
+            self.close_branch_picker(window, cx);
+            return true;
+        }
         if self.thread_menu_open {
             self.close_thread_menu();
         } else if self.catalog_open {
@@ -38,6 +42,34 @@ impl NativeApp {
             input.set_value("", window, cx);
             input.focus(window, cx);
         });
+        cx.notify();
+    }
+
+    /// Opens the branch picker under `trigger` with its search focused, and
+    /// reloads the branch listing.
+    pub(crate) fn open_branch_picker(
+        &mut self,
+        trigger: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_thread_menu();
+        self.catalog_open = false;
+        self.previous_focus = window.focused(cx);
+        self.branch_picker = Some(trigger);
+        self.branch_query.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        self.worktree_operation("vcs.listRefs", false, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.branch_picker = None;
+        if let Some(focus) = self.previous_focus.take() {
+            window.focus(&focus, cx);
+        }
         cx.notify();
     }
 

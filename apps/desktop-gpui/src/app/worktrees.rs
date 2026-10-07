@@ -3,7 +3,7 @@
 use crate::NativeApp;
 use gpui_kit::{Context, Window};
 use serde_json::json;
-use t3code_desktop_gpui::{connection, thread, workspaces};
+use t3code_desktop_gpui::{commands, connection, thread, workspaces};
 
 impl NativeApp {
     pub(crate) fn selected_setup(&self) -> Option<workspaces::SetupProgress> {
@@ -49,6 +49,60 @@ impl NativeApp {
         }
         self.set_status("Checkout selected for the next new thread", cx);
         cx.notify();
+    }
+
+    /// Applies a branch picker choice to the selection: an unsent draft takes the
+    /// checkout, a materialised thread moves to the ref's worktree or switches its
+    /// own checkout to the ref, and without a thread it is the next new thread's.
+    pub(crate) fn pick_checkout(
+        &mut self,
+        branch: String,
+        path: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_branch_picker(window, cx);
+        let Some(thread) = self.selected_thread.as_ref().and_then(|id| {
+            self.shell
+                .threads
+                .iter()
+                .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                .find(|thread| &thread.id == id)
+        }) else {
+            self.choose_checkout(branch, path, window, cx);
+            return;
+        };
+        let (id, project_id) = (thread.id.clone(), thread.project_id.clone());
+        if !self.shell.threads.iter().any(|thread| thread.id == id) {
+            self.prepare_new_worktree = false;
+            self.worktree_path.update(cx, |input, cx| {
+                input.set_value(path.clone().unwrap_or_default(), window, cx)
+            });
+            self.new_thread_checkout = Some((project_id, branch, path));
+            self.update_draft_checkout(cx);
+            return;
+        }
+        let workspace = self.selected_workspace();
+        if let Some(path) = path.filter(|path| Some(path) != workspace.as_ref()) {
+            let root = self
+                .shell
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .map(|project| project.workspace_root.clone());
+            let mut payload = commands::command("thread.meta.update", &id);
+            payload["branch"] = json!(branch);
+            payload["worktreePath"] = if Some(&path) == root.as_ref() {
+                json!(null)
+            } else {
+                json!(path)
+            };
+            self.dispatch(payload, cx);
+            return;
+        }
+        self.worktree_ref
+            .update(cx, |input, cx| input.set_value(branch, window, cx));
+        self.worktree_operation("vcs.switchRef", false, cx);
     }
 
     pub(crate) fn update_draft_checkout(&mut self, cx: &mut Context<Self>) {
@@ -179,10 +233,17 @@ impl NativeApp {
                 return;
             }
         };
+        if tag == "vcs.listRefs" {
+            self.refs_error = None;
+        }
         self.worktree_busy = true;
         self.worktree_epoch += 1;
         let epoch = self.worktree_epoch;
         let generation = self.generation;
+        // A switch runs in the selected thread's checkout, so its branch follows.
+        let switched_thread = self.selected_thread.clone().filter(|id| {
+            tag == "vcs.switchRef" && self.shell.threads.iter().any(|thread| &thread.id == id)
+        });
         let tag = tag.to_owned();
         self.worktree_task = Some(cx.spawn(async move |entity, cx| {
             let result = connection::call(&sender, &tag, payload).await;
@@ -204,6 +265,10 @@ impl NativeApp {
                                     }
                                     app.refs.extend(rows.refs);
                                     app.refs_cursor = rows.next_cursor;
+                                    if !rows.is_repo {
+                                        app.refs_error =
+                                            Some("This directory is not a repository".into());
+                                    }
                                     app.set_status(
                                         if rows.is_repo {
                                             "Branches loaded"
@@ -213,7 +278,10 @@ impl NativeApp {
                                         cx,
                                     );
                                 }
-                                Err(_) => app.set_status("Invalid branch listing", cx),
+                                Err(_) => {
+                                    app.refs_error = Some("Invalid branch listing".into());
+                                    app.set_status("Invalid branch listing", cx)
+                                }
                             }
                         } else {
                             app.confirm_worktree_removal = None;
@@ -222,12 +290,23 @@ impl NativeApp {
                                 "vcs.removeWorktree" => app.report_success("Worktree removed", cx),
                                 _ => app.set_status("Worktree operation completed", cx),
                             }
+                            if let Some(id) = switched_thread {
+                                let mut payload = commands::command("thread.meta.update", &id);
+                                payload["branch"] =
+                                    json!(value["refName"].as_str().unwrap_or(base.as_str()));
+                                app.dispatch(payload, cx);
+                            }
                             app.worktree_outcome = Some(value);
                             app.refs.clear();
                             app.refs_cursor = None;
                         }
                     }
-                    Err(error) => app.set_status(error, cx),
+                    Err(error) => {
+                        if tag == "vcs.listRefs" {
+                            app.refs_error = Some(error.clone());
+                        }
+                        app.set_status(error, cx)
+                    }
                 };
                 cx.notify();
             });

@@ -52,6 +52,33 @@ mod tests {
         apply_clones(&mut rows, json!([])).unwrap();
         assert!(rows.is_empty());
     }
+
+    fn row(name: &str, current: bool) -> Ref {
+        Ref {
+            name: name.into(),
+            current,
+            worktree_path: None,
+        }
+    }
+
+    #[test]
+    fn picker_lists_the_current_checkout_first_and_filters_by_name() {
+        let refs = [
+            row("main", true),
+            row("feature/a", false),
+            row("Fix", false),
+        ];
+        let names = |rows: Vec<&Ref>| rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            names(picker_rows(&refs, "", Some("Fix"))),
+            ["Fix", "main", "feature/a"]
+        );
+        assert_eq!(
+            names(picker_rows(&refs, "", None)),
+            ["main", "feature/a", "Fix"]
+        );
+        assert_eq!(names(picker_rows(&refs, " f ", None)), ["feature/a", "Fix"]);
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -67,6 +94,21 @@ pub struct Refs {
     pub refs: Vec<Ref>,
     pub is_repo: bool,
     pub next_cursor: Option<u64>,
+}
+/// The branch picker's rows: refs whose name contains `query` (case-insensitive),
+/// with the current checkout first. `current` is the thread's branch; without
+/// one, the ref the listing marked current is the current checkout.
+pub fn picker_rows<'a>(refs: &'a [Ref], query: &str, current: Option<&str>) -> Vec<&'a Ref> {
+    let query = query.trim().to_lowercase();
+    let mut rows: Vec<&Ref> = refs
+        .iter()
+        .filter(|row| row.name.to_lowercase().contains(&query))
+        .collect();
+    rows.sort_by_key(|row| !is_current(row, current));
+    rows
+}
+pub fn is_current(row: &Ref, current: Option<&str>) -> bool {
+    current.map_or(row.current, |name| row.name == name)
 }
 pub fn create_worktree(
     cwd: &str,

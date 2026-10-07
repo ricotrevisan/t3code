@@ -2255,15 +2255,187 @@ fn hide_right_panel_on_changes(app: &Entity<NativeApp>, cx: &mut VisualTestConte
     cx.run_until_parked();
 }
 
+fn open_branch_picker(
+    cx: &mut VisualTestContext,
+    requests: &async_channel::Receiver<connection::Command>,
+    trigger: &'static str,
+) -> async_channel::Sender<Result<Value, String>> {
+    let chip = cx.debug_bounds(trigger).expect("branch picker trigger");
+    cx.simulate_click(chip.center(), Default::default());
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("expected a branch listing")
+    };
+    assert_eq!(tag, "vcs.listRefs");
+    assert_eq!(payload["cwd"], "/tmp/fixture");
+    reply
+}
+
+fn picker_names(app: &Entity<NativeApp>, cx: &mut VisualTestContext) -> Vec<String> {
+    app.read_with(cx, |app, cx| {
+        app.branch_picker_rows(cx)
+            .iter()
+            .map(|row| row.name.clone())
+            .collect()
+    })
+}
+
 #[gpui_kit::test]
-fn branch_chip_reveals_worktree_controls_from_a_hidden_panel(cx: &mut TestAppContext) {
-    let (app, cx, _requests) = harness(cx);
+fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, _| app.shell.threads[0].branch = Some("main".into())));
+    cx.run_until_parked();
+    let chip = cx.debug_bounds("branch-selector").expect("branch chip");
+    let reply = open_branch_picker(cx, &requests, "branch-selector");
+    let picker = cx.debug_bounds("branch-picker").expect("picker is open");
+    assert!(picker.top() >= chip.bottom());
+    assert!(picker.left() >= chip.left() - px(1.));
+    assert!(cx.debug_bounds("branch-picker-notice").is_some(), "loading is shown");
+    reply
+        .send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[
+            {"name":"feature/a","current":false,"isDefault":false,"worktreePath":null},
+            {"name":"main","current":true,"isDefault":true,"worktreePath":"/tmp/fixture"},
+            {"name":"fix","current":false,"isDefault":false,"worktreePath":"/tmp/fix-worktree"}
+        ]})))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("branch-picker-notice").is_none());
+    assert_eq!(picker_names(&app, cx), ["main", "feature/a", "fix"]);
+    cx.simulate_input("feat");
+    assert_eq!(picker_names(&app, cx), ["feature/a"]);
+    assert!(cx.debug_bounds("branch-ref-1").is_none());
+    cx.simulate_keystrokes("enter");
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("expected a ref switch")
+    };
+    assert_eq!(tag, "vcs.switchRef");
+    assert_eq!(payload, json!({"cwd":"/tmp/fixture","refName":"feature/a"}));
+    assert!(app.read_with(cx, |app, _| app.branch_picker.is_none()));
+    reply
+        .send_blocking(Ok(json!({"refName":"feature/a"})))
+        .unwrap();
+    cx.run_until_parked();
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected the thread to follow its checkout")
+    };
+    assert_eq!(payload["type"], "thread.meta.update");
+    assert_eq!(payload["branch"], "feature/a");
+
+    // A ref checked out in another worktree moves the thread there.
+    let reply = open_branch_picker(cx, &requests, "branch-selector");
+    reply
+        .send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[
+            {"name":"fix","current":false,"isDefault":false,"worktreePath":"/tmp/fix-worktree"}
+        ]})))
+        .unwrap();
+    cx.run_until_parked();
+    let row = cx.debug_bounds("branch-ref-0").expect("worktree row");
+    cx.simulate_click(row.center(), Default::default());
+    cx.run_until_parked();
+    let connection::Command::Call { tag, payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected a checkout move")
+    };
+    assert_eq!(tag, "orchestration.dispatchCommand");
+    assert_eq!(payload["type"], "thread.meta.update");
+    assert_eq!(payload["threadId"], "t");
+    assert_eq!(payload["branch"], "fix");
+    assert_eq!(payload["worktreePath"], "/tmp/fix-worktree");
+    assert!(app.read_with(cx, |app, _| app.branch_picker.is_none()));
+}
+
+#[gpui_kit::test]
+fn branch_picker_sets_an_unsent_draft_checkout_without_a_request(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|window, cx| app.update(cx, |app, cx| app.new_thread(window, cx)));
+    cx.run_until_parked();
+    while requests.try_recv().is_ok() {}
+    let reply = open_branch_picker(cx, &requests, "branch-selector");
+    reply
+        .send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[
+            {"name":"fix","current":false,"isDefault":false,"worktreePath":"/tmp/fix-worktree"}
+        ]})))
+        .unwrap();
+    cx.run_until_parked();
+    let row = cx.debug_bounds("branch-ref-0").expect("worktree row");
+    cx.simulate_click(row.center(), Default::default());
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err());
+    let (branch, path) = app.read_with(cx, |app, _| {
+        let draft = &app.pending_threads[0].thread;
+        (draft.branch.clone(), draft.worktree_path.clone())
+    });
+    assert_eq!(branch.as_deref(), Some("fix"));
+    assert_eq!(path.as_deref(), Some("/tmp/fix-worktree"));
+}
+
+#[gpui_kit::test]
+fn branch_picker_closes_on_escape_and_outside_click_without_a_request(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    cx.update(|_, cx| app.update(cx, |app, _| app.shell.threads[0].branch = Some("main".into())));
+    cx.run_until_parked();
+    let reply = open_branch_picker(cx, &requests, "branch-selector");
+    reply
+        .send_blocking(Err("not a git repository".into()))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.refs_error.clone()),
+        Some("not a git repository".into())
+    );
+    assert!(cx.debug_bounds("branch-picker-notice").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.branch_picker.is_none()));
+    assert!(cx.debug_bounds("branch-picker").is_none());
+    assert!(requests.try_recv().is_err());
+
+    // The status bar chip opens the same picker upward from itself.
+    let chip = cx.debug_bounds("branch-chip").expect("status bar branch chip");
+    let reply = open_branch_picker(cx, &requests, "branch-chip");
+    let picker = cx.debug_bounds("branch-picker").expect("picker is open");
+    assert!(picker.bottom() <= chip.top());
+    reply
+        .send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[]})))
+        .unwrap();
+    cx.run_until_parked();
+    cx.simulate_click(
+        point(picker.right() + px(24.), picker.top() + px(8.)),
+        Default::default(),
+    );
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.branch_picker.is_none()));
+    assert!(requests.try_recv().is_err());
+}
+
+#[gpui_kit::test]
+fn branch_picker_manage_row_reveals_worktree_controls_from_a_hidden_panel(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
     cx.update(|_, cx| app.update(cx, |app, _| app.shell.threads[0].branch = Some("main".into())));
     hide_right_panel_on_changes(&app, cx);
     assert!(cx.debug_bounds("draft-checkout-update").is_none());
-    let chip = cx.debug_bounds("branch-selector").expect("branch chip");
-    cx.simulate_click(chip.center(), Default::default());
+    let reply = open_branch_picker(cx, &requests, "branch-selector");
+    reply
+        .send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[]})))
+        .unwrap();
     cx.run_until_parked();
+    let manage = cx
+        .debug_bounds("branch-picker-manage")
+        .expect("manage worktrees row");
+    cx.simulate_click(manage.center(), Default::default());
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.branch_picker.is_none()));
     assert!(app.read_with(cx, |app, _| app.inspector_open));
     assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Inspector);
     assert!(cx.debug_bounds("draft-checkout-update").is_some());

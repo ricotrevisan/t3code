@@ -216,6 +216,11 @@ struct NativeApp {
     worktree_path: Entity<InputState>,
     refs: Vec<workspaces::Ref>,
     refs_cursor: Option<u64>,
+    /// Why the last branch listing came back without rows.
+    refs_error: Option<String>,
+    /// The trigger the branch picker hangs off while it is open.
+    branch_picker: Option<&'static str>,
+    branch_query: Entity<InputState>,
     worktree_task: Option<Task<()>>,
     worktree_epoch: u64,
     worktree_busy: bool,
@@ -280,6 +285,8 @@ impl NativeApp {
         let file_contents = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 20));
         let palette_query =
             cx.new(|cx| single_line_input(window, cx).placeholder("Search commands…"));
+        let branch_query =
+            cx.new(|cx| single_line_input(window, cx).placeholder("Search branches…"));
         let title =
             cx.new(|cx| single_line_input(window, cx).placeholder("Project / thread title"));
         let workspace =
@@ -382,6 +389,23 @@ impl NativeApp {
                 },
             ),
         );
+        subscriptions.push(cx.subscribe_in(
+            &branch_query,
+            window,
+            |app, _, event, window, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => {
+                    let first = app
+                        .branch_picker_rows(cx)
+                        .first()
+                        .map(|row| (row.name.clone(), row.worktree_path.clone()));
+                    if let Some((branch, path)) = first {
+                        app.pick_checkout(branch, path, window, cx);
+                    }
+                }
+                _ => {}
+            },
+        ));
         subscriptions.push(cx.observe_window_activation(window, |app, window, _| {
             app.window_active = window.is_window_active();
         }));
@@ -496,6 +520,9 @@ impl NativeApp {
             }),
             refs: vec![],
             refs_cursor: None,
+            refs_error: None,
+            branch_picker: None,
+            branch_query,
             worktree_task: None,
             worktree_epoch: 0,
             worktree_busy: false,
@@ -780,6 +807,11 @@ fn bind_native_keys(cx: &mut App) {
             "escape",
             ClosePalette,
             Some("NativeApp > NativePalette > Input"),
+        ),
+        KeyBinding::new(
+            "escape",
+            DismissOverlay,
+            Some("NativeApp > NativeBranchPicker > Input"),
         ),
         KeyBinding::new(
             "down",

@@ -8,15 +8,15 @@ impl NativeApp {
     /// A press on it closes the topmost overlay and never reaches the controls
     /// beneath, so a trigger pressed while its overlay is open closes it rather
     /// than reopening it. Overlay surfaces `occlude()` so presses inside them do
-    /// not land here. Palette and Settings are centred on it; the thread menu and
-    /// model catalog are deferred, so they paint above it at their triggers (a
+    /// not land here. Palette and Settings are centred on it; the thread menu,
+    /// model catalog and branch picker are deferred, so they paint above it at their triggers (a
     /// sidebar row's thread menu at the pointer).
     pub(crate) fn render_overlay_layer(
         &self,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
         let modal = self.palette_open || self.settings_open;
-        if !(modal || self.catalog_open || self.thread_menu_open) {
+        if !(modal || self.catalog_open || self.thread_menu_open || self.branch_picker.is_some()) {
             return None;
         }
         let centred = |panel: AnyElement| {

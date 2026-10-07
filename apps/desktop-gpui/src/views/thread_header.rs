@@ -1,6 +1,7 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable,
+    ActiveTheme as _, Icon, Sizable,
     button::{Button, ButtonVariants as _},
 };
 use gpui_kit::{Context, FontWeight, anchored, deferred, div, prelude::*, px};
@@ -17,6 +18,8 @@ impl NativeApp {
         let danger = cx.theme().danger;
         let header_title = self.selected_thread_title();
         let header_branch = self.selected_thread_branch();
+        let header_worktree = self.selected_thread_worktree().is_some();
+        let branch_picker = self.branch_picker == Some("branch-selector");
         let header_session = self.detail.thread.as_ref().and_then(|detail| {
             let status = detail["session"]["status"].as_str()?;
             let (label, danger) = match status {
@@ -82,18 +85,37 @@ impl NativeApp {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(header_title),
                     )
-                    .when_some(header_branch, |view, branch| {
+                    .when(self.selected_thread.is_some(), |view| {
                         view.child(
-                            Button::new("branch-selector")
-                                .debug_selector(|| "branch-selector".into())
-                                .icon(gpui_kit::assets::IconName::GitBranch)
-                                .label(branch)
-                                .ghost()
-                                .small()
-                                .tooltip("Switch the branch or worktree for this thread")
-                                .on_click(cx.listener(|app, _, window, cx| {
-                                    app.execute_command(palette::Command::Worktrees, window, cx)
-                                })),
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    Button::new("branch-selector")
+                                        .debug_selector(|| "branch-selector".into())
+                                        .icon(IconName::GitBranch)
+                                        .label(header_branch.unwrap_or_else(|| "No branch".into()))
+                                        .when(header_worktree, |button| {
+                                            button.child(Icon::new(IconName::FolderGit).xsmall())
+                                        })
+                                        .ghost()
+                                        .small()
+                                        .selected(branch_picker)
+                                        .tooltip("Switch the branch or worktree for this thread")
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.open_branch_picker("branch-selector", window, cx)
+                                        })),
+                                )
+                                // The wrapper puts the picker below the chip, not at the column's top.
+                                .when(branch_picker, |view| {
+                                    view.child(
+                                        div().child(deferred(
+                                            anchored()
+                                                .snap_to_window()
+                                                .child(self.render_branch_picker(false, cx)),
+                                        )),
+                                    )
+                                }),
                         )
                     })
                     .when_some(header_session, |view, (label, is_danger)| {

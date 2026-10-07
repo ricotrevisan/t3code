@@ -5,6 +5,7 @@ use gpui_kit::App;
 
 use crate::NativeApp;
 
+mod branch_picker;
 mod catalog;
 mod composer;
 mod conversation;
@@ -45,14 +46,25 @@ impl NativeApp {
             .and_then(|detail| detail["branch"].as_str())
             .map(str::to_owned)
             .or_else(|| {
-                self.selected_thread.as_ref().and_then(|id| {
-                    self.shell
-                        .threads
-                        .iter()
-                        .find(|thread| &thread.id == id)
-                        .and_then(|thread| thread.branch.clone())
-                })
+                self.selected_thread_summary()
+                    .and_then(|thread| thread.branch.clone())
             })
+    }
+
+    /// The selected thread's worktree path; None when it runs in the project root.
+    fn selected_thread_worktree(&self) -> Option<String> {
+        self.selected_thread_summary()
+            .and_then(|thread| thread.worktree_path.clone())
+            .filter(|path| !path.is_empty())
+    }
+
+    fn selected_thread_summary(&self) -> Option<&t3code_desktop_gpui::shell::Thread> {
+        let id = self.selected_thread.as_ref()?;
+        self.shell
+            .threads
+            .iter()
+            .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+            .find(|thread| &thread.id == id)
     }
 
     fn active_model_label(&self, cx: &App) -> String {

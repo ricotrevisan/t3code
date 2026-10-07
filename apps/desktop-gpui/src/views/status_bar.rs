@@ -1,9 +1,10 @@
+use gpui_kit::base::Selectable;
 use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
 };
-use gpui_kit::{Context, div, prelude::*, px};
-use t3code_desktop_gpui::{notifications, palette};
+use gpui_kit::{Anchor, Context, anchored, deferred, div, prelude::*, px};
+use t3code_desktop_gpui::notifications;
 
 use crate::NativeApp;
 
@@ -22,16 +23,8 @@ impl NativeApp {
             .and_then(|url| url.host_str().map(str::to_owned))
             .unwrap_or_else(|| self.environment_scope.clone());
         let status_worktree = self
-            .selected_thread
-            .as_ref()
-            .and_then(|id| {
-                self.shell
-                    .threads
-                    .iter()
-                    .chain(self.pending_threads.iter().map(|draft| &draft.thread))
-                    .find(|thread| &thread.id == id)
-            })
-            .and_then(|thread| thread.worktree_path.as_deref())
+            .selected_thread_worktree()
+            .as_deref()
             .and_then(|path| {
                 path.trim_end_matches('/')
                     .rsplit('/')
@@ -80,30 +73,28 @@ impl NativeApp {
                     )
                     .when_some(status_worktree, |view, name| {
                         view.child(
-                            Button::new("worktree-chip")
-                                .debug_selector(|| "worktree-chip".into())
-                                .icon(gpui_kit::assets::IconName::GitBranch)
-                                .label(format!("Worktree · {name}"))
-                                .ghost()
-                                .small()
-                                .tooltip("Manage branches and worktrees")
-                                .on_click(cx.listener(|app, _, window, cx| {
-                                    app.execute_command(palette::Command::Worktrees, window, cx)
-                                })),
+                            self.branch_picker_chip(
+                                Button::new("worktree-chip")
+                                    .debug_selector(|| "worktree-chip".into())
+                                    .icon(gpui_kit::assets::IconName::FolderGit)
+                                    .label(format!("Worktree · {name}"))
+                                    .tooltip("Switch branch or worktree"),
+                                "worktree-chip",
+                                cx,
+                            ),
                         )
                     })
                     .when_some(header_branch, |view, branch| {
                         view.child(
-                            Button::new("branch-chip")
-                                .debug_selector(|| "branch-chip".into())
-                                .icon(gpui_kit::assets::IconName::GitBranch)
-                                .label(branch)
-                                .ghost()
-                                .small()
-                                .tooltip("Switch branch or worktree")
-                                .on_click(cx.listener(|app, _, window, cx| {
-                                    app.execute_command(palette::Command::Worktrees, window, cx)
-                                })),
+                            self.branch_picker_chip(
+                                Button::new("branch-chip")
+                                    .debug_selector(|| "branch-chip".into())
+                                    .icon(gpui_kit::assets::IconName::GitBranch)
+                                    .label(branch)
+                                    .tooltip("Switch branch or worktree"),
+                                "branch-chip",
+                                cx,
+                            ),
                         )
                     })
                     .when(!active_model.is_empty(), |view| {
@@ -136,5 +127,29 @@ impl NativeApp {
                         "Offline"
                     }),
             )
+    }
+
+    /// A status bar chip that opens the branch picker upward from itself.
+    fn branch_picker_chip(
+        &self,
+        chip: Button,
+        trigger: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let open = self.branch_picker == Some(trigger);
+        div()
+            .flex()
+            .flex_col()
+            .when(open, |view| {
+                view.child(deferred(
+                    anchored()
+                        .anchor(Anchor::BottomLeft)
+                        .snap_to_window()
+                        .child(self.render_branch_picker(true, cx)),
+                ))
+            })
+            .child(chip.ghost().small().selected(open).on_click(
+                cx.listener(move |app, _, window, cx| app.open_branch_picker(trigger, window, cx)),
+            ))
     }
 }
