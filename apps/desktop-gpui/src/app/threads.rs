@@ -64,6 +64,9 @@ impl NativeApp {
     }
 
     pub(crate) fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_change_checkout(cx) {
+            return;
+        }
         let Some(project) = self
             .shell
             .projects
@@ -173,6 +176,10 @@ impl NativeApp {
     }
 
     pub(crate) fn select_thread(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_thread.as_deref() == Some(id) || !self.can_change_checkout(cx) {
+            return;
+        }
+        self.reset_checkout_context(window, cx);
         if let Some(previous) = &self.selected_thread {
             self.drafts
                 .insert(previous.clone(), self.composer.read(cx).value().to_string());
@@ -203,12 +210,6 @@ impl NativeApp {
             .chain(self.pending_threads.iter().map(|draft| &draft.thread))
             .find(|t| t.id == id)
         {
-            if self.selected_project.as_ref() != Some(&thread.project_id) {
-                self.action_task = None;
-                self.action_busy = false;
-                self.action_edit_id = None;
-                self.confirm_action_delete = None;
-            }
             self.selected_project = Some(thread.project_id.clone());
             self.title.update(cx, |input, cx| {
                 input.set_value(thread.title.clone(), window, cx)
@@ -325,6 +326,9 @@ impl NativeApp {
     }
 
     pub(crate) fn discard_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_change_checkout(cx) {
+            return;
+        }
         let Some(id) = self.selected_thread.clone() else {
             return;
         };
@@ -334,6 +338,7 @@ impl NativeApp {
             cx.notify();
             return;
         }
+        self.reset_checkout_context(window, cx);
         self.pending_threads.retain(|draft| draft.thread.id != id);
         self.drafts.remove(&id);
         if let Some(store) = &mut self.draft_store {
@@ -383,6 +388,12 @@ impl NativeApp {
                 self.set_status("Send the first message before changing thread status", cx);
             }
             cx.notify();
+            return;
+        }
+        if matches!(kind, "thread.delete" | "thread.archive")
+            && self.selected_thread.as_deref() == Some(id)
+            && !self.can_change_checkout(cx)
+        {
             return;
         }
         let mut payload = commands::command(kind, id);

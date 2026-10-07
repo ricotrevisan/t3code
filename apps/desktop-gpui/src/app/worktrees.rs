@@ -32,10 +32,20 @@ impl NativeApp {
         let Some(project) = self.selected_project.clone() else {
             return;
         };
+        if self.selected_thread.is_none()
+            && self.new_thread_checkout.as_ref()
+                == Some(&(project.clone(), branch.clone(), path.clone()))
+        {
+            return;
+        }
+        if !self.can_change_checkout(cx) {
+            return;
+        }
         if let Some(previous) = &self.selected_thread {
             self.drafts
                 .insert(previous.clone(), self.composer.read(cx).value().to_string());
         }
+        self.reset_checkout_context(window, cx);
         self.selected_thread = None;
         self.detail = thread::ThreadDetail::default();
         self.worktree_path.update(cx, |input, cx| {
@@ -62,6 +72,20 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         self.close_branch_picker(window, cx);
+        if self.selected_thread.as_ref().is_some_and(|id| {
+            self.archived_shell
+                .threads
+                .iter()
+                .any(|thread| &thread.id == id)
+                && !self.shell.threads.iter().any(|thread| &thread.id == id)
+        }) {
+            self.set_status(
+                "Restore the archived thread before changing its checkout",
+                cx,
+            );
+            cx.notify();
+            return;
+        }
         let Some(thread) = self.selected_thread.as_ref().and_then(|id| {
             self.shell
                 .threads
@@ -72,7 +96,58 @@ impl NativeApp {
             self.choose_checkout(branch, path, window, cx);
             return;
         };
+        if self.worktree_busy {
+            self.set_status("Wait for the worktree operation to finish", cx);
+            return;
+        }
         let (id, project_id) = (thread.id.clone(), thread.project_id.clone());
+        let has_session = thread.session.is_some()
+            || self.detail.thread.as_ref().is_some_and(|detail| {
+                detail["id"] == id
+                    && detail
+                        .get("session")
+                        .is_some_and(|session| !session.is_null())
+            });
+        let Some(root) = self
+            .shell
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.workspace_root.clone())
+        else {
+            return;
+        };
+        let workspace = self.selected_workspace();
+        let row = self
+            .refs
+            .iter()
+            .find(|row| row.name == branch)
+            .cloned()
+            .unwrap_or(workspaces::Ref {
+                name: branch.clone(),
+                current: false,
+                is_default: false,
+                worktree_path: path,
+            });
+        let (cwd, path, reuse) = workspaces::checkout_target(
+            &root,
+            workspace.as_deref().filter(|cwd| *cwd != root),
+            &row,
+        );
+        let cwd = if std::path::Path::new(&cwd) == std::path::Path::new(&root) {
+            root.clone()
+        } else {
+            cwd
+        };
+        let path = path.filter(|path| std::path::Path::new(path) != std::path::Path::new(&root));
+        if thread.branch.as_deref() == Some(branch.as_str())
+            && workspace.as_deref() == Some(cwd.as_str())
+        {
+            return;
+        }
+        if !self.can_change_checkout(cx) {
+            return;
+        }
         if !self.shell.threads.iter().any(|thread| thread.id == id) {
             self.prepare_new_worktree = false;
             self.worktree_path.update(cx, |input, cx| {
@@ -80,32 +155,120 @@ impl NativeApp {
             });
             self.new_thread_checkout = Some((project_id, branch, path));
             self.update_draft_checkout(cx);
+            self.reset_checkout_context(window, cx);
             return;
         }
-        let workspace = self.selected_workspace();
-        if let Some(path) = path.filter(|path| Some(path) != workspace.as_ref()) {
-            let root = self
-                .shell
-                .projects
-                .iter()
-                .find(|project| project.id == project_id)
-                .map(|project| project.workspace_root.clone());
-            let mut payload = commands::command("thread.meta.update", &id);
-            payload["branch"] = json!(branch);
-            payload["worktreePath"] = if Some(&path) == root.as_ref() {
-                json!(null)
-            } else {
-                json!(path)
-            };
-            self.dispatch(payload, cx);
+        let Some(sender) = self.commands.clone() else {
+            self.set_status("Not connected", cx);
             return;
-        }
-        self.worktree_ref
-            .update(cx, |input, cx| input.set_value(branch, window, cx));
-        self.worktree_operation("vcs.switchRef", false, cx);
+        };
+        let context = self.checkout_context();
+        let generation = self.generation;
+        self.worktree_epoch += 1;
+        let epoch = self.worktree_epoch;
+        self.worktree_busy = true;
+        let stop = has_session && workspace.as_deref() != Some(cwd.as_str());
+        let handle = window.window_handle();
+        self.worktree_task = Some(cx.spawn(async move |entity, cx| {
+            // Receipts, not dispatch order, serialize stop -> switch -> metadata.
+            let result = async {
+                if stop {
+                    connection::call(
+                        &sender,
+                        "orchestration.dispatchCommand",
+                        commands::command("thread.session.stop", &id),
+                    )
+                    .await?;
+                }
+                let current = entity
+                    .update(cx, |app, _| {
+                        app.generation == generation
+                            && app.worktree_epoch == epoch
+                            && app.checkout_context() == context
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    return Err("Checkout selection changed".to_owned());
+                }
+                let actual_branch = if !reuse {
+                    let switched = connection::call(
+                        &sender,
+                        "vcs.switchRef",
+                        json!({"cwd":cwd,"refName":branch}),
+                    )
+                    .await?;
+                    // Null denotes a detached checkout; never restore the requested ref.
+                    switched["refName"]
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                } else {
+                    Some(branch.clone())
+                };
+                let current = entity
+                    .update(cx, |app, _| {
+                        app.generation == generation
+                            && app.worktree_epoch == epoch
+                            && app.checkout_context() == context
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    return Err("Checkout selection changed".to_owned());
+                }
+                let mut payload = commands::command("thread.meta.update", &id);
+                payload["branch"] = json!(actual_branch);
+                payload["worktreePath"] = json!(path);
+                connection::call(&sender, "orchestration.dispatchCommand", payload).await?;
+                Ok(actual_branch)
+            }
+            .await;
+            let _ = handle.update(cx, |_, window, cx| {
+                entity.update(cx, |app, cx| {
+                    if app.generation != generation
+                        || app.worktree_epoch != epoch
+                        || app.selected_project != context.0
+                        || app.selected_thread != context.1
+                        || (app.checkout_context() != context
+                            && app.selected_workspace().as_deref() != Some(cwd.as_str()))
+                    {
+                        return;
+                    }
+                    app.worktree_busy = false;
+                    match result {
+                        Ok(actual_branch) => {
+                            for thread in app
+                                .shell
+                                .threads
+                                .iter_mut()
+                                .chain(app.archived_shell.threads.iter_mut())
+                            {
+                                if thread.id == id {
+                                    thread.branch = actual_branch.clone();
+                                    thread.worktree_path = path.clone();
+                                }
+                            }
+                            if let Some(detail) =
+                                app.detail.thread.as_mut().filter(|t| t["id"] == id)
+                            {
+                                detail["branch"] = json!(actual_branch);
+                                detail["worktreePath"] = json!(path);
+                            }
+                            app.reset_checkout_context(window, cx);
+                            app.set_status("Thread checkout updated; message retained", cx);
+                        }
+                        Err(error) => app.set_status(error, cx),
+                    }
+                    cx.notify();
+                })
+            });
+        }));
+        cx.notify();
     }
 
     pub(crate) fn update_draft_checkout(&mut self, cx: &mut Context<Self>) {
+        if !self.can_change_checkout(cx) {
+            return;
+        }
         if self.pending_actions > 0 {
             self.set_status("Wait for the pending server receipt", cx);
             cx.notify();
@@ -156,7 +319,7 @@ impl NativeApp {
         if let Some(store) = &mut self.draft_store {
             store.put_pending(&self.environment_scope, draft.clone());
         }
-        self.setup_progress = None;
+        self.invalidate_checkout_context(cx);
         self.schedule_draft_save(cx);
         self.set_status("Draft checkout updated; message retained", cx);
         cx.notify();
@@ -184,12 +347,12 @@ impl NativeApp {
             return;
         };
         let cwd = project.workspace_root.clone();
-        let project_id = project.id.clone();
+        let context = self.checkout_context();
         let base = self.worktree_ref.read(cx).value().trim().to_owned();
         let path = self.worktree_path.read(cx).value().trim().to_owned();
         let payload = match tag {
             "vcs.listRefs" => {
-                let mut payload = json!({"cwd":cwd,"refresh":!more,"limit":100});
+                let mut payload = json!({"cwd":self.selected_workspace().unwrap_or(cwd),"refresh":!more,"limit":100});
                 if more {
                     if let Some(cursor) = self.refs_cursor {
                         payload["cursor"] = json!(cursor);
@@ -212,9 +375,6 @@ impl NativeApp {
                     return;
                 }
             },
-            "vcs.switchRef" if !base.is_empty() => {
-                json!({"cwd":self.selected_workspace().unwrap_or(cwd),"refName":base})
-            }
             "vcs.removeWorktree" if !path.is_empty() => {
                 if self.confirm_worktree_removal.as_ref() != Some(&path) {
                     self.confirm_worktree_removal = Some(path.clone());
@@ -240,17 +400,13 @@ impl NativeApp {
         self.worktree_epoch += 1;
         let epoch = self.worktree_epoch;
         let generation = self.generation;
-        // A switch runs in the selected thread's checkout, so its branch follows.
-        let switched_thread = self.selected_thread.clone().filter(|id| {
-            tag == "vcs.switchRef" && self.shell.threads.iter().any(|thread| &thread.id == id)
-        });
         let tag = tag.to_owned();
         self.worktree_task = Some(cx.spawn(async move |entity, cx| {
             let result = connection::call(&sender, &tag, payload).await;
             let _ = entity.update(cx, |app, cx| {
                 if app.generation != generation
                     || app.worktree_epoch != epoch
-                    || app.selected_project.as_deref() != Some(&project_id)
+                    || app.checkout_context() != context
                 {
                     return;
                 }
@@ -289,12 +445,6 @@ impl NativeApp {
                                 "vcs.createWorktree" => app.report_success("Worktree created", cx),
                                 "vcs.removeWorktree" => app.report_success("Worktree removed", cx),
                                 _ => app.set_status("Worktree operation completed", cx),
-                            }
-                            if let Some(id) = switched_thread {
-                                let mut payload = commands::command("thread.meta.update", &id);
-                                payload["branch"] =
-                                    json!(value["refName"].as_str().unwrap_or(base.as_str()));
-                                app.dispatch(payload, cx);
                             }
                             app.worktree_outcome = Some(value);
                             app.refs.clear();
@@ -384,6 +534,8 @@ impl NativeApp {
             cx.notify();
             return;
         };
+        let generation = self.generation;
+        let context = self.checkout_context();
         self.pending_actions += 1;
         self.set_status("Running git action\u{2026}", cx);
         cx.notify();
@@ -402,6 +554,10 @@ impl NativeApp {
             .await;
             let _ = entity.update(cx, |app, cx| {
                 app.pending_actions = app.pending_actions.saturating_sub(1);
+                if app.generation != generation || app.checkout_context() != context {
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(events) => match events.last() {
                         Some(event) if event["kind"] == "action_failed" => app.set_status(

@@ -1,5 +1,6 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
 mod workspace_context;
+mod checkout_context;
 
 use super::*;
 use gpui_kit::component::Root;
@@ -2582,11 +2583,13 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
         .send_blocking(Ok(json!({"refName":"feature/a"})))
         .unwrap();
     cx.run_until_parked();
-    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
         panic!("expected the thread to follow its checkout")
     };
     assert_eq!(payload["type"], "thread.meta.update");
     assert_eq!(payload["branch"], "feature/a");
+    reply.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    cx.run_until_parked();
 
     // A ref checked out in another worktree moves the thread there.
     let reply = open_branch_picker(cx, &requests, "branch-selector");

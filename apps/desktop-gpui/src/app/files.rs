@@ -7,6 +7,78 @@ use serde_json::json;
 use t3code_desktop_gpui::{connection, files};
 
 impl NativeApp {
+    /// All selection entry points retire checkout-scoped requests and confirmations.
+    pub(crate) fn reset_checkout_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self
+            .file_editor
+            .dirty(self.file_contents.read(cx).value().as_str());
+        self.invalidate_checkout_context(cx);
+        if dirty {
+            return;
+        }
+        self.file_contents
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    /// Context changes require the existing file Save/Discard flow first.
+    pub(crate) fn can_change_checkout(&mut self, cx: &mut Context<Self>) -> bool {
+        if self
+            .file_editor
+            .dirty(self.file_contents.read(cx).value().as_str())
+        {
+            self.set_status(
+                "Unsaved file edits: Save or Discard unsaved file edits before changing selection",
+                cx,
+            );
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn invalidate_checkout_context(&mut self, cx: &mut Context<Self>) {
+        self.file_listing_epoch += 1;
+        self.file_epoch += 1;
+        self.worktree_epoch += 1;
+        self.file_listing_task = None;
+        self.worktree_task = None;
+        self.action_task = None;
+        self.file_busy = false;
+        self.worktree_busy = false;
+        self.action_busy = false;
+        self.file_entries.clear();
+        self.file_listing_truncated = false;
+        self.content_results = None;
+        self.content_index = 0;
+        // An edit can arrive while a checkout RPC is awaiting its receipt.
+        // Retain its original target so Save/Discard remain usable afterward.
+        if !self
+            .file_editor
+            .dirty(self.file_contents.read(cx).value().as_str())
+        {
+            self.file_editor = files::Editor::default();
+        }
+        self.refs.clear();
+        self.refs_cursor = None;
+        self.refs_error = None;
+        self.worktree_outcome = None;
+        self.setup_progress = None;
+        self.action_edit_id = None;
+        self.confirm_action_delete = None;
+        self.confirm_worktree_removal = None;
+        self.confirm_project_removal = None;
+        self.confirm_delete = None;
+        cx.notify();
+    }
+
+    pub(crate) fn checkout_context(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.selected_project.clone(),
+            self.selected_thread.clone(),
+            self.selected_workspace(),
+        )
+    }
+
     pub(crate) fn list_files(&mut self, search: bool, cx: &mut Context<Self>) {
         let Some(sender) = self.commands.clone() else {
             self.set_status("Not connected", cx);
@@ -34,7 +106,7 @@ impl NativeApp {
         self.file_listing_epoch += 1;
         let epoch = self.file_listing_epoch;
         let generation = self.generation;
-        let project_id = self.selected_project.clone();
+        let context = self.checkout_context();
         self.file_listing_task = Some(cx.spawn(async move |entity, cx| {
             let result = connection::call(
                 &sender,
@@ -49,7 +121,7 @@ impl NativeApp {
             let _ = entity.update(cx, |app, cx| {
                 if app.generation != generation
                     || app.file_listing_epoch != epoch
-                    || app.selected_project != project_id
+                    || app.checkout_context() != context
                 {
                     return;
                 }
@@ -101,7 +173,7 @@ impl NativeApp {
         self.file_listing_epoch += 1;
         let epoch = self.file_listing_epoch;
         let generation = self.generation;
-        let project_id = self.selected_project.clone();
+        let context = self.checkout_context();
         self.content_results = None;
         self.content_request_query = self.content_query.read(cx).value().to_string();
         self.content_index = 0;
@@ -110,7 +182,7 @@ impl NativeApp {
             let _ = entity.update(cx, |app, cx| {
                 if app.generation != generation
                     || app.file_listing_epoch != epoch
-                    || app.selected_project != project_id
+                    || app.checkout_context() != context
                 {
                     return;
                 }
@@ -276,6 +348,7 @@ impl NativeApp {
         let epoch = self.file_epoch;
         let generation = self.generation;
         let handle = window.window_handle();
+        let context = self.checkout_context();
         let payload = if write {
             json!({"cwd":target.cwd,"relativePath":target.path,"contents":text})
         } else {
@@ -284,7 +357,7 @@ impl NativeApp {
         cx.spawn(async move |entity,cx| {
             let result=connection::call(&sender,if write { "projects.writeFile" } else { "projects.readFile" },payload).await;
             let _=handle.update(cx,|_,window,cx|entity.update(cx,|app,cx| {
-                if app.generation!=generation || app.file_epoch!=epoch { return; }
+                if app.generation!=generation || app.file_epoch!=epoch || app.checkout_context()!=context { return; }
                 app.file_busy=false;
                 match result {
                     Ok(_) if write=>{ app.file_editor.saved=text;app.set_status("File saved", cx); }

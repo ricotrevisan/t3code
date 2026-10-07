@@ -167,6 +167,9 @@ fn workspace_actions_resolve_pending_and_archived_threads(cx: &mut TestAppContex
             app.archived_shell.threads.push(thread);
         })
     });
+    // A same-thread click is deliberately a no-op; re-enter the archived row
+    // from another thread rather than fabricating a subscription refresh.
+    switch_thread(&app, cx, &requests, "t", false);
     switch_thread(&app, cx, &requests, "u", false);
     assert_action_cwds(&app, cx, &requests, "u", "/tmp/archived-worktree");
     cx.update(|_, cx| {

@@ -57,8 +57,37 @@ mod tests {
         Ref {
             name: name.into(),
             current,
+            is_default: false,
             worktree_path: None,
         }
+    }
+
+    #[test]
+    fn checkout_targets_preserve_default_and_reuse_semantics() {
+        let mut default: Ref = serde_json::from_value(json!({
+            "name":"main","current":false,"isDefault":true,"worktreePath":null
+        }))
+        .unwrap();
+        assert!(default.is_default);
+        assert_eq!(
+            checkout_target("/root", Some("/tree"), &default),
+            ("/root".into(), None, false)
+        );
+        default.is_default = false;
+        assert_eq!(
+            checkout_target("/root", Some("/tree"), &default),
+            ("/tree".into(), Some("/tree".into()), false)
+        );
+        default.worktree_path = Some("/root".into());
+        assert_eq!(
+            checkout_target("/root", Some("/tree"), &default),
+            ("/root".into(), None, true)
+        );
+        default.worktree_path = Some("/other".into());
+        assert_eq!(
+            checkout_target("/root", None, &default),
+            ("/other".into(), Some("/other".into()), true)
+        );
     }
 
     #[test]
@@ -86,8 +115,23 @@ mod tests {
 pub struct Ref {
     pub name: String,
     pub current: bool,
+    #[serde(default)]
+    pub is_default: bool,
     pub worktree_path: Option<String>,
 }
+/// Mirrors the web branch target: default refs return a worktree thread to root.
+pub fn checkout_target(
+    root: &str,
+    active: Option<&str>,
+    row: &Ref,
+) -> (String, Option<String>, bool) {
+    if let Some(path) = &row.worktree_path {
+        return (path.clone(), (path != root).then(|| path.clone()), true);
+    }
+    let path = active.filter(|_| !row.is_default).map(str::to_owned);
+    (path.clone().unwrap_or_else(|| root.into()), path, false)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Refs {

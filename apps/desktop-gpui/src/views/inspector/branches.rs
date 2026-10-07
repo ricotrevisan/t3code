@@ -164,7 +164,10 @@ impl NativeApp {
                     .debug_selector(|| "draft-checkout-update".into())
                     .label("Update selected draft checkout")
                     .secondary()
-                    .on_click(cx.listener(|app, _, _, cx| app.update_draft_checkout(cx))),
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.update_draft_checkout(cx);
+                        app.reset_checkout_context(window, cx);
+                    })),
             )
             .child(
                 div()
@@ -191,8 +194,11 @@ impl NativeApp {
                         Button::new("ref-switch")
                             .label("Switch branch")
                             .secondary()
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.worktree_operation("vcs.switchRef", false, cx)
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                let branch = app.worktree_ref.read(cx).value().trim().to_owned();
+                                if !branch.is_empty() {
+                                    app.pick_checkout(branch, None, window, cx);
+                                }
                             })),
                     )
                     .child(
@@ -225,7 +231,7 @@ impl NativeApp {
                         .unwrap_or_else(|| "No worktree checkout".into()),
                 )
                 .on_click(cx.listener(move |app, _, window, cx| {
-                    app.choose_checkout(branch.clone(), path.clone(), window, cx)
+                    app.pick_checkout(branch.clone(), path.clone(), window, cx)
                 }))
             }))
             .when_some(self.worktree_outcome.as_ref(), |view, result| {

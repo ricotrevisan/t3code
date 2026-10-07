@@ -126,6 +126,11 @@ impl NativeApp {
                         )
                         .on_click(cx.listener(
                             move |app, _, window, cx| {
+                                if app.selected_project.as_ref() == Some(&project_id)
+                                    || !app.can_change_checkout(cx)
+                                {
+                                    return;
+                                }
                                 if app.selected_project.as_ref() != Some(&project_id) {
                                     app.model_override = None;
                                     app.provider.update(cx, |input, cx| {
@@ -180,24 +185,12 @@ impl NativeApp {
                                     }
                                 }
                                 app.selected_project = Some(project_id.clone());
-                                app.worktree_task = None;
-                                app.worktree_busy = false;
-                                app.worktree_epoch += 1;
-                                app.refs.clear();
-                                app.worktree_outcome = None;
+                                app.reset_checkout_context(window, cx);
                                 app.new_thread_checkout = None;
-                                app.confirm_worktree_removal = None;
-                                app.confirm_project_removal = None;
-                                app.file_entries.clear();
-                                app.file_listing_task = None;
-                                app.file_listing_epoch += 1;
-                                app.content_results = None;
                                 app.title.update(cx, |input, cx| {
                                     input.set_value(title.clone(), window, cx)
                                 });
-                                app.workspace.update(cx, |input, cx| {
-                                    input.set_value(workspace.clone(), window, cx)
-                                });
+
                                 cx.notify();
                             },
                         )),
