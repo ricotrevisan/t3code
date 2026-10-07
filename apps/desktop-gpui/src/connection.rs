@@ -481,7 +481,10 @@ enum Pending {
     Thread(String),
     Subscription(String),
     Call(async_channel::Sender<Result<Value, String>>),
-    CallStream(async_channel::Sender<Result<Vec<Value>, String>>, Vec<Value>),
+    CallStream(
+        async_channel::Sender<Result<Vec<Value>, String>>,
+        Vec<Value>,
+    ),
 }
 
 #[cfg(test)]
@@ -598,6 +601,9 @@ where
                         }
                     }
                     Command::Call { tag, payload, reply } => {
+                        // Dropping a context task retires requests still queued locally.
+                        // Requests already handed to the socket cannot be rolled back.
+                        if reply.is_closed() { continue; }
                         if !synchronized {
                             let _=reply.send(Err("History is not synchronized; request was not sent".into())).await;
                             continue;
@@ -607,6 +613,7 @@ where
                         next_id += 1;
                     }
                     Command::CallStream { tag, payload, reply } => {
+                        if reply.is_closed() { continue; }
                         if !synchronized {
                             let _=reply.send(Err("History is not synchronized; request was not sent".into())).await;
                             continue;
@@ -1166,6 +1173,86 @@ mod subscription_tests {
         server.close(None).await.unwrap();
         assert_eq!(task.await.unwrap(), Err("Server disconnected"));
     }
+    #[tokio::test]
+    async fn canceled_unsent_checkout_mutations_never_reach_the_socket() {
+        let (client, server) = tokio::io::duplex(16384);
+        let client =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let mut server =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let (updates, rx) = async_channel::bounded(16);
+        let (commands, requests) = async_channel::bounded(16);
+        let task = tokio::spawn(async move { run_session(client, &updates, &requests).await });
+        let shell = receive(&mut server).await;
+        server
+            .send(Message::Text(
+                json!({"_tag":"Chunk","requestId":shell["id"],"values":[{"kind":"synchronized"}]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.recv().await.unwrap(), Update::Shell(item) if matches!(*item, ShellItem::Synchronized))
+        );
+        assert_eq!(receive(&mut server).await["_tag"], "Ack");
+        for (tag, payload) in [
+            (
+                "orchestration.dispatchCommand",
+                json!({"type":"thread.session.stop","threadId":"old"}),
+            ),
+            (
+                "vcs.switchRef",
+                json!({"cwd":"/old/checkout","refName":"feature"}),
+            ),
+            (
+                "orchestration.dispatchCommand",
+                json!({"type":"thread.meta.update","threadId":"old","branch":"feature"}),
+            ),
+        ] {
+            let (reply, canceled) = async_channel::bounded(1);
+            drop(canceled);
+            commands
+                .send(Command::Call {
+                    tag: tag.into(),
+                    payload,
+                    reply,
+                })
+                .await
+                .unwrap();
+        }
+        let (reply, canceled) = async_channel::bounded(1);
+        drop(canceled);
+        commands
+            .send(Command::CallStream {
+                tag: "git.runStackedAction".into(),
+                payload: json!({"cwd":"/old/checkout"}),
+                reply,
+            })
+            .await
+            .unwrap();
+        let (reply, accepted) = async_channel::bounded(1);
+        commands
+            .send(Command::Call {
+                tag: "vcs.listRefs".into(),
+                payload: json!({"cwd":"/current/checkout"}),
+                reply,
+            })
+            .await
+            .unwrap();
+        let sent = receive(&mut server).await;
+        assert_eq!(
+            sent["id"], "2",
+            "canceled calls do not allocate wire request IDs"
+        );
+        assert_eq!(sent["tag"], "vcs.listRefs");
+        assert_eq!(sent["payload"]["cwd"], "/current/checkout");
+        server.send(Message::Text(json!({"_tag":"Exit","requestId":sent["id"],"exit":{"_tag":"Success","value":{"refs":[]}}}).to_string().into())).await.unwrap();
+        assert_eq!(accepted.recv().await.unwrap().unwrap(), json!({"refs":[]}));
+        server.close(None).await.unwrap();
+        assert_eq!(task.await.unwrap(), Err("Server disconnected"));
+    }
+
     #[tokio::test]
     async fn disconnected_read_subscriptions_are_restored_but_mutations_are_not_retained() {
         let mut selected = None;
