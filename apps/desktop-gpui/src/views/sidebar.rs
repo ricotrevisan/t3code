@@ -296,7 +296,8 @@ impl NativeApp {
                     }
                     for thread in group_threads {
                         let id = thread.id.clone();
-                        let status = sidebar::primary_status(thread);
+                        let status =
+                            sidebar::primary_status(thread, self.queues.has_queued(&thread.id));
                         let has_pull_request = thread.linked_pull_request.is_some();
                         let age = sidebar::last_activity(thread)
                             .map(|at| sidebar::relative_time(at, now));

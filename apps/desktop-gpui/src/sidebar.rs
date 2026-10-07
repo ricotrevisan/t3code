@@ -69,15 +69,17 @@ impl Status {
 }
 
 /// The row status for `thread`, by priority: Approval > Input > Working > Plan.
-pub fn primary_status(thread: &Thread) -> Option<Status> {
+/// A thread with `queued` messages counts as Working until they have gone out.
+pub fn primary_status(thread: &Thread, queued: bool) -> Option<Status> {
     if thread.has_pending_approvals {
         Some(Status::Approval)
     } else if thread.has_pending_user_input {
         Some(Status::Input)
-    } else if thread
-        .session
-        .as_ref()
-        .is_some_and(|session| matches!(session.status.as_str(), "running" | "starting"))
+    } else if queued
+        || thread
+            .session
+            .as_ref()
+            .is_some_and(|session| matches!(session.status.as_str(), "running" | "starting"))
     {
         Some(Status::Working)
     } else if thread.has_actionable_proposed_plan {
@@ -253,33 +255,34 @@ mod tests {
     fn rows_expose_only_live_status_markers() {
         let now = Utc::now();
         let mut thread = thread();
-        assert_eq!(primary_status(&thread), None);
+        assert_eq!(primary_status(&thread, false), None);
         // Pinned, snoozed, and settled are implied by the group or view, not the row.
         thread.pinned_at = Some(now.to_rfc3339());
         thread.snoozed_until = Some((now + chrono::Duration::hours(1)).to_rfc3339());
         thread.settled_override = Some("settled".into());
         thread.linked_pull_request = Some(json!({"number": 7}));
-        assert_eq!(primary_status(&thread), None);
+        assert_eq!(primary_status(&thread, false), None);
     }
 
     #[test]
     fn rows_expose_live_shell_status() {
         let mut thread = thread();
         thread.has_actionable_proposed_plan = true;
-        assert_eq!(primary_status(&thread), Some(Status::Plan));
+        assert_eq!(primary_status(&thread, false), Some(Status::Plan));
         thread.session = Some(crate::shell::Session {
             status: "running".into(),
             last_error: None,
         });
-        assert_eq!(primary_status(&thread), Some(Status::Working));
+        assert_eq!(primary_status(&thread, false), Some(Status::Working));
         thread.has_pending_user_input = true;
-        assert_eq!(primary_status(&thread), Some(Status::Input));
+        assert_eq!(primary_status(&thread, false), Some(Status::Input));
         thread.has_pending_approvals = true;
-        assert_eq!(primary_status(&thread), Some(Status::Approval));
+        assert_eq!(primary_status(&thread, false), Some(Status::Approval));
         thread.has_pending_approvals = false;
         thread.has_pending_user_input = false;
         thread.session.as_mut().unwrap().status = "idle".into();
-        assert_eq!(primary_status(&thread), Some(Status::Plan));
+        assert_eq!(primary_status(&thread, false), Some(Status::Plan));
+        assert_eq!(primary_status(&thread, true), Some(Status::Working));
     }
 
     #[test]

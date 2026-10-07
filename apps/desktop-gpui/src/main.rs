@@ -11,7 +11,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
     auth, commands, connection, credentials, drafts, files, palette, project_actions,
-    providers, shell, sidebar, thread, window_state, workspaces,
+    providers, queue, shell, sidebar, thread, window_state, workspaces,
 };
 
 gpui_kit::actions!(
@@ -39,6 +39,7 @@ gpui_kit::actions!(
         NextThread,
         OpenSettings,
         ToggleRightPanel,
+        SteerPrompt,
         QuitNative
     ]
 );
@@ -225,6 +226,8 @@ struct NativeApp {
     draft_save: Option<Task<()>>,
     environment_scope: String,
     stash_memory: Vec<String>,
+    /// Prompts waiting for their thread's turn to finish, by thread.
+    queues: queue::Queues,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -492,6 +495,7 @@ impl NativeApp {
                 .map(|url| url.origin().ascii_serialization())
                 .unwrap_or_else(|| "disconnected".into()),
             stash_memory: Vec::new(),
+            queues: queue::Queues::default(),
             _subscriptions: subscriptions,
         };
         if auto_connect {
@@ -509,8 +513,15 @@ impl NativeApp {
 
     /// Applies a thread subscription item. The conversation list keeps itself on
     /// the newest content unless the user has scrolled up to read history.
-    fn apply_thread_update(&mut self, thread_id: &str, item: Value) -> Result<(), String> {
-        self.detail.apply(thread_id, item)
+    fn apply_thread_update(
+        &mut self,
+        thread_id: &str,
+        item: Value,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.detail.apply(thread_id, item)?;
+        self.flush_queues(cx);
+        Ok(())
     }
 
     fn turn_running(&self) -> bool {
@@ -1646,6 +1657,7 @@ impl NativeApp {
                                     connection::Update::Shell(item) => {
                                         let was_synchronized = app.shell.synchronized;
                                         let result = app.shell.apply(*item).map_err(str::to_owned);
+                                        app.flush_queues(cx);
                                         app.attach_created_pending(cx);
                                         app.schedule_snooze_wake(cx);
                                         if app.shell.synchronized && !was_synchronized {
@@ -1737,7 +1749,7 @@ impl NativeApp {
                                     }
                                     connection::Update::Thread { thread_id, item } => {
                                         if app.selected_thread.as_ref() == Some(&thread_id) {
-                                            app.apply_thread_update(&thread_id, item)
+                                            app.apply_thread_update(&thread_id, item, cx)
                                         } else {
                                             Ok(())
                                         }
@@ -2581,21 +2593,11 @@ impl NativeApp {
         cx.notify();
     }
 
-    fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_actions > 0 {
-            self.status = "Wait for the pending server receipt".into();
-            cx.notify();
-            return;
-        }
-        if self.turn_running() {
-            self.status =
-                "Turn running — interrupt first. Native queue support is not implemented yet."
-                    .into();
-            cx.notify();
-            return;
-        }
+    /// The composer's prompt as the selected thread would send it now, with
+    /// the model and modes it goes out with.
+    fn composer_message(&self, cx: &App) -> Result<(String, queue::QueuedMessage), &'static str> {
         let Some(id) = self.selected_thread.clone() else {
-            return;
+            return Err("Select a thread first");
         };
         let Some(thread) = self
             .shell
@@ -2604,17 +2606,13 @@ impl NativeApp {
             .chain(self.pending_threads.iter().map(|draft| &draft.thread))
             .find(|t| t.id == id)
         else {
-            return;
+            return Err("Select a thread first");
         };
         let text = self.composer.read(cx).value().to_string();
-        let selection = match self.model_selection(&thread.model_selection, cx) {
-            Ok(selection) => selection,
-            Err(error) => {
-                self.status = error.into();
-                cx.notify();
-                return;
-            }
-        };
+        if text.trim().is_empty() {
+            return Err("A prompt is required");
+        }
+        let selection = self.model_selection(&thread.model_selection, cx)?;
         if self.provider_catalog.iter().any(|provider| {
             provider.instance_id == selection["instanceId"].as_str().unwrap_or("")
                 && provider.requires_new_thread_for_model_change
@@ -2625,18 +2623,48 @@ impl NativeApp {
                     .is_some_and(|messages| !messages.is_empty())
             })
         {
-            self.status = "This provider requires a new thread for a model change".into();
+            return Err("This provider requires a new thread for a model change");
+        }
+        let message = queue::QueuedMessage {
+            id: 0,
+            text,
+            attachments: self.attachments.clone(),
+            model_selection: selection,
+            runtime_mode: thread
+                .runtime_mode
+                .clone()
+                .unwrap_or_else(|| "full-access".into()),
+            interaction_mode: thread
+                .interaction_mode
+                .clone()
+                .unwrap_or_else(|| "default".into()),
+        };
+        Ok((id, message))
+    }
+
+    /// Enter: sends the prompt, or queues it behind the running turn.
+    fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.turn_running() {
+            self.queue_prompt(false, window, cx);
+            return;
+        }
+        if self.pending_actions > 0 {
+            self.status = "Wait for the pending server receipt".into();
             cx.notify();
             return;
         }
-        match commands::start_turn(
-            &id,
-            &text,
-            &self.attachments,
-            selection,
-            thread.runtime_mode.as_deref().unwrap_or("full-access"),
-            thread.interaction_mode.as_deref().unwrap_or("default"),
-        ) {
+        if self.selected_thread.is_none() {
+            return;
+        }
+        let (id, message) = match self.composer_message(cx) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+                return;
+            }
+        };
+        match message.start_command(&id) {
             Ok(mut payload) => {
                 if let Some(draft) = self
                     .pending_threads
@@ -2648,6 +2676,7 @@ impl NativeApp {
                         payload["bootstrap"]["prepareWorktree"] = prepare.clone();
                     }
                 }
+                let text = message.text;
                 self.drafts.insert(id, text.clone());
                 self.perform(
                     "orchestration.dispatchCommand",
@@ -2661,6 +2690,153 @@ impl NativeApp {
                 cx.notify();
             }
         }
+    }
+
+    /// Takes the composer's prompt into the selected thread's queue. Steering
+    /// puts it first and interrupts the turn; it goes out once the interrupt
+    /// is accepted.
+    fn queue_prompt(&mut self, steer: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (thread_id, message) = match self.composer_message(cx) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.status = error.into();
+                cx.notify();
+                return;
+            }
+        };
+        let id = self.queues.push(&thread_id, message, steer);
+        self.attachments.clear();
+        self.composer
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.remember_composer_draft(cx);
+        self.status = if steer {
+            "Interrupting to steer…".into()
+        } else {
+            "Queued — sends when the turn finishes".into()
+        };
+        cx.notify();
+        if !steer {
+            return;
+        }
+        let Some(sender) = self.commands.clone() else {
+            self.status = "Not connected".into();
+            return;
+        };
+        let mut payload = commands::command("thread.turn.interrupt", &thread_id);
+        payload["createdAt"] = json!(commands::now());
+        cx.spawn(async move |entity, cx| {
+            let result = connection::call(&sender, "orchestration.dispatchCommand", payload).await;
+            let _ = entity.update(cx, |app, cx| match result {
+                Ok(_) => app.send_queued(&thread_id, id, cx),
+                Err(error) => {
+                    app.status = error;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// ⌘⇧↩: steers while a turn runs, otherwise sends as Enter does.
+    fn steer_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.turn_running() {
+            self.queue_prompt(true, window, cx);
+        } else {
+            self.send_prompt(window, cx);
+        }
+    }
+
+    /// Whether `thread_id`'s turn runs, from the open detail when it is the
+    /// selected thread and the shell otherwise. None when the server has not said.
+    fn thread_running(&self, thread_id: &str) -> Option<bool> {
+        let session = if self.selected_thread.as_deref() == Some(thread_id)
+            && let Some(detail) = &self.detail.thread
+        {
+            detail["session"]["status"].as_str()
+        } else {
+            self.shell
+                .threads
+                .iter()
+                .find(|thread| thread.id == thread_id)?
+                .session
+                .as_ref()
+                .map(|session| session.status.as_str())
+        };
+        Some(matches!(session, Some("starting" | "running")))
+    }
+
+    /// Sends each queue's next message whose thread finished its turn.
+    fn flush_queues(&mut self, cx: &mut Context<Self>) {
+        for thread_id in self.queues.thread_ids() {
+            let Some(running) = self.thread_running(&thread_id) else {
+                continue;
+            };
+            if let Some(message) = self.queues.observe(&thread_id, running) {
+                self.dispatch_queued(thread_id, message, cx);
+            }
+        }
+    }
+
+    /// Sends queued message `id` now, ahead of the turn finishing.
+    fn send_queued(&mut self, thread_id: &str, id: u64, cx: &mut Context<Self>) {
+        if let Some(message) = self.queues.take(thread_id, id) {
+            self.dispatch_queued(thread_id.to_owned(), message, cx);
+        }
+    }
+
+    fn dispatch_queued(
+        &mut self,
+        thread_id: String,
+        message: queue::QueuedMessage,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sender) = self.commands.clone() else {
+            self.queues.settle(&thread_id, message.id, false);
+            self.status = "Not connected".into();
+            cx.notify();
+            return;
+        };
+        let payload = match message.start_command(&thread_id) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.queues.settle(&thread_id, message.id, false);
+                self.status = error.into();
+                cx.notify();
+                return;
+            }
+        };
+        self.status = "Sending queued message…".into();
+        cx.notify();
+        cx.spawn(async move |entity, cx| {
+            let result = connection::call(&sender, "orchestration.dispatchCommand", payload).await;
+            let _ = entity.update(cx, |app, cx| {
+                app.queues.settle(&thread_id, message.id, result.is_ok());
+                app.status = match result {
+                    Ok(_) => "Queued message sent".into(),
+                    Err(error) => format!("Queued message not sent: {error}"),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drops a queued message and deletes its uploaded attachments.
+    fn remove_queued(&mut self, thread_id: &str, id: u64, cx: &mut Context<Self>) {
+        let Some(message) = self.queues.remove(thread_id, id) else {
+            return;
+        };
+        for attachment in message.attachments {
+            if let Some(attachment_id) = attachment["id"].as_str() {
+                self.perform(
+                    "attachments.delete",
+                    json!({"attachmentId": attachment_id}),
+                    None,
+                    cx,
+                );
+            }
+        }
+        cx.notify();
     }
 
     /// The effective runtime and interaction modes for the selected thread.
@@ -3156,6 +3332,7 @@ impl Render for NativeApp {
                 app.settings_open = !app.settings_open;
                 cx.notify();
             }))
+            .on_action(cx.listener(|app, _: &SteerPrompt, window, cx| app.steer_prompt(window, cx)))
             .on_action(cx.listener(|app, _: &ToggleRightPanel, _, cx| {
                 app.inspector_open = !app.inspector_open;
                 cx.notify();
@@ -3240,6 +3417,7 @@ fn bind_native_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-]", NextThread, Some("NativeApp")),
         KeyBinding::new("cmd-,", OpenSettings, Some("NativeApp")),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some("NativeApp")),
+        KeyBinding::new("cmd-shift-enter", SteerPrompt, Some("NativeApp")),
         KeyBinding::new(
             "escape",
             ClosePalette,

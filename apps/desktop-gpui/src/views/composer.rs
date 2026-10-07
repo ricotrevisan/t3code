@@ -43,6 +43,11 @@ impl NativeApp {
         let active_model = self.active_model_label(cx);
         let composer_value = self.composer.read(cx).value().to_string();
         let slash_entries = palette::slash_matches(&composer_value, self.selected_thread.is_some());
+        let thread_id = self.selected_thread.clone().unwrap_or_default();
+        let queued = self.queues.messages(&thread_id);
+        // A head that is not on the wire while the thread is idle waits on a
+        // rejected send; Send now retries it.
+        let stalled = !turn_running && !self.queues.dispatching(&thread_id);
         div()
             // While the "/" menu shows, arrows, Enter, and Escape drive it instead of the text.
             .when(slash_entries.is_some(), |view| {
@@ -74,6 +79,64 @@ impl NativeApp {
             .p_3()
             .border_t_1()
             .border_color(border)
+            .when(!queued.is_empty(), |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(queued.iter().enumerate().map(|(index, message)| {
+                            let id = message.id;
+                            let remove_thread = thread_id.clone();
+                            let send_thread = thread_id.clone();
+                            div()
+                                .debug_selector(move || format!("queued-{index}"))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_2()
+                                .rounded_sm()
+                                .bg(muted)
+                                .text_xs()
+                                .child(div().text_color(muted_foreground).child("Queued"))
+                                .child(div().flex_1().min_w_0().truncate().child(
+                                    message.text.lines().next().unwrap_or_default().to_owned(),
+                                ))
+                                .when(!message.attachments.is_empty(), |view| {
+                                    view.child(
+                                        div()
+                                            .text_color(muted_foreground)
+                                            .child(format!("+{}", message.attachments.len())),
+                                    )
+                                })
+                                .when(index == 0 && stalled, |view| {
+                                    view.child(
+                                        Button::new("queued-send-now")
+                                            .debug_selector(|| "queued-send-now".into())
+                                            .label("Send now")
+                                            .ghost()
+                                            .small()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.send_queued(&send_thread, id, cx)
+                                            })),
+                                    )
+                                })
+                                .child(
+                                    Button::new(gpui_kit::SharedString::from(format!(
+                                        "queued-remove-{index}"
+                                    )))
+                                    .debug_selector(move || format!("queued-remove-{index}"))
+                                    .label("×")
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Remove from the queue")
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.remove_queued(&remove_thread, id, cx)
+                                    })),
+                                )
+                        })),
+                )
+            })
             .child(Textarea::new(&self.composer))
             .when(!self.attachments.is_empty(), |view| {
                 view.child(
@@ -254,7 +317,7 @@ impl NativeApp {
                             .label("Stop")
                             .danger()
                             .outline()
-                            .tooltip("Interrupt the running turn")
+                            .tooltip("Interrupt the running turn (⌘⇧↩ steers with the prompt)")
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.lifecycle("thread.turn.interrupt", cx)
                             }))

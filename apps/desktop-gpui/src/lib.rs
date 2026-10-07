@@ -10,6 +10,7 @@ pub mod palette;
 pub mod project_actions;
 pub mod protocol;
 pub mod providers;
+pub mod queue;
 pub mod reconnect;
 pub mod shell;
 pub mod sidebar;

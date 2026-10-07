@@ -225,7 +225,8 @@ impl NativeApp {
                             [
                                 ("⌘K", "Command palette"),
                                 ("⌘N", "New thread"),
-                                ("↩", "Send prompt (⇧↩ for a newline)"),
+                                ("↩", "Send or queue prompt (⇧↩ for a newline)"),
+                                ("⌘⇧↩", "Interrupt the turn and send the prompt"),
                                 ("⌘⇧[ / ⌘⇧]", "Previous / next thread"),
                                 ("⌘⌥B", "Toggle right panel"),
                                 ("⌘,", "Settings"),

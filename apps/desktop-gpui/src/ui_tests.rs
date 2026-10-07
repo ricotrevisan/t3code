@@ -389,7 +389,7 @@ fn user_input_card_submits_answers_and_closes_once_resolved(cx: &mut TestAppCont
     });
     cx.update(|_, cx| app.update(cx, |app, cx| {
         let item = json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"thread":{"id":"t","title":"Thread","messages":[],"activities":[requested],"proposedPlans":[],"checkpoints":[],"session":{"status":"running"}}}});
-        app.apply_thread_update("t", item).unwrap();
+        app.apply_thread_update("t", item, cx).unwrap();
         cx.notify();
     }));
     cx.run_until_parked();
@@ -441,7 +441,7 @@ fn user_input_card_submits_answers_and_closes_once_resolved(cx: &mut TestAppCont
     cx.update(|_, cx| app.update(cx, |app, cx| {
         let resolved = json!({"id":"a2","kind":"user-input.resolved","tone":"info","summary":"User input submitted","payload":{"requestId":"req-1","answers":{}},"createdAt":"2026-01-01T00:00:05Z","turnId":null});
         let item = json!({"kind":"event","event":{"sequence":2,"type":"thread.activity-appended","occurredAt":"2026-01-01T00:00:05Z","payload":{"threadId":"t","activity":resolved}}});
-        app.apply_thread_update("t", item).unwrap();
+        app.apply_thread_update("t", item, cx).unwrap();
         cx.notify();
     }));
     cx.run_until_parked();
@@ -539,7 +539,7 @@ fn conversation_follows_the_tail_until_the_user_scrolls_up(cx: &mut TestAppConte
     let (app, cx, _requests) = harness(cx);
     let load = |count: usize, cx: &mut VisualTestContext| {
         cx.update(|_, cx| app.update(cx, |app, cx| {
-            app.apply_thread_update("t", snapshot((0..count).map(message).collect(), "idle"))
+            app.apply_thread_update("t", snapshot((0..count).map(message).collect(), "idle"), cx)
                 .unwrap();
             cx.notify();
         }));
@@ -572,7 +572,7 @@ fn conversation_tail_survives_streaming_and_thread_switches(cx: &mut TestAppCont
     let load = |thread: &str, messages: Vec<Value>, cx: &mut VisualTestContext| {
         cx.update(|_, cx| app.update(cx, |app, cx| {
             let item = json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"thread":{"id":thread,"title":"Thread","messages":messages,"session":{"status":"running"}}}});
-            app.apply_thread_update(thread, item).unwrap();
+            app.apply_thread_update(thread, item, cx).unwrap();
             cx.notify();
         }));
         cx.run_until_parked();
@@ -602,7 +602,7 @@ fn conversation_tail_survives_streaming_and_thread_switches(cx: &mut TestAppCont
 fn long_conversations_only_build_rows_near_the_viewport(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.apply_thread_update("t", snapshot((0..2000).map(message).collect(), "idle"))
+        app.apply_thread_update("t", snapshot((0..2000).map(message).collect(), "idle"), cx)
             .unwrap();
         cx.notify();
     }));
@@ -657,7 +657,7 @@ fn running_turn_swaps_send_for_stop(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("send").is_some());
     assert!(cx.debug_bounds("stop-turn").is_none());
     cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.apply_thread_update("t", snapshot(vec![message(0)], "running")).unwrap();
+        app.apply_thread_update("t", snapshot(vec![message(0)], "running"), cx).unwrap();
         cx.notify();
     }));
     cx.run_until_parked();
@@ -2254,4 +2254,153 @@ fn opening_a_section_closes_the_previous_one_and_leaving_clone_unsubscribes(
         matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(key) if key == "project-clones")
     );
     assert_eq!(app.read_with(cx, |app, _| app.inspector_section), None);
+}
+
+fn set_session(app: &Entity<NativeApp>, cx: &mut VisualTestContext, thread: &str, status: &str) {
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        let item = json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"thread":{"id":thread,"title":"Thread","messages":[message(0)],"session":{"status":status}}}});
+        app.apply_thread_update(thread, item, cx).unwrap();
+        cx.notify();
+    }));
+    cx.run_until_parked();
+}
+
+/// The dispatched calls waiting on the channel; subscriptions are skipped.
+fn calls(
+    requests: &async_channel::Receiver<connection::Command>,
+) -> Vec<(Value, async_channel::Sender<Result<Value, String>>)> {
+    std::iter::from_fn(|| requests.try_recv().ok())
+        .filter_map(|command| match command {
+            connection::Command::Call { payload, reply, .. } => Some((payload, reply)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn queue_prompt(cx: &mut VisualTestContext, text: &str) {
+    cx.simulate_input(text);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn enter_while_running_queues_and_the_completed_turn_sends_it_with_its_settings(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    set_session(&app, cx, "t", "running");
+    queue_prompt(cx, "follow up");
+    assert!(calls(&requests).is_empty());
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        ""
+    );
+    assert!(cx.debug_bounds("queued-0").is_some());
+    queue_prompt(cx, "and then this");
+    assert!(cx.debug_bounds("queued-1").is_some());
+    // Settings changed after queueing do not reach the queued send.
+    cx.update(|window, cx| app.update(cx, |app, cx| {
+        app.shell.threads[0].runtime_mode = Some("approval-required".into());
+        app.shell.threads[0].interaction_mode = Some("plan".into());
+        app.model.update(cx, |input, cx| input.set_value("gpt-5.5", window, cx));
+    }));
+
+    set_session(&app, cx, "t", "ready");
+    let mut sent = calls(&requests);
+    assert_eq!(sent.len(), 1);
+    let (payload, reply) = sent.remove(0);
+    assert_eq!(payload["type"], "thread.turn.start");
+    assert_eq!(payload["message"]["text"], "follow up");
+    assert_eq!(payload["modelSelection"]["model"], "gpt-5.4");
+    assert_eq!(payload["runtimeMode"], "full-access");
+    assert_eq!(payload["interactionMode"], "default");
+    reply.send_blocking(Ok(json!({"sequence":2}))).unwrap();
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("queued-1").is_none());
+
+    // The next one waits for the turn just sent to complete.
+    set_session(&app, cx, "t", "ready");
+    assert!(calls(&requests).is_empty());
+    set_session(&app, cx, "t", "running");
+    set_session(&app, cx, "t", "ready");
+    let sent = calls(&requests);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0["message"]["text"], "and then this");
+}
+
+#[gpui_kit::test]
+fn a_removed_queued_message_is_never_sent(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    set_session(&app, cx, "t", "running");
+    cx.update(|_, cx| app.update(cx, |app, _| {
+        app.attachments.push(
+            json!({"id": "a1", "name": "notes.md", "mimeType": "text/markdown", "sizeBytes": 12}),
+        );
+    }));
+    queue_prompt(cx, "never mind");
+    let remove = cx.debug_bounds("queued-remove-0").expect("queued row is visible");
+    cx.simulate_click(remove.center(), Default::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("queued-0").is_none());
+    let sent = calls(&requests);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0["attachmentId"], "a1");
+
+    set_session(&app, cx, "t", "ready");
+    assert!(calls(&requests).is_empty());
+}
+
+#[gpui_kit::test]
+fn steering_interrupts_then_sends_ahead_of_the_queue(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    set_session(&app, cx, "t", "running");
+    queue_prompt(cx, "later");
+    cx.simulate_input("change course");
+    cx.simulate_keystrokes("cmd-shift-enter");
+    cx.run_until_parked();
+    let mut sent = calls(&requests);
+    assert_eq!(sent.len(), 1);
+    let (payload, reply) = sent.remove(0);
+    assert_eq!(payload["type"], "thread.turn.interrupt");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        ""
+    );
+    reply.send_blocking(Ok(json!({"sequence":2}))).unwrap();
+    cx.run_until_parked();
+    let sent = calls(&requests);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0["type"], "thread.turn.start");
+    assert_eq!(sent[0].0["message"]["text"], "change course");
+}
+
+#[gpui_kit::test]
+fn a_queue_waits_for_its_own_thread_to_complete(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    set_session(&app, cx, "t", "running");
+    queue_prompt(cx, "for t");
+    let shell = |status: &str| {
+        json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"projects":[{"id":"p","title":"Fixture","workspaceRoot":"/tmp/fixture"}],"threads":[
+            {"id":"t","projectId":"p","title":"Thread","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"session":{"status":status}},
+            {"id":"u","projectId":"p","title":"Other","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"session":{"status":"running"}}
+        ]}})
+    };
+    cx.update(|window, cx| app.update(cx, |app, cx| {
+        app.shell.apply(serde_json::from_value(shell("running")).unwrap()).unwrap();
+        app.select_thread("u", window, cx);
+    }));
+    set_session(&app, cx, "u", "running");
+    set_session(&app, cx, "u", "ready");
+    assert!(calls(&requests).is_empty());
+    assert!(cx.debug_bounds("queued-0").is_none(), "the queue belongs to t");
+
+    cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.shell.apply(serde_json::from_value(shell("ready")).unwrap()).unwrap();
+        app.flush_queues(cx);
+    }));
+    cx.run_until_parked();
+    let sent = calls(&requests);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0["threadId"], "t");
+    assert_eq!(sent[0].0["message"]["text"], "for t");
 }
