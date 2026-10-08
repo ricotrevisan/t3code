@@ -10,6 +10,8 @@ use t3code_desktop_gpui::{
 
 mod input;
 pub(crate) mod keys;
+mod layouts;
+mod links;
 mod names;
 mod operations;
 mod view;
@@ -115,6 +117,8 @@ pub(crate) struct Drawer {
     pub tabs: Vec<Tab>,
     pub active: Option<String>,
     pub split: Option<(String, String, Vec<String>)>,
+    pub vertical: bool,
+    layouts: layouts::Layouts,
     pub focus: FocusHandle,
     pub rename: Entity<InputState>,
     pub renaming: Option<String>,
@@ -132,6 +136,7 @@ pub(crate) struct Drawer {
     pending_open: Option<(String, String, u64)>,
     pub height: f32,
     composition: Option<input::Composition>,
+    focus_subscription: Option<gpui_kit::Subscription>,
     pub drag: Option<(f32, f32)>,
     pub bounds: Option<gpui_kit::Bounds<gpui_kit::Pixels>>,
     pub cell_width: f32,
@@ -152,12 +157,29 @@ impl Drawer {
                 ),
             }
         };
+        let (layouts, layout_error) = if cfg!(test) {
+            (layouts::Layouts::default(), None)
+        } else {
+            match layouts::Layouts::load(
+                t3code_desktop_gpui::drafts::default_path().with_file_name("terminal-layouts.json"),
+            ) {
+                Ok(layouts) => (layouts, None),
+                Err(error) => (
+                    layouts::Layouts::unavailable(),
+                    Some(format!("Terminal layouts cannot be read: {error}")),
+                ),
+            }
+        };
+        let local_error = local_error.or(layout_error);
+        let focus = cx.focus_handle();
         Self {
             open: false,
             tabs: Vec::new(),
             active: None,
             split: None,
-            focus: cx.focus_handle(),
+            vertical: false,
+            layouts,
+            focus,
             rename: cx.new(|cx| crate::single_line_input(window, cx)),
             renaming: None,
             confirm: None,
@@ -174,6 +196,7 @@ impl Drawer {
             pending_open: None,
             height: crate::window_state::TERMINAL_HEIGHT.1,
             composition: None,
+            focus_subscription: None,
             drag: None,
             bounds: None,
             cell_width: 8.4,
@@ -197,6 +220,7 @@ impl NativeApp {
                 .map(|tab| tab.id.clone());
             if let Some(id) = id {
                 self.terminal_drawer.active = Some(id);
+                self.terminal_restore_layout(cx);
             } else if let Some(thread) = self.selected_thread.clone() {
                 self.terminal_drawer.pending_open =
                     Some((self.environment_scope.clone(), thread, self.generation));
@@ -285,6 +309,7 @@ impl NativeApp {
         self.terminal_drawer.active = Some(id.clone());
         self.terminal_drawer.tabs.push(tab);
         self.terminal_drawer.local_error = None;
+        self.terminal_select_tab(&id, cx);
         let sender = self.commands.clone().unwrap();
         let generation = self.generation;
         let scope = self.environment_scope.clone();
@@ -499,6 +524,7 @@ impl NativeApp {
                             app.terminal_drawer.tabs.retain(|tab| {
                                 !(tab.id == id && tab.scope == scope && tab.thread == thread)
                             });
+                            app.terminal_remove_layout(&scope, &thread, &id, cx);
                             cx.notify();
                             return Some(stream);
                         }

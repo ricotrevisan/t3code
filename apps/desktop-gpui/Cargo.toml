@@ -6,7 +6,22 @@ publish = false
 default-run = "t3code-desktop-gpui"
 
 [dependencies]
-gpui-kit = "=0.7.1"
+gpui-kit = { version = "=0.7.1", features = [
+  "tree-sitter-rust",
+  "tree-sitter-typescript",
+  "tree-sitter-javascript",
+  "tree-sitter-python",
+  "tree-sitter-go",
+  "tree-sitter-ruby",
+  "tree-sitter-bash",
+  "tree-sitter-c",
+  "tree-sitter-cpp",
+  "tree-sitter-css",
+  "tree-sitter-html",
+  "tree-sitter-markdown",
+  "tree-sitter-toml",
+  "tree-sitter-yaml",
+] }
 # Bounded first-frame thumbnails; already present transitively through GPUI.
 image = { version = "=0.25.10", default-features = false, features = [
   "png",
@@ -40,6 +55,8 @@ objc2-foundation = { version = "0.3", features = ["NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSApplication",
   "NSDockTile",
+  "NSEvent",
+  "NSResponder",
   "NSSound",
   "NSView",
   "NSWindow",

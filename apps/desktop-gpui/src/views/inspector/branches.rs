@@ -122,7 +122,7 @@ impl NativeApp {
                     .label("New worktree")
                     .checked(self.prepare_new_worktree)
                     .on_click(cx.listener(|app, value: &bool, _, cx| {
-                        app.prepare_new_worktree = *value;
+                        app.choose_next_workspace(*value);
                         cx.notify();
                     })),
             )
@@ -132,7 +132,7 @@ impl NativeApp {
                     .label("Start from origin")
                     .checked(self.start_from_origin)
                     .on_click(cx.listener(|app, value: &bool, _, cx| {
-                        app.start_from_origin = *value;
+                        app.choose_next_setup(Some(*value), None);
                         cx.notify();
                     })),
             )
@@ -142,7 +142,7 @@ impl NativeApp {
                     .label("Run setup script")
                     .checked(self.run_setup_script)
                     .on_click(cx.listener(|app, value: &bool, _, cx| {
-                        app.run_setup_script = *value;
+                        app.choose_next_setup(None, Some(*value));
                         cx.notify();
                     })),
             )

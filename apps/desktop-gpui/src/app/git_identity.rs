@@ -4,6 +4,9 @@ use gpui_kit::{AppContext as _, Context, Entity, Subscription, Window};
 #[derive(Default)]
 pub(crate) struct HeaderRename {
     pub input: Option<Entity<InputState>>,
+    pub title_focus: std::cell::OnceCell<gpui_kit::FocusHandle>,
+    pub title_blur: std::cell::OnceCell<Subscription>,
+    pub pending_title_menu: Option<gpui_kit::Task<()>>,
     pub view: std::cell::OnceCell<Entity<crate::views::thread_header::HeaderView>>,
     pub overflow_open: bool,
     pub overflow_previous_focus: Option<gpui_kit::FocusHandle>,
@@ -14,6 +17,45 @@ pub(crate) struct HeaderRename {
     subscription: Option<Subscription>,
 }
 impl NativeApp {
+    /// Native title menus wait for the double-click interval, as in the desktop web header.
+    pub(crate) fn schedule_header_title_menu(
+        &mut self,
+        position: gpui_kit::Point<gpui_kit::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.header_rename.pending_title_menu = None;
+        let thread = self.selected_thread.clone();
+        let generation = self.generation;
+        let selection_epoch = self.diffs.epoch;
+        let window = window.window_handle();
+        self.header_rename.pending_title_menu = Some(cx.spawn(async move |entity, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let _ = cx.update_window(window, |_, window, cx| {
+                entity.update(cx, |app, cx| {
+                    if app.selected_thread != thread
+                        || app.generation != generation
+                        || app.diffs.epoch != selection_epoch
+                        || app.header_rename.input.is_some()
+                        || app
+                            .header_rename
+                            .title_focus
+                            .get()
+                            .is_none_or(|focus| !focus.is_focused(window))
+                    {
+                        return;
+                    }
+                    app.header_rename.pending_title_menu = None;
+                    app.close_thread_menu();
+                    app.thread_menu_open = true;
+                    app.header_rename.menu_position = Some(position);
+                    cx.notify();
+                })
+            });
+        }));
+    }
     pub(crate) fn open_header_project_settings(
         &mut self,
         window: &mut Window,
@@ -42,6 +84,7 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.header_rename.pending_title_menu = None;
         let Some(id) = self.selected_thread.clone() else {
             return;
         };
@@ -62,6 +105,9 @@ impl NativeApp {
             menu_position: self.header_rename.menu_position,
             overflow_focus: self.header_rename.overflow_focus.clone(),
             overflow_bounds: self.header_rename.overflow_bounds.clone(),
+            title_focus: self.header_rename.title_focus.clone(),
+            title_blur: std::mem::take(&mut self.header_rename.title_blur),
+            pending_title_menu: None,
         };
         input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();

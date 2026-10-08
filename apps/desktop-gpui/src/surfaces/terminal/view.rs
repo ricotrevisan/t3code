@@ -64,21 +64,15 @@ impl NativeApp {
             })
             .map(|tab| {
                 let id = tab.id.clone();
-                Button::new(SharedString::from(format!("terminal-tab-{id}")))
+                let selector = format!("terminal-tab-{id}");
+                Button::new(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
                     .ghost()
                     .flex_none()
                     .label(tab.title.clone())
                     .selected(tab_id.as_ref() == Some(&id))
                     .on_click(cx.listener(move |app, _, window, cx| {
-                        app.terminal_drawer.active = Some(id.clone());
-                        if app
-                            .terminal_drawer
-                            .split
-                            .as_ref()
-                            .is_some_and(|(_, _, ids)| !ids.contains(&id))
-                        {
-                            app.terminal_drawer.split = None;
-                        }
+                        app.terminal_select_tab(&id, cx);
                         app.terminal_drawer.focus.focus(window, cx);
                         cx.notify();
                     }))
@@ -138,6 +132,21 @@ impl NativeApp {
                     })),
             )
             .child(
+                Button::new("terminal-split-vertical")
+                    .debug_selector(|| "terminal-split-vertical".into())
+                    .ghost()
+                    .small()
+                    .icon(assets::IconName::PanelBottom)
+                    .tooltip("Split terminal top to bottom (max 4 panes)")
+                    .disabled(
+                        !connected || tab_id.is_none() || self.terminal_visible_ids().len() >= 4,
+                    )
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.terminal_split_direction(true, cx);
+                        app.terminal_drawer.focus.focus(window, cx);
+                    })),
+            )
+            .child(
                 Button::new("terminal-unsplit")
                     .debug_selector(|| "terminal-unsplit".into())
                     .ghost()
@@ -146,7 +155,7 @@ impl NativeApp {
                     .tooltip("Show only the active terminal (keep sessions open)")
                     .disabled(self.terminal_drawer.split.is_none())
                     .on_click(cx.listener(|app, _, window, cx| {
-                        app.terminal_drawer.split = None;
+                        app.terminal_unsplit(cx);
                         app.terminal_drawer.focus.focus(window, cx);
                         cx.notify();
                     })),
@@ -515,6 +524,7 @@ impl NativeApp {
         div()
             .id("terminal-panes")
             .flex()
+            .when(self.terminal_drawer.vertical, |view| view.flex_col())
             .flex_1()
             .min_h_0()
             .min_w_0()
@@ -535,6 +545,11 @@ impl NativeApp {
                 }),
             )
             .on_action(cx.listener(|app, key: &super::keys::TerminalKey, _, cx| {
+                // Enter/arrows/Escape belong to the platform candidate editor while
+                // marked text is live, not to the shell beneath it.
+                if app.terminal_composition().is_some() {
+                    return;
+                }
                 if let Some(tab) = app.terminal_active() {
                     let id = tab.id.clone();
                     if let Some(data) = tab.screen.key(&key.key, None, key.control, false) {
@@ -554,8 +569,8 @@ impl NativeApp {
                 // Printable input, including Option/dead-key layouts, must pass through
                 // the platform input handler exactly once (not both keyDown and insertText).
                 if !key.modifiers.platform
-                    && !key.modifiers.control
-                    && (key.key_char.is_some() || app.terminal_composition().is_some())
+                    && (app.terminal_composition().is_some()
+                        || (!key.modifiers.control && key.key_char.is_some()))
                 {
                     return;
                 }
@@ -653,6 +668,7 @@ impl NativeApp {
         let resize_id = id.clone();
         let weak = cx.entity().downgrade();
         let drag_app = weak.clone();
+        let observe_focus = self.terminal_drawer.focus_subscription.is_none();
         // The canvas owns no timer. Cursor blinking is intentionally disabled.
         let canvas = canvas(
             move |bounds, window, cx| {
@@ -673,6 +689,16 @@ impl NativeApp {
                     (bounds.size.width / px(width)) as usize,
                     (bounds.size.height / px(line_height)) as usize,
                 );
+                if observe_focus {
+                    let focus_owner = weak.clone();
+                    let handle = window.window_handle();
+                    cx.defer(move |cx| {
+                        let _ = handle.update(cx, |_, window, cx| {
+                            let _ = focus_owner
+                                .update(cx, |app, cx| app.terminal_observe_focus(window, cx));
+                        });
+                    });
+                }
                 let weak = weak.clone();
                 let id = resize_id.clone();
                 let owner = geometry_owner.clone();
@@ -864,7 +890,9 @@ impl NativeApp {
                     if !app.terminal_pane_current(&mouse_owner) {
                         return;
                     }
-                    app.terminal_drawer.active = Some(draw_id.clone());
+                    if app.terminal_drawer.active.as_ref() != Some(&draw_id) {
+                        app.terminal_select_tab(&draw_id, cx);
+                    }
                     app.terminal_drawer.focus.focus(window, cx);
                     let width = app.terminal_drawer.cell_width;
                     if let Some((row, col)) = app.terminal_point(event.position, width, line_height)
@@ -874,10 +902,16 @@ impl NativeApp {
                                 && Some(&tab.thread) == app.selected_thread.as_ref()
                         })
                     {
-                        if (event.modifiers.platform || event.modifiers.control)
-                            && let Some(url) = tab.screen.link_at(row, col)
-                        {
+                        let modifier = if cfg!(target_os = "macos") {
+                            event.modifiers.platform && !event.modifiers.control
+                        } else {
+                            event.modifiers.control && !event.modifiers.platform
+                        };
+                        if modifier && let Some(url) = tab.screen.link_at(row, col) {
                             cx.open_url(&url);
+                        } else if modifier && let Some(path) = tab.screen.file_link_at(row, col) {
+                            let cwd = tab.cwd.clone();
+                            app.terminal_open_path(&path, &cwd, window, cx);
                         } else {
                             tab.screen.select(row, col, true);
                         }
@@ -891,7 +925,9 @@ impl NativeApp {
                     if !app.terminal_pane_current(&menu_owner) {
                         return;
                     }
-                    app.terminal_drawer.active = Some(menu_id.clone());
+                    if app.terminal_drawer.active.as_ref() != Some(&menu_id) {
+                        app.terminal_select_tab(&menu_id, cx);
+                    }
                     app.terminal_drawer.focus.focus(window, cx);
                     cx.notify();
                 }),
@@ -960,6 +996,8 @@ impl NativeApp {
             let context_app = menu_app.clone();
             let copy_owner = owner.clone();
             let paste_owner = owner.clone();
+            let file_owner = owner.clone();
+            let editor_owner = owner.clone();
             let link_owner = owner;
             let clipboard_text = menu_app.upgrade().and_then(|app| {
                 app.read(cx)
@@ -969,12 +1007,84 @@ impl NativeApp {
             let copy_app = menu_app.clone();
             let paste_app = menu_app.clone();
             let link_app = menu_app.clone();
+            let preview_app = menu_app.clone();
+            let preview_owner = link_owner.clone();
             let link = menu_app
                 .upgrade()
                 .and_then(|app| app.read(cx).terminal_capture())
                 .and_then(|capture| url::Url::parse(capture.text.trim()).ok())
                 .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
+            let file = menu_app.upgrade().and_then(|entity| {
+                let app = entity.read(cx);
+                let tab = app.terminal_active()?;
+                let capture = app.terminal_capture()?;
+                if !capture.text.contains(['/', '\\']) {
+                    return None;
+                }
+                let workspace = app.selected_workspace()?;
+                super::links::workspace_path(capture.text.trim(), &tab.cwd, &workspace)?;
+                Some((
+                    capture.text,
+                    tab.cwd.clone(),
+                    app.connection_ready() && app.editor_unavailable_reason().is_none(),
+                ))
+            });
+            let menu = if let Some((raw, cwd, can_edit)) = file {
+                let file_app = menu_app.clone();
+                let editor_app = menu_app.clone();
+                let editor_raw = raw.clone();
+                let editor_cwd = cwd.clone();
+                menu.item(
+                    PopupMenuItem::element(|_, _| {
+                        div()
+                            .id("terminal-menu-file")
+                            .debug_selector(|| "terminal-menu-file".into())
+                            .child("Open selected file")
+                    })
+                    .on_click(move |_, window, cx| {
+                        let _ = file_app.update(cx, |app, cx| {
+                            if app.terminal_menu_current(&file_owner) {
+                                app.terminal_open_path(&raw, &cwd, window, cx);
+                            }
+                        });
+                    }),
+                )
+                .item(
+                    PopupMenuItem::element(|_, _| {
+                        div()
+                            .id("terminal-menu-editor")
+                            .debug_selector(|| "terminal-menu-editor".into())
+                            .child("Open selected file in editor")
+                    })
+                    .disabled(!can_edit)
+                    .on_click(move |_, _, cx| {
+                        let _ = editor_app.update(cx, |app, cx| {
+                            if app.terminal_menu_current(&editor_owner) {
+                                app.terminal_external_editor(&editor_raw, &editor_cwd, cx);
+                            }
+                        });
+                    }),
+                )
+            } else {
+                menu
+            };
             let menu = if let Some(url) = link {
+                let preview_url = url.to_string();
+                let menu = menu.item(
+                    PopupMenuItem::element(|_, _| {
+                        div()
+                            .id("terminal-menu-preview")
+                            .debug_selector(|| "terminal-menu-preview".into())
+                            .child("Open selected link in preview")
+                    })
+                    .on_click(move |_, window, cx| {
+                        let _ = preview_app.update(cx, |app, cx| {
+                            if app.terminal_menu_current(&preview_owner) {
+                                app.terminal_preview_link(&preview_url, window, cx);
+                            }
+                        });
+                    }),
+                );
                 menu.item(
                     PopupMenuItem::element(|_, _| {
                         div()
@@ -1050,8 +1160,8 @@ impl NativeApp {
                         if !app.terminal_menu_current(&paste_owner) {
                             return;
                         }
-                        app.terminal_paste(window, cx);
                         app.terminal_drawer.focus.focus(window, cx);
+                        app.terminal_paste(window, cx);
                     });
                 }),
             )

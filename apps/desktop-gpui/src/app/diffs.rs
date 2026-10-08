@@ -13,6 +13,7 @@ pub(crate) struct DiffState {
     pub loading: bool,
     pub error: Option<String>,
     pub files: Vec<PatchFile>,
+    pub file_list: std::cell::OnceCell<gpui_kit::Entity<crate::views::r16_e_files::FileList>>,
     pub selected_file: usize,
     pub git_scope: Option<String>,
     pub wrap: bool,
@@ -20,15 +21,22 @@ pub(crate) struct DiffState {
     pub collapsed: std::collections::HashSet<usize>,
     pub truncated: bool,
     pub split: bool,
+    pub preferences_loaded: bool,
+    #[cfg(test)]
+    pub preferences_path: Option<std::path::PathBuf>,
     pub ignore_whitespace: bool,
     pub base_ref: Option<String>,
+    pub comparison: super::git_diff_comparison::Comparison,
     pub source_base: Option<String>,
     pub source_head: Option<String>,
     pub full_file: Option<(usize, gpui_kit::SharedString, gpui_kit::SharedString)>,
     pub full_file_view: Option<gpui_kit::Entity<crate::views::r14_e_diff::FullFileView>>,
     pub full_file_loading: bool,
     pub full_file_error: Option<String>,
-    epoch: u64,
+    pub(super) epoch: u64,
+    pub patch_loading: bool,
+    pub patch_error: Option<String>,
+    patch_task: Option<Task<()>>,
     task: Option<Task<()>>,
 }
 
@@ -38,6 +46,12 @@ impl DiffState {
         let epoch = self.epoch.wrapping_add(1);
         *self = Self {
             epoch,
+            split: self.split,
+            wrap: self.wrap,
+            ignore_whitespace: self.ignore_whitespace,
+            preferences_loaded: self.preferences_loaded,
+            #[cfg(test)]
+            preferences_path: self.preferences_path.clone(),
             ..Self::default()
         };
     }
@@ -46,6 +60,10 @@ impl DiffState {
 pub(crate) struct PatchFile {
     pub path: String,
     pub patch: String,
+    pub previous_path: Option<String>,
+    pub stats: Option<(u64, u64)>,
+    pub loaded: bool,
+    pub truncated: bool,
     pub view: std::cell::OnceCell<gpui_kit::Entity<crate::views::r14_e_diff::PatchView>>,
 }
 
@@ -127,7 +145,7 @@ fn header_path(header: &str) -> String {
 }
 
 // Preserve the server's patch verbatim, including binary/rename-only sections.
-fn split_patch(patch: String) -> Vec<PatchFile> {
+pub(super) fn split_patch(patch: String) -> Vec<PatchFile> {
     if patch.trim().is_empty() {
         return Vec::new();
     }
@@ -138,6 +156,10 @@ fn split_patch(patch: String) -> Vec<PatchFile> {
             files.push(PatchFile {
                 path,
                 patch: String::new(),
+                previous_path: None,
+                stats: None,
+                loaded: true,
+                truncated: false,
                 view: std::cell::OnceCell::new(),
             });
         }
@@ -157,8 +179,11 @@ fn split_patch(patch: String) -> Vec<PatchFile> {
 
 impl NativeApp {
     pub(crate) fn view_git_diff(&mut self, scope: &str, cx: &mut Context<Self>) {
+        self.restore_diff_preferences();
+        self.diffs.comparison = Default::default();
         self.inspector_open = true;
-        self.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
+        self.browser_panel
+            .update(cx, |panel, cx| panel.deactivate(cx));
         self.right_tab = RightTab::Changes;
         let (Some(thread_id), Some(cwd), Some(sender)) = (
             self.selected_thread.clone(),
@@ -183,11 +208,15 @@ impl NativeApp {
         self.diffs.source_base = None;
         self.diffs.source_head = None;
         self.diffs.files.clear();
+        self.diffs.file_list.take();
         self.diffs.selected_file = 0;
         self.diffs.collapsed.clear();
         self.diffs.error = None;
         self.diffs.loading = true;
         self.diffs.truncated = false;
+        self.diffs.patch_loading = false;
+        self.diffs.patch_error = None;
+        self.diffs.patch_task = None;
         let mut payload = json!({"cwd":cwd});
         if self.diffs.ignore_whitespace {
             payload["ignoreWhitespace"] = true.into();
@@ -212,8 +241,7 @@ impl NativeApp {
                         if let Some(source) = value["sources"].as_array().and_then(|sources| {
                             sources.iter().find(|source| source["kind"] == scope)
                         }) {
-                            app.diffs.files =
-                                split_patch(source["diff"].as_str().unwrap_or_default().to_owned());
+                            app.diffs.files = manifest_files(source);
                             app.diffs.truncated = source["truncated"] == true;
                             app.diffs.source_base = source["baseRef"].as_str().map(str::to_owned);
                             app.diffs.source_head = source["headRef"].as_str().map(str::to_owned);
@@ -223,6 +251,9 @@ impl NativeApp {
                     }
                     Ok(_) => app.diffs.error = Some("Diff response has the wrong checkout".into()),
                     Err(error) => app.diffs.error = Some(error),
+                }
+                if app.diffs.error.is_none() {
+                    app.load_selected_diff_patch(cx);
                 }
                 cx.notify();
             });
@@ -239,6 +270,10 @@ impl NativeApp {
         self.diffs.full_file_loading = false;
         self.diffs.expand_all = false;
         self.diffs.collapsed.remove(&index);
+        self.diffs.patch_loading = false;
+        self.diffs.patch_error = None;
+        self.diffs.patch_task = None;
+        self.load_selected_diff_patch(cx);
         cx.notify();
     }
     /// Full contents are a separate, explicitly labelled view, not invented
@@ -255,6 +290,12 @@ impl NativeApp {
         ) else {
             return;
         };
+        if !file.loaded {
+            self.diffs.full_file_error =
+                Some("Load this file's patch first to resolve new/deleted/rename metadata".into());
+            cx.notify();
+            return;
+        }
         let paths = file
             .patch
             .lines()
@@ -272,9 +313,20 @@ impl NativeApp {
             .get(1)
             .map(|p| p.strip_prefix("b/").unwrap_or(p))
             .unwrap_or(&file.path);
-        let change = if old_path == "/dev/null" {
+        let path = file.path.clone();
+        let change = if old_path == "/dev/null"
+            || file
+                .patch
+                .lines()
+                .any(|line| line.starts_with("new file mode "))
+        {
             "new"
-        } else if new_path == "/dev/null" {
+        } else if new_path == "/dev/null"
+            || file
+                .patch
+                .lines()
+                .any(|line| line.starts_with("deleted file mode "))
+        {
             "deleted"
         } else if file.patch.contains("rename from ") {
             if file.patch.contains("@@ ") {
@@ -319,6 +371,7 @@ impl NativeApp {
                                     crate::views::r14_e_diff::FullFileView::new(
                                         old.clone(),
                                         new.clone(),
+                                        &path,
                                     )
                                 }));
                                 app.diffs.full_file = Some((index, old, new));
@@ -339,8 +392,11 @@ impl NativeApp {
     }
 
     pub(crate) fn view_checkpoint_diff(&mut self, turn_count: u64, cx: &mut Context<Self>) {
+        self.restore_diff_preferences();
+        self.diffs.comparison = Default::default();
         self.inspector_open = true;
-        self.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
+        self.browser_panel
+            .update(cx, |panel, cx| panel.deactivate(cx));
         self.right_tab = RightTab::Changes;
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
@@ -357,8 +413,12 @@ impl NativeApp {
         self.diffs.full_file_error = None;
         self.diffs.full_file_loading = false;
         self.diffs.truncated = false;
+        self.diffs.patch_loading = false;
+        self.diffs.patch_error = None;
+        self.diffs.patch_task = None;
         self.diffs.collapsed.clear();
         self.diffs.files.clear();
+        self.diffs.file_list.take();
         self.diffs.selected_file = 0;
         self.diffs.error = None;
         self.diffs.loading = true;
@@ -407,6 +467,96 @@ impl NativeApp {
                 match result {
                     Ok(files) => app.diffs.files = files,
                     Err(error) => app.diffs.error = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+}
+
+/// A truncated preview is not a complete file. Use the authoritative manifest
+/// and fetch each selected patch, including files absent from the preview bytes.
+fn manifest_files(source: &serde_json::Value) -> Vec<PatchFile> {
+    let parsed = split_patch(source["diff"].as_str().unwrap_or_default().to_owned());
+    let Some(manifest) = source["files"]
+        .as_array()
+        .filter(|_| source["truncated"] == true)
+    else {
+        return parsed;
+    };
+    manifest
+        .iter()
+        .filter_map(|stat| {
+            Some(PatchFile {
+                path: stat["path"].as_str()?.to_owned(),
+                previous_path: stat["previousPath"].as_str().map(str::to_owned),
+                stats: stat["additions"].as_u64().zip(stat["deletions"].as_u64()),
+                patch: String::new(),
+                loaded: false,
+                truncated: false,
+                view: std::cell::OnceCell::new(),
+            })
+        })
+        .collect()
+}
+
+impl NativeApp {
+    pub(crate) fn load_selected_diff_patch(&mut self, cx: &mut Context<Self>) {
+        let index = self.diffs.selected_file;
+        let (Some(file), Some(scope), Some(cwd), Some(sender)) = (
+            self.diffs.files.get(index),
+            self.diffs.git_scope.clone(),
+            self.selected_workspace(),
+            self.commands.clone(),
+        ) else {
+            return;
+        };
+        if file.loaded || self.diffs.patch_loading || !self.connection_ready() {
+            return;
+        }
+        let path = file.path.clone();
+        let previous = file.previous_path.clone();
+        let epoch = self.diffs.epoch;
+        let generation = self.generation;
+        let context = self.checkout_context();
+        let mut payload = json!({"cwd":cwd,"ignoreWhitespace":self.diffs.ignore_whitespace,
+            "file":{"path":path,"previousPath":previous,"sourceKind":scope}});
+        if let Some(base) = self
+            .diffs
+            .source_base
+            .as_ref()
+            .or(self.diffs.base_ref.as_ref())
+        {
+            payload["baseRef"] = base.clone().into();
+        }
+        self.diffs.patch_loading = true;
+        self.diffs.patch_error = None;
+        self.diffs.patch_task = Some(cx.spawn(async move |entity, cx| {
+            let result = connection::call(&sender, "review.getDiffPreview", payload).await;
+            let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation || app.checkout_context() != context
+                    || app.diffs.epoch != epoch || app.diffs.selected_file != index { return }
+                app.diffs.patch_loading = false;
+                let result = result.and_then(|value| {
+                    if value["cwd"].as_str() != Some(cwd.as_str()) {
+                        return Err("File patch response has the wrong checkout".into());
+                    }
+                    let source = value["sources"].as_array().and_then(|sources| sources.iter().find(|s| s["kind"] == scope))
+                        .ok_or("Requested file scope is unavailable")?;
+                    let mut files = split_patch(source["diff"].as_str().unwrap_or_default().to_owned());
+                    if files.len() != 1 || files[0].path != path {
+                        return Err("File patch response has the wrong path or no patch; refresh the manifest".into());
+                    }
+                    let mut file = files.remove(0);
+                    file.previous_path = previous;
+                    file.stats = app.diffs.files[index].stats;
+                    file.truncated = source["truncated"] == true;
+                    Ok(file)
+                });
+                match result {
+                    Ok(file) => app.diffs.files[index] = file,
+                    Err(error) => app.diffs.patch_error = Some(error),
                 }
                 cx.notify();
             });

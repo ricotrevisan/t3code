@@ -1,5 +1,8 @@
 //! Prompt drafts and stash, sending and queueing, attachments, and replies to agent requests.
 
+#[path = "r16_c_plan.rs"]
+mod r16_c_plan;
+
 use super::attachments::{AttachmentInput, AttachmentScope, upload_target};
 use crate::{NativeApp, attachment_mime};
 use gpui_kit::{App, Context, EntityInputHandler as _, Focusable as _, KeyDownEvent, Window};
@@ -591,6 +594,7 @@ impl NativeApp {
                 return;
             }
         };
+        record.plan_intent = self.durable_plan_intent();
         if let Some(store) = &mut self.draft_store {
             let origin = self.environment_scope.clone();
             let thread = self.selected_thread.clone();
@@ -652,6 +656,9 @@ impl NativeApp {
                                 && app.selected_thread == thread
                                 && app.composer.read(cx).value().as_str() == record.prompt
                             {
+                                if let Some(thread) = &thread {
+                                    app.consume_plan_intent(&origin, thread, &record.prompt);
+                                }
                                 if let (Some(thread), Some(context)) = (&thread, &record.context) {
                                     app.consume_sent_context(&origin, thread, context);
                                 }
@@ -662,6 +669,7 @@ impl NativeApp {
                                 && app.environment_scope == origin
                                 && app.drafts.get(thread) == Some(&record.prompt)
                             {
+                                app.consume_plan_intent(&origin, thread, &record.prompt);
                                 app.drafts.remove(thread);
                                 if let Some(store) = &mut app.draft_store {
                                     store.set(&origin, thread, String::new());
@@ -698,7 +706,7 @@ impl NativeApp {
     }
 
     pub(crate) fn composer_stashes(&self) -> Vec<t3code_desktop_gpui::drafts::StashEntry> {
-        if let Some(store) = &self.draft_store {
+        let entries = if let Some(store) = &self.draft_store {
             store.stashes(&self.environment_scope)
         } else {
             self.attachment_drafts
@@ -706,7 +714,11 @@ impl NativeApp {
                 .get(&self.environment_scope)
                 .cloned()
                 .unwrap_or_default()
-        }
+        };
+        entries
+            .into_iter()
+            .filter(|entry| !self.queues.recovery_stash_active(&entry.id))
+            .collect()
     }
 
     fn take_composer_stash(&mut self, id: &str) -> Option<t3code_desktop_gpui::drafts::StashEntry> {
@@ -884,6 +896,7 @@ impl NativeApp {
             ),
             records,
         );
+        self.capture_plan_intent(record.plan_intent.clone());
         self.attachments = record.attachments;
         self.composer.update(cx, |input, cx| {
             input.set_value(
@@ -1035,23 +1048,23 @@ impl NativeApp {
                 "Selected provider is unavailable; choose another instance or check Providers settings",
             );
         }
-        let (mut runtime_mode, mut interaction_mode) = self.selected_modes();
+        let (mut runtime_mode, mut interaction_mode) = if let Some(draft) = self.pending_threads.iter().find(|d| d.thread.id == id) {
+            let defaults = self.pending_defaults(draft).map_err(|_| "Load valid server defaults before sending the draft")?;
+            (defaults.runtime_mode, defaults.interaction_mode)
+        } else { self.selected_modes() };
         if let Some(provider) = provider {
             let modes = provider.runtime_modes();
             if !modes.contains(&runtime_mode.as_str()) {
-                runtime_mode = provider
-                    .default_runtime_mode
-                    .as_deref()
-                    .filter(|mode| modes.contains(mode))
-                    .or_else(|| modes.first().copied())
-                    .ok_or("Provider has no supported runtime mode")?
-                    .to_owned();
+                if self.pending_threads.iter().any(|d| d.thread.id == id) {
+                    return Err("Selected provider does not support the effective permissions; choose a supported mode explicitly");
+                }
+                runtime_mode = provider.default_runtime_mode.as_deref().filter(|m| modes.contains(m)).or_else(|| modes.first().copied()).ok_or("Provider has no supported runtime mode")?.to_owned();
             }
             if provider.show_interaction_mode_toggle == Some(false) {
                 interaction_mode = "default".into();
             }
         }
-        if let Some(mode) = self.confirmed_plan_followup_mode(&text).map_err(
+        if let Some(mode) = self.durable_plan_mode(&text).map_err(
             |_| "Plan follow-up mode is pending or rejected; prepare it again after the receipt",
         )? {
             interaction_mode = mode;
@@ -1140,6 +1153,7 @@ impl NativeApp {
     }
 
     fn submit_follow_up(&mut self, alternate: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ensure_pending_send_defaults(None, window, cx) { return; }
         if self.checkout_transition_pending() {
             self.report_error(
                 "Finish checkout reconciliation before sending; message retained",
@@ -1178,6 +1192,7 @@ impl NativeApp {
             cx.notify();
             return;
         }
+        self.remember_composer_draft(cx);
         let (id, message) = match self.composer_message(cx) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1196,18 +1211,13 @@ impl NativeApp {
                         return;
                     }
                 }
-                if let Some(source) = self.plan_followup_source(&message.text) {
+                if let Some(source) = self.durable_plan_source(&message.text) {
                     payload["sourceProposedPlan"] = source;
                 }
-                if let Some(draft) = self
-                    .pending_threads
-                    .iter()
-                    .find(|draft| draft.thread.id == id)
-                {
-                    payload["bootstrap"] = json!({"createThread":{"projectId":draft.thread.project_id,"title":draft.thread.title,"modelSelection":payload["modelSelection"],"runtimeMode":payload["runtimeMode"],"interactionMode":payload["interactionMode"],"branch":draft.thread.branch,"worktreePath":draft.thread.worktree_path,"createdAt":draft.created_at},"runSetupScript":draft.run_setup_script});
-                    if let Some(prepare) = &draft.prepare_worktree {
-                        payload["bootstrap"]["prepareWorktree"] = prepare.clone();
-                    }
+                match self.pending_bootstrap(&id, &payload) {
+                    Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
+                    Ok(None) => {},
+                    Err(error) => { self.report_error(error, cx); cx.notify(); return; }
                 }
                 match self.materialized_checkout_bootstrap(&id) {
                     Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
@@ -1242,6 +1252,7 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.ensure_pending_send_defaults(Some(steer), window, cx) { return; }
         if self.checkout_transition_pending() {
             self.report_error(
                 "Finish checkout reconciliation before sending; message retained",
@@ -1250,6 +1261,7 @@ impl NativeApp {
             cx.notify();
             return;
         }
+        self.remember_composer_draft(cx);
         let (thread_id, message) = match self.composer_message(cx) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1257,6 +1269,10 @@ impl NativeApp {
                 cx.notify();
                 return;
             }
+        };
+        let bootstrap = match message.start_command(&thread_id).map_err(str::to_owned).and_then(|payload| self.pending_bootstrap(&thread_id, &payload)) {
+            Ok(bootstrap) => bootstrap,
+            Err(error) => { self.report_error(error, cx); cx.notify(); return; }
         };
         let state = self.queue_observation(&thread_id);
         if steer
@@ -1275,19 +1291,44 @@ impl NativeApp {
                 return;
             }
         };
-        let source = self.plan_followup_source(&message.text);
+        let source = self.durable_plan_source(&message.text);
+        let recovery = self.durable_plan_intent().map(|intent| {
+            let mut entry = t3code_desktop_gpui::drafts::StashEntry::new(
+                message.text.clone(),
+                message.attachments.clone(),
+            );
+            entry.context = context.clone();
+            entry.plan_intent = Some(intent);
+            entry.queued_for = Some(thread_id.clone());
+            entry
+        });
         let id = self.queues.push_at(
             &thread_id,
             message,
             steer,
             state.as_ref().and_then(|state| state.tool.clone()),
         );
+        if let Some(bootstrap) = bootstrap { self.queues.set_bootstrap(&thread_id, id, bootstrap); }
         if let Some(context) = context {
             self.consume_sent_context(&self.environment_scope.clone(), &thread_id, &context);
             self.queues.set_context(&thread_id, id, context);
         }
         if let Some(source) = source {
             self.queues.set_source_plan(&thread_id, id, source);
+        }
+        if let Some(entry) = recovery {
+            self.queues
+                .set_recovery_stash(&thread_id, id, entry.id.clone());
+            if let Some(store) = &mut self.draft_store {
+                store.stash_record(&self.environment_scope, entry);
+            } else {
+                self.attachment_drafts
+                    .stashes
+                    .entry(self.environment_scope.clone())
+                    .or_default()
+                    .push(entry);
+            }
+            self.schedule_draft_save(cx);
         }
         if let Some(state) = &state {
             // Record the projection before an explicit Send now/steer receipt.
@@ -1329,6 +1370,9 @@ impl NativeApp {
         thread_id: &str,
         background: bool,
     ) -> Option<queue::Observation> {
+        if self.pending_threads.iter().any(|d| d.thread.id == thread_id) && !self.shell.threads.iter().any(|t| t.id == thread_id) {
+            return Some(queue::Observation { identity: format!("pending:{thread_id}"), ..Default::default() });
+        }
         let shell = self
             .shell
             .threads
@@ -1450,7 +1494,9 @@ impl NativeApp {
 
     /// Sends each queue's next message whose thread finished its turn.
     pub(crate) fn flush_queues(&mut self, cx: &mut Context<Self>) {
-        if self.sessions.selected().is_some() && !self.environment_identity_verified { return; }
+        if self.sessions.selected().is_some() && !self.environment_identity_verified {
+            return;
+        }
         if self.checkout_transition_pending() {
             return;
         }
@@ -1467,7 +1513,9 @@ impl NativeApp {
 
     /// Sends queued message `id` now, ahead of the turn finishing.
     pub(crate) fn send_queued(&mut self, thread_id: &str, id: u64, cx: &mut Context<Self>) {
-        if self.sessions.selected().is_some() && !self.environment_identity_verified { return; }
+        if self.sessions.selected().is_some() && !self.environment_identity_verified {
+            return;
+        }
         if self.checkout_transition_pending() {
             self.report_error(
                 "Finish checkout reconciliation before sending; queued message retained",
@@ -1499,7 +1547,9 @@ impl NativeApp {
         message: queue::QueuedMessage,
         cx: &mut Context<Self>,
     ) {
-        if self.checkout_transition_pending() || (self.sessions.selected().is_some() && !self.environment_identity_verified) {
+        if self.checkout_transition_pending()
+            || (self.sessions.selected().is_some() && !self.environment_identity_verified)
+        {
             self.queues.settle(&thread_id, message.id, false);
             cx.notify();
             return;
@@ -1519,12 +1569,20 @@ impl NativeApp {
                 return;
             }
         };
+        let recovery = self.queues.recovery_stash(&thread_id, message.id);
         let sent_context = self.queues.context(&thread_id, message.id);
         if let Some(context) = &sent_context {
             payload["message"]["context"] = context.clone();
         }
         if let Some(source) = self.queues.source_plan(&thread_id, message.id) {
             payload["sourceProposedPlan"] = source;
+        }
+        if self.pending_threads.iter().any(|d| d.thread.id == thread_id) && !self.shell.threads.iter().any(|t| t.id == thread_id) {
+            match self.queues.bootstrap(&thread_id, message.id).map(Some).map(Ok).unwrap_or_else(|| self.pending_bootstrap(&thread_id, &payload)) {
+                Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
+                Ok(None) => {},
+                Err(error) => { self.queues.settle(&thread_id, message.id, false); self.report_error(error, cx); cx.notify(); return; }
+            }
         }
         match self.materialized_checkout_bootstrap(&thread_id) {
             Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
@@ -1566,7 +1624,11 @@ impl NativeApp {
                     return;
                 }
                 if result.is_ok() {
+                    app.accept_pending_thread(&thread_id, cx);
                     app.consume_sent_attachments(&scope, &thread_id, &message.attachments);
+                    if let Some(recovery) = &recovery {
+                        app.take_composer_stash(recovery);
+                    }
                     // Context was moved to queue ownership at capture; do not erase
                     // a duplicate pasted into the live draft while this send awaited receipt.
                     app.schedule_draft_save(cx);
@@ -1585,9 +1647,14 @@ impl NativeApp {
 
     /// Drops a queued message and deletes its uploaded attachments.
     pub(crate) fn remove_queued(&mut self, thread_id: &str, id: u64, cx: &mut Context<Self>) {
+        let recovery = self.queues.recovery_stash(thread_id, id);
         let Some(message) = self.queues.remove(thread_id, id) else {
             return;
         };
+        if let Some(recovery) = recovery {
+            self.take_composer_stash(&recovery);
+            self.schedule_draft_save(cx);
+        }
         for attachment in message.attachments {
             if let Some(attachment_id) = attachment["id"].as_str() {
                 self.perform(
@@ -1801,6 +1868,32 @@ impl NativeApp {
             return;
         };
         let text = self.composer.read(cx).value().to_string();
+        let intent = if text.is_empty() {
+            None
+        } else {
+            self.durable_plan_intent()
+                .or_else(|| {
+                    let record = self.conversation_presentation.plan_followup.as_ref()?;
+                    (record.environment == self.environment_scope
+                        && record.thread == id
+                        && record.generation == self.generation
+                        && record.prompt == text)
+                        .then(|| {
+                            t3code_desktop_gpui::drafts::PlanIntent::new(
+                                record.environment.clone(),
+                                record.thread.clone(),
+                                record.plan.clone(),
+                                record.mode.clone(),
+                                text.clone(),
+                            )
+                        })
+                })
+                .map(|mut intent| {
+                    intent.prompt = text.clone();
+                    intent
+                })
+        };
+        self.capture_plan_intent(intent);
         self.drafts.insert(id.clone(), text.clone());
         let records = self.draft_context_records();
         if let Some(store) = &mut self.draft_store {

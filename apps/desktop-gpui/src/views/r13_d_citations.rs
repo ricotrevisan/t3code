@@ -151,6 +151,7 @@ impl NativeApp {
                     .unwrap()
                     .markdown = markdown.to_owned();
             }
+            self.highlight_citation_source(message, &state, cx);
             return state;
         }
         // Only mounted/recent source views are retained. Remounts parse again, never replay capture.
@@ -178,6 +179,7 @@ impl NativeApp {
                 _subscription: subscription,
             },
         );
+        self.highlight_citation_source(message, &state, cx);
         state
     }
 
@@ -238,6 +240,229 @@ impl NativeApp {
         if let Err(error) = result {
             self.report_error(error, cx);
         }
+    }
+
+    /// Route through the retained owner page, never copy source history into the
+    /// destination page. Normal selection keeps drafts and dirty-file guards.
+    pub(crate) fn navigate_to_citation(
+        &mut self,
+        citation: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(environment) = citation["environmentId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+        else {
+            self.report_error("Citation environment is unavailable", cx);
+            return;
+        };
+        let current = self
+            .server_config
+            .config(self.generation)
+            .and_then(|config| config["environment"]["environmentId"].as_str());
+        if current == Some(environment) {
+            self.load_citation_source(citation, window, cx);
+            return;
+        }
+        if !self.can_change_checkout(cx) {
+            return;
+        }
+        let target = self
+            .environment_hub
+            .borrow()
+            .pages
+            .iter()
+            .find_map(|(origin, page)| {
+                let page = page.upgrade()?;
+                if page.entity_id() == cx.entity_id() {
+                    return None;
+                }
+                let owner = page.read(cx);
+                (owner
+                    .server_config
+                    .config(owner.generation)
+                    .and_then(|config| config["environment"]["environmentId"].as_str())
+                    == Some(environment))
+                .then(|| (origin.clone(), page.clone()))
+            });
+        let Some((origin, page)) = target else {
+            self.report_error("Citation belongs to another environment or thread; connect its saved environment to open the source", cx);
+            return;
+        };
+        let opened = page.update(cx, |app, cx| app.load_citation_source(citation, window, cx));
+        if opened {
+            self.present_environment_page(&origin, window, cx);
+        } else {
+            self.report_error("Citation source could not be opened; check its environment connection and unsaved edits", cx);
+        }
+    }
+
+    fn load_citation_source(
+        &mut self,
+        citation: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(thread) = citation["threadId"].as_str().filter(|id| !id.is_empty()) else {
+            self.report_error("Citation source thread is unavailable", cx);
+            return false;
+        };
+        if citation["messageId"].as_str().is_none_or(str::is_empty) {
+            self.report_error("Citation source message is unavailable", cx);
+            return false;
+        }
+        if !self.connection_ready() {
+            self.report_error(
+                "Reconnect the citation's environment before opening its source",
+                cx,
+            );
+            return false;
+        }
+        self.select_thread(thread, window, cx);
+        if self.selected_thread.as_deref() != Some(thread) {
+            return false;
+        }
+        self.conversation_presentation.citation_navigation =
+            Some(crate::conversation_presentation::CitationNavigation {
+                generation: self.generation,
+                environment: self.environment_scope.clone(),
+                citation: citation.clone(),
+                unavailable: false,
+            });
+        cx.notify();
+        true
+    }
+
+    pub(super) fn resolve_citation_navigation(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.conversation_presentation.citation_navigation.as_ref() else {
+            return;
+        };
+        if pending.generation != self.generation
+            || pending.environment != self.environment_scope
+            || pending.citation["threadId"].as_str() != self.selected_thread.as_deref()
+        {
+            self.conversation_presentation.citation_navigation = None;
+            return;
+        }
+        if pending.unavailable {
+            return;
+        }
+        let citation = pending.citation.clone();
+        let found = self
+            .detail
+            .thread
+            .as_ref()
+            .and_then(|thread| thread["messages"].as_array())
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["id"] == citation["messageId"] && message["role"] == "assistant"
+                })
+            });
+        if found {
+            self.conversation_presentation.citation_navigation = None;
+            self.jump_to_citation(&citation, cx);
+        } else if self.detail.synchronized {
+            self.citation_navigation_failed(citation["threadId"].as_str().unwrap_or_default(), cx);
+            self.report_error(
+                "Citation source response is unavailable; the saved quote is unchanged",
+                cx,
+            );
+        }
+    }
+
+    pub(crate) fn citation_navigation_failed(&mut self, thread: &str, cx: &mut Context<Self>) {
+        if let Some(pending) = self.conversation_presentation.citation_navigation.as_mut()
+            && pending.generation == self.generation
+            && pending.environment == self.environment_scope
+            && pending.citation["threadId"] == thread
+        {
+            pending.unavailable = true;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn render_citation_navigation(&self, cx: &Context<Self>) -> Option<gpui_kit::Div> {
+        let pending = self
+            .conversation_presentation
+            .citation_navigation
+            .as_ref()?;
+        if pending.generation != self.generation
+            || pending.environment != self.environment_scope
+            || pending.citation["threadId"].as_str() != self.selected_thread.as_deref()
+        {
+            return None;
+        }
+        let unavailable = pending.unavailable;
+        let navigation_generation = pending.generation;
+        let cancel_citation = pending.citation.clone();
+        Some(
+            div()
+                .debug_selector(|| "citation-source-status".into())
+                .flex()
+                .flex_col()
+                .items_start()
+                .min_w_0()
+                .gap_1()
+                .p_2()
+                .child(if unavailable {
+                    "Source response unavailable · saved quote preserved"
+                } else {
+                    "Loading cited conversation…"
+                })
+                .when(unavailable, |view| {
+                    let citation = pending.citation.clone();
+                    view.child(
+                        Button::new("citation-navigation-retry")
+                            .debug_selector(|| "citation-navigation-retry".into())
+                            .ghost()
+                            .xsmall()
+                            .label("Reload source")
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                if app.generation != navigation_generation
+                                    || !app
+                                        .conversation_presentation
+                                        .citation_navigation
+                                        .as_ref()
+                                        .is_some_and(|pending| pending.citation == citation)
+                                {
+                                    return;
+                                }
+                                if !app.load_citation_source(&citation, window, cx) {
+                                    return;
+                                }
+                                if let Err(error) =
+                                    app.send_thread_selection(app.selected_thread.clone())
+                                {
+                                    app.report_error(error, cx);
+                                    return;
+                                }
+                                app.detail = Default::default();
+                                cx.notify();
+                            })),
+                    )
+                })
+                .child(
+                    Button::new("citation-navigation-cancel")
+                        .debug_selector(|| "citation-navigation-cancel".into())
+                        .ghost()
+                        .xsmall()
+                        .label(if unavailable { "Dismiss" } else { "Cancel" })
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            if app.generation != navigation_generation
+                                || !app
+                                    .conversation_presentation
+                                    .citation_navigation
+                                    .as_ref()
+                                    .is_some_and(|pending| pending.citation == cancel_citation)
+                            {
+                                return;
+                            }
+                            app.conversation_presentation.citation_navigation = None;
+                            cx.notify();
+                        })),
+                ),
+        )
     }
 
     pub(crate) fn jump_to_citation(&mut self, citation: &Value, cx: &mut Context<Self>) {

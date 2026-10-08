@@ -40,7 +40,8 @@ impl NativeApp {
             return;
         }
         for id in self.queues.thread_ids() {
-            if !self.queues.has_queued(&id) || self.queue_details.contains_key(&id) {
+            if !self.queues.has_queued(&id) || self.queue_details.contains_key(&id)
+                || (self.pending_threads.iter().any(|d| d.thread.id == id) && !self.shell.threads.iter().any(|t| t.id == id)) {
                 continue;
             }
             self.queue_subscription_epoch += 1;

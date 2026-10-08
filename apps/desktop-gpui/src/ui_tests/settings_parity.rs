@@ -78,6 +78,7 @@ fn palette_search_selects_thread_and_targets_new_thread_project(cx: &mut TestApp
     cx.run_until_parked();
     app.read_with(cx, |app, _| {
         assert_eq!(app.selected_project.as_deref(), Some("p2"));
+        assert!(!app.pending_threads.is_empty(), "creation: {} settings={:?}", app.status, app.project_settings);
         assert_eq!(app.pending_threads.last().unwrap().thread.project_id, "p2");
     });
 }

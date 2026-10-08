@@ -28,6 +28,25 @@ fn byte_offset(text: &str, offset: usize) -> usize {
 }
 
 impl NativeApp {
+    pub(super) fn terminal_observe_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_drawer.focus_subscription.is_none() {
+            let owner = cx.entity().downgrade();
+            self.terminal_drawer.focus_subscription =
+                Some(
+                    window.on_focus_out(&self.terminal_drawer.focus, cx, move |_, _, cx| {
+                        // Focus can change inside an app callback. Defer the entity
+                        // update rather than trying to reborrow that live callback.
+                        let owner = owner.clone();
+                        cx.defer(move |cx| {
+                            let _ = owner.update(cx, |app, cx| {
+                                app.terminal_drawer.composition = None;
+                                cx.notify();
+                            });
+                        });
+                    }),
+                );
+        }
+    }
     pub(crate) fn clamp_terminal_height(&mut self, window: &Window) {
         self.terminal_drawer.height = crate::window_state::clamp_width(
             self.terminal_drawer.height,
@@ -71,8 +90,9 @@ impl NativeApp {
 }
 
 impl EntityInputHandler for NativeApp {
-    fn paste(&mut self, item: ClipboardItem, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = item.text()
+    fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_drawer.focus.is_focused(window)
+            && let Some(text) = item.text()
             && let Some(id) = self.terminal_text_target()
             && let Some(tab) = self.terminal_active()
         {
@@ -119,8 +139,13 @@ impl EntityInputHandler for NativeApp {
             .map(|mark| 0..mark.text.encode_utf16().count())
     }
 
-    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let target = self.terminal_text_target();
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self
+            .terminal_drawer
+            .focus
+            .is_focused(window)
+            .then(|| self.terminal_text_target())
+            .flatten();
         let current = self.terminal_composition().is_some();
         if let Some(mark) = self.terminal_drawer.composition.take()
             && current
@@ -136,7 +161,7 @@ impl EntityInputHandler for NativeApp {
         &mut self,
         _: Option<Range<usize>>,
         text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A committed insert replaces the local preedit, never edits shell history.
@@ -144,6 +169,7 @@ impl EntityInputHandler for NativeApp {
             self.terminal_drawer.composition.is_some() && self.terminal_composition().is_none();
         self.terminal_drawer.composition = None;
         if !stale
+            && self.terminal_drawer.focus.is_focused(window)
             && !text.is_empty()
             && let Some(id) = self.terminal_text_target()
         {
@@ -157,10 +183,16 @@ impl EntityInputHandler for NativeApp {
         range: Option<Range<usize>>,
         text: &str,
         selection: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.terminal_text_target() else {
+        let Some(id) = self
+            .terminal_drawer
+            .focus
+            .is_focused(window)
+            .then(|| self.terminal_text_target())
+            .flatten()
+        else {
             self.terminal_drawer.composition = None;
             return;
         };
@@ -228,7 +260,7 @@ impl EntityInputHandler for NativeApp {
         )
     }
 
-    fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
-        self.terminal_text_target().is_some()
+    fn accepts_text_input(&self, window: &mut Window, _: &mut Context<Self>) -> bool {
+        self.terminal_drawer.focus.is_focused(window) && self.terminal_text_target().is_some()
     }
 }

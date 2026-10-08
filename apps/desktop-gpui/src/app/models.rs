@@ -458,12 +458,15 @@ impl NativeApp {
                 .iter()
                 .find(|draft| &draft.thread.id == id)
             {
+                if let Ok(defaults) = self.pending_defaults(draft) {
+                    return (defaults.runtime_mode, defaults.interaction_mode);
+                }
                 return (
                     draft
                         .thread
                         .runtime_mode
                         .clone()
-                        .unwrap_or_else(|| "full-access".into()),
+                        .unwrap_or_else(|| "unavailable".into()),
                     draft
                         .thread
                         .interaction_mode
@@ -523,9 +526,11 @@ impl NativeApp {
             .iter_mut()
             .find(|draft| draft.thread.id == id)
         {
+            draft.defaults_override.environment = self.environment_scope.clone();
+            draft.defaults_override.project = draft.thread.project_id.clone();
             match field {
-                "runtimeMode" => draft.thread.runtime_mode = Some(value.to_owned()),
-                "interactionMode" => draft.thread.interaction_mode = Some(value.to_owned()),
+                "runtimeMode" => { draft.thread.runtime_mode = Some(value.to_owned()); draft.defaults_override.runtime_mode = Some(value.into()); },
+                "interactionMode" => { draft.thread.interaction_mode = Some(value.to_owned()); draft.defaults_override.interaction_mode = Some(value.into()); },
                 _ => {}
             }
             if let Some(store) = &mut self.draft_store {

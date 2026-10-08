@@ -202,9 +202,25 @@ impl Screen {
             text.replace("\r\n", "\n").replace('\n', "\r")
         }
     }
-    /// Resolve explicit OSC-8 links or a URL token under the pointer. Never open
-    /// shell/file/javascript schemes delivered by untrusted terminal output.
+    /// Resolve explicit OSC-8 links or a URL token under the pointer.
     pub fn link_at(&self, row: usize, col: usize) -> Option<String> {
+        let candidate = self.link_token_at(row, col)?;
+        let url = url::Url::parse(&candidate).ok()?;
+        (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then_some(url.into())
+    }
+    /// File paths are data for the owned workspace reader, never OS URL launches.
+    pub fn file_link_at(&self, row: usize, col: usize) -> Option<String> {
+        let candidate = self.link_token_at(row, col)?;
+        if candidate.starts_with("file://") {
+            let url = url::Url::parse(&candidate).ok()?;
+            return (url.host_str().is_none_or(|host| host == "localhost")).then_some(candidate);
+        }
+        let windows = candidate.as_bytes().get(1) == Some(&b':')
+            && matches!(candidate.as_bytes().get(2), Some(b'/' | b'\\'));
+        (candidate.contains(['/', '\\']) && (!candidate.contains("://") || windows))
+            .then(|| candidate.trim_end_matches(':').to_owned())
+    }
+    fn link_token_at(&self, row: usize, col: usize) -> Option<String> {
         if row >= self.size.rows || col >= self.size.cols {
             return None;
         }
@@ -278,8 +294,7 @@ impl Screen {
             }
             candidate
         };
-        let url = url::Url::parse(&candidate).ok()?;
-        (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then_some(url.into())
+        Some(candidate)
     }
     pub fn cells(&self) -> Vec<Cell> {
         let content = self.term.renderable_content();
@@ -368,6 +383,24 @@ mod tests {
             wrapped.link_at(1, 2).as_deref(),
             Some("https://example.org/wiki/A_(B)")
         );
+    }
+    #[test]
+    fn r16_t_wrapped_compiler_paths_and_local_file_osc8_are_data_not_os_urls() {
+        let mut screen = Screen::new(Size::new(20, 3));
+        screen.feed("src/long_directory/main.rs:12:4:");
+        assert_eq!(
+            screen.file_link_at(1, 2).as_deref(),
+            Some("src/long_directory/main.rs:12:4")
+        );
+        assert_eq!(screen.link_at(1, 2), None);
+        screen.reset("\x1b]8;;file:///repo/a%20b.rs\x1b\\source\x1b]8;;\x1b\\");
+        assert_eq!(
+            screen.file_link_at(0, 1).as_deref(),
+            Some("file:///repo/a%20b.rs")
+        );
+        assert_eq!(screen.link_at(0, 1), None);
+        screen.reset("\x1b]8;;file://other/repo/a.rs\x1b\\source\x1b]8;;\x1b\\");
+        assert_eq!(screen.file_link_at(0, 1), None);
     }
     #[test]
     fn terminal_search_wraps_both_directions_and_selects_unicode_scrollback() {

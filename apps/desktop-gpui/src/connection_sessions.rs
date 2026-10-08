@@ -292,6 +292,9 @@ impl Registry {
             }
             Ok(Update::Status(status)) => EventKind::Status(status),
             Ok(Update::Error(error)) => EventKind::Error(error),
+            Ok(Update::ThreadError { thread_id, error }) => {
+                if session.selected_thread.as_deref() == Some(&thread_id) { EventKind::Error(error) } else { EventKind::Thread }
+            }
             Ok(Update::Subscription { key, item }) => EventKind::Subscription { key, item },
         };
         Some(Event {

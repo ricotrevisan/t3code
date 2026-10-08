@@ -85,6 +85,9 @@ pub(crate) struct ComposerState {
         std::collections::HashMap<(String, String), std::sync::Arc<gpui_kit::Image>>,
     retired_previews: std::cell::RefCell<Vec<std::sync::Arc<gpui_kit::Image>>>,
     pub(crate) pending_paste: Option<(crate::app::attachments::AttachmentScope, String)>,
+    pub(crate) plan_intents:
+        std::collections::HashMap<(String, String), t3code_desktop_gpui::drafts::PlanIntent>,
+    pub(crate) plan_confirmations: std::collections::HashMap<String, (u64, String, bool)>,
     pub(crate) contexts: std::collections::HashMap<
         (String, String),
         Vec<t3code_desktop_gpui::draft_context::DraftContextRecord>,

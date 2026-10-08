@@ -17,6 +17,8 @@ struct EnvironmentDrafts {
     contexts: BTreeMap<String, Vec<crate::draft_context::DraftContextRecord>>,
     stash: Vec<StashEntry>,
     #[serde(default)]
+    plan_intents: BTreeMap<String, PlanIntent>,
+    #[serde(default)]
     model_preferences: Vec<ModelPreference>,
 }
 
@@ -29,6 +31,39 @@ pub struct ModelPreference {
     pub hidden: bool,
 }
 
+/// Source attribution is durable; a mode acceptance is deliberately not serialized.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanIntent {
+    pub id: String,
+    pub environment: String,
+    pub source_thread: String,
+    pub plan: String,
+    pub mode: String,
+    pub prompt: String,
+}
+
+impl PlanIntent {
+    pub fn new(
+        environment: String,
+        source_thread: String,
+        plan: String,
+        mode: String,
+        prompt: String,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            environment,
+            source_thread,
+            plan,
+            mode,
+            prompt,
+        }
+    }
+    pub fn source(&self) -> serde_json::Value {
+        serde_json::json!({"threadId":self.source_thread,"planId":self.plan})
+    }
+}
+
 /// A stash owns its uploaded references; these never remain on the cleared draft.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "StoredStash")]
@@ -38,6 +73,11 @@ pub struct StashEntry {
     pub prompt: String,
     pub attachments: Vec<serde_json::Value>,
     pub context: Option<serde_json::Value>,
+    #[serde(default)]
+    pub plan_intent: Option<PlanIntent>,
+    /// An interrupted queue is recovered for review, never automatically replayed.
+    #[serde(default)]
+    pub queued_for: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +92,10 @@ enum StoredStash {
         attachments: Vec<serde_json::Value>,
         #[serde(default)]
         context: Option<serde_json::Value>,
+        #[serde(default)]
+        plan_intent: Option<Box<PlanIntent>>,
+        #[serde(default)]
+        queued_for: Option<String>,
     },
 }
 
@@ -65,12 +109,16 @@ impl From<StoredStash> for StashEntry {
                 prompt,
                 attachments,
                 context,
+                plan_intent,
+                queued_for,
             } => Self {
                 id,
                 created_at,
                 prompt,
                 attachments,
                 context,
+                plan_intent: plan_intent.map(|intent| *intent),
+                queued_for,
             },
         }
     }
@@ -85,10 +133,18 @@ impl StashEntry {
             prompt,
             attachments,
             context,
+            plan_intent: None,
+            queued_for: None,
         }
     }
     pub fn snippet(&self) -> String {
         let text = self.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some(thread) = &self.queued_for {
+            return format!(
+                "Interrupted queue ({thread}) · {}",
+                text.chars().take(70).collect::<String>()
+            );
+        }
         if text.is_empty() {
             return format!("({} attachments)", self.attachments.len());
         }
@@ -106,6 +162,14 @@ pub struct PendingThread {
     pub created_at: String,
     pub prepare_worktree: Option<serde_json::Value>,
     pub run_setup_script: bool,
+    #[serde(default)]
+    pub defaults_override: crate::project_actions::DraftDefaultsOverride,
+    #[serde(default)]
+    pub project_file: Option<serde_json::Value>,
+    #[serde(default)]
+    pub project_file_loaded: bool,
+    #[serde(default)]
+    pub base_branch: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +348,7 @@ impl Drafts {
             .entry(environment.into())
             .or_default();
         if text.is_empty() {
+            state.plan_intents.remove(thread);
             state.drafts.remove(thread);
         } else {
             state.drafts.insert(thread.into(), text);
@@ -332,6 +397,30 @@ impl Drafts {
             .get(environment)
             .map(|e| e.stash.clone())
             .unwrap_or_default()
+    }
+    pub fn plan_intent(&self, environment: &str, thread: &str) -> Option<PlanIntent> {
+        self.state
+            .borrow()
+            .document
+            .environments
+            .get(environment)?
+            .plan_intents
+            .get(thread)
+            .cloned()
+    }
+    pub fn set_plan_intent(&mut self, environment: &str, thread: &str, intent: Option<PlanIntent>) {
+        let mut draft = self.state.borrow_mut();
+        let state = draft
+            .document
+            .environments
+            .entry(environment.into())
+            .or_default();
+        if let Some(intent) = intent {
+            state.plan_intents.insert(thread.into(), intent);
+        } else {
+            state.plan_intents.remove(thread);
+        }
+        draft.revision += 1;
     }
     pub fn contexts(
         &self,
@@ -403,6 +492,7 @@ impl Drafts {
     ) -> Option<StashEntry> {
         let record = self.take_stash(environment, id)?;
         self.set(environment, thread, record.prompt.clone());
+        self.set_plan_intent(environment, thread, record.plan_intent.clone());
         let records = record
             .context
             .as_ref()
@@ -558,7 +648,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("drafts.json");
         let mut store = Drafts::open(path.clone()).unwrap();
-        let draft=PendingThread{thread:serde_json::from_value(serde_json::json!({"id":"draft","projectId":"p","title":"Owned draft","modelSelection":{"instanceId":"codex","model":"gpt-6-astra"}})).unwrap(),created_at:crate::commands::now(),prepare_worktree:Some(serde_json::json!({"projectCwd":"/tmp/owned","baseBranch":"main","startFromOrigin":true})),run_setup_script:true};
+        let draft=PendingThread{thread:serde_json::from_value(serde_json::json!({"id":"draft","projectId":"p","title":"Owned draft","modelSelection":{"instanceId":"codex","model":"gpt-6-astra"}})).unwrap(),created_at:crate::commands::now(),prepare_worktree:Some(serde_json::json!({"projectCwd":"/tmp/owned","baseBranch":"main","startFromOrigin":true})),run_setup_script:true,defaults_override:Default::default(),project_file:None,project_file_loaded:false,base_branch:None};
         store.put_pending("a", draft);
         store.set("a", "draft", "Unsent 世界".into());
         store.write_snapshot().unwrap().persist().unwrap();
@@ -592,6 +682,42 @@ mod tests {
         assert_eq!(reopened.unstash("local"), Some("Saved prompt".into()));
         assert!(reopened.unstash("remote").is_none());
     }
+    #[test]
+    fn r16_c_plan_intent_stash_restart_preserves_edited_source_and_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let mut store = Drafts::open(path.clone()).unwrap();
+        let intent = PlanIntent::new(
+            "office".into(),
+            "source".into(),
+            "plan-1".into(),
+            "default".into(),
+            "edited implementation".into(),
+        );
+        store.set("office", "t", intent.prompt.clone());
+        store.set_plan_intent("office", "t", Some(intent.clone()));
+        let mut stash = StashEntry::new(intent.prompt.clone(), vec![]);
+        stash.plan_intent = Some(intent.clone());
+        let id = stash.id.clone();
+        store.stash_record("office", stash);
+        store.set("office", "t", String::new());
+        store.write_snapshot().unwrap().persist().unwrap();
+        let mut restarted = Drafts::open(path.clone()).unwrap();
+        assert!(restarted.plan_intent("office", "t").is_none());
+        assert!(restarted.plan_intent("lab", "t").is_none());
+        restarted
+            .restore_record("office", "new-destination", &id)
+            .unwrap();
+        restarted.write_snapshot().unwrap().persist().unwrap();
+        let restarted = Drafts::open(path).unwrap();
+        assert_eq!(
+            restarted.plan_intent("office", "new-destination"),
+            Some(intent)
+        );
+        assert!(restarted.plan_intent("lab", "new-destination").is_none());
+        assert!(restarted.stashes("office").is_empty());
+    }
+
     #[test]
     fn corrupted_or_future_storage_is_never_silently_overwritten() {
         let directory = tempfile::tempdir().unwrap();

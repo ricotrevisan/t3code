@@ -330,6 +330,7 @@ impl NativeApp {
                 self.conversation_rows = Rc::new(rows);
                 self.detail.tail_change = None;
             }
+            self.resolve_citation_navigation(cx);
             if self
                 .conversation_presentation
                 .jump
@@ -359,6 +360,7 @@ impl NativeApp {
             let rows = self.conversation_rows.clone();
             let app = cx.weak_entity();
             return conversation
+                .children(self.render_citation_navigation(cx))
                 .py_2()
                 .child(self.render_timeline_navigator(cx))
                 .child(
@@ -397,7 +399,10 @@ impl NativeApp {
                 })
                 .children(self.render_message_gallery(cx));
         }
-        let conversation = conversation.overflow_y_scroll().gap_2().p_3();
+        self.resolve_citation_navigation(cx);
+        let conversation = conversation
+            .children(self.render_citation_navigation(cx))
+            .overflow_y_scroll().gap_2().p_3();
         if self
             .pending_threads
             .iter()
@@ -1676,7 +1681,7 @@ impl NativeApp {
                 generation,
                 environment: environment.clone(),
                 thread: thread.clone(),
-                plan: plan_id,
+                plan: plan_id.clone(),
                 prompt: prompt.clone(),
                 mode: mode.into(),
                 accepted: None,
@@ -1716,9 +1721,16 @@ impl NativeApp {
         })
         .detach();
         self.composer.update(cx, |input, cx| {
-            input.set_value(prompt, window, cx);
+            input.set_value(prompt.clone(), window, cx);
             input.focus(window, cx);
         });
+        self.capture_plan_intent(Some(t3code_desktop_gpui::drafts::PlanIntent::new(
+            self.environment_scope.clone(),
+            self.selected_thread.clone().expect("captured plan thread"),
+            plan_id,
+            mode.into(),
+            prompt,
+        )));
         self.remember_composer_draft(cx);
         self.report_success(
             "Plan follow-up prepared · review and Send after the mode receipt",

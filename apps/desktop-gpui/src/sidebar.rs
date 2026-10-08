@@ -33,6 +33,7 @@ pub struct State {
     pub selection_anchor: Option<String>,
     pub bulk_delete_review: Option<(u64, String, Vec<String>)>,
     pub bulk_snooze_review: Option<Vec<String>>,
+    pub bulk_snooze_window: Option<gpui_kit::AnyWindowHandle>,
     pub bulk_busy: bool,
     pub bulk_generation: u64,
     /// Search contracts expose timestamps, not message IDs. Timeline resolves

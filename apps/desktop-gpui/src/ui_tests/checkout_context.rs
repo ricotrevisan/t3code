@@ -681,6 +681,10 @@ fn unsent_draft_checkout_stays_local_and_retains_prompt(cx: &mut TestAppContext)
                 created_at: commands::now(),
                 prepare_worktree: None,
                 run_setup_script: false,
+                defaults_override: Default::default(),
+                project_file: None,
+                project_file_loaded: false,
+                base_branch: None,
             });
             app.composer
                 .update(cx, |input, cx| input.set_value("local prompt", window, cx));

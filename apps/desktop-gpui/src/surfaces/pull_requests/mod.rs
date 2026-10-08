@@ -3,6 +3,8 @@ mod http;
 #[cfg(test)]
 pub(crate) mod http_tests;
 mod model;
+mod reactions;
+mod threads;
 mod view;
 use crate::{NativeApp, RightTab};
 use gpui_kit::component::input::{InputState, TextareaState};
@@ -58,6 +60,8 @@ pub(crate) struct State {
     pub merge_confirm: bool,
     pub discard_confirm: bool,
     pub anchor: Option<Value>,
+    pub replying: Option<String>,
+    pub reacting: Option<Option<String>>,
     pub query: Option<Entity<InputState>>,
     pub candidate_query: Option<Entity<InputState>>,
     pub inline_body: Option<Entity<TextareaState>>,
@@ -76,7 +80,12 @@ pub(crate) struct Draft {
     pub comments: Vec<Value>,
     pub verdict: &'static str,
     pub pending: bool,
+    pub replies: HashMap<String, ReplyDraft>,
     _subscriptions: Vec<gpui_kit::Subscription>,
+}
+pub(crate) struct ReplyDraft {
+    pub input: Entity<TextareaState>,
+    _subscription: gpui_kit::Subscription,
 }
 impl State {
     fn new(window: &mut Window, cx: &mut Context<NativeApp>) -> Self {
@@ -102,10 +111,20 @@ impl State {
             ..Default::default()
         }
     }
+    pub fn resource_key(&self, reference: &Value) -> String {
+        // JSON object insertion order is not resource identity. Header, list,
+        // and host references can carry the same fields in different orders.
+        json!([
+            self.environment,
+            reference["projectId"],
+            reference["host"],
+            reference["repository"],
+            reference["number"]
+        ])
+        .to_string()
+    }
     pub fn key(&self) -> Option<String> {
-        self.reference
-            .as_ref()
-            .map(|r| format!("{}:{}", self.environment, r))
+        self.reference.as_ref().map(|r| self.resource_key(r))
     }
     pub fn draft(&self) -> Option<&Draft> {
         self.drafts.get(&self.key()?)
@@ -141,6 +160,7 @@ struct Submitted {
     body: String,
     comments: Vec<Value>,
     review: bool,
+    reply_thread: Option<String>,
     window: AnyWindowHandle,
 }
 impl NativeApp {
@@ -166,7 +186,8 @@ impl NativeApp {
             self.pull_requests.anchor = None;
         }
         self.set_inspector_open(true, cx);
-        self.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
+        self.browser_panel
+            .update(cx, |panel, cx| panel.deactivate(cx));
         self.right_tab = RightTab::PullRequests;
         if self.pull_requests.list.is_null() && self.pull_requests.reference.is_none() {
             self.pr_list(false, cx);
@@ -264,10 +285,10 @@ impl NativeApp {
     }
     pub(crate) fn pr_open(&mut self, r: Value, window: &mut Window, cx: &mut Context<Self>) {
         self.open_pull_requests(window, cx);
-        if reference(&r).is_none() {
+        let Some(r) = reference(&r) else {
             return;
-        }
-        let key = format!("{}:{}", self.environment_scope, r);
+        };
+        let key = self.pull_requests.resource_key(&r);
         if !self.pull_requests.drafts.contains_key(&key) {
             // Never silently evict an unsent review to make room for another resource.
             if self.pull_requests.drafts.len() >= 32 {
@@ -276,6 +297,9 @@ impl NativeApp {
                         || !d.comments.is_empty()
                         || !d.comment.read(cx).value().is_empty()
                         || !d.review.read(cx).value().is_empty()
+                        || d.replies
+                            .values()
+                            .any(|reply| !reply.input.read(cx).value().is_empty())
                 });
             }
             if self.pull_requests.drafts.len() >= 32 {
@@ -298,6 +322,7 @@ impl NativeApp {
                     comments: vec![],
                     verdict: "comment",
                     pending: false,
+                    replies: HashMap::new(),
                     _subscriptions: subscriptions,
                 },
             );
@@ -325,6 +350,8 @@ impl NativeApp {
         self.pull_requests.discard_confirm = false;
         self.pull_requests.merge_confirm = false;
         self.pull_requests.anchor = None;
+        self.pull_requests.replying = None;
+        self.pull_requests.reacting = None;
         self.pr_refresh(cx);
     }
     pub(crate) fn pr_refresh(&mut self, cx: &mut Context<Self>) {
@@ -414,12 +441,16 @@ impl NativeApp {
                         // Consume the accepted captured draft even if another PR is visible.
                         // Never consume text or comments typed after the submitted snapshot.
                         if let Some(draft) = app.pull_requests.drafts.get_mut(&sent.key) {
-                            let field = if sent.review {
-                                &draft.review
+                            let field = if let Some(thread) = &sent.reply_thread {
+                                draft.replies.get(thread).map(|reply| &reply.input)
+                            } else if sent.review {
+                                Some(&draft.review)
                             } else {
-                                &draft.comment
+                                Some(&draft.comment)
                             };
-                            if field.read(cx).value().as_str() == sent.body {
+                            if let Some(field) = field
+                                && field.read(cx).value().as_str() == sent.body
+                            {
                                 field.update(cx, |input, cx| input.set_value("", window, cx));
                             }
                             if sent.review {
@@ -698,6 +729,7 @@ impl NativeApp {
                 body,
                 comments: vec![],
                 review: false,
+                reply_thread: None,
                 window: window.window_handle(),
             }),
             cx,
@@ -721,6 +753,7 @@ impl NativeApp {
                 body,
                 comments,
                 review: true,
+                reply_thread: None,
                 window: window.window_handle(),
             }),
             cx,

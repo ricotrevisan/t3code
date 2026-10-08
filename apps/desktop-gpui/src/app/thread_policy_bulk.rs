@@ -170,20 +170,22 @@ impl NativeApp {
         cx.notify();
     }
 
+    #[cfg(test)]
     pub(crate) fn bulk_thread_lifecycle(
         &mut self,
         action: &str,
         kind: &str,
         cx: &mut Context<Self>,
     ) {
-        self.bulk_thread_lifecycle_until(action, kind, None, cx);
+        self.bulk_thread_lifecycle_reviewed(action, kind, None, None, cx);
     }
 
-    pub(crate) fn bulk_thread_lifecycle_until(
+    pub(crate) fn bulk_thread_lifecycle_reviewed(
         &mut self,
         action: &str,
         kind: &str,
         until: Option<String>,
+        window: Option<gpui_kit::AnyWindowHandle>,
         cx: &mut Context<Self>,
     ) {
         if !self.connection_ready()
@@ -221,7 +223,7 @@ impl NativeApp {
         );
         if action == "delete" && self.sidebar_state.bulk_delete_review.as_ref() != Some(&review) {
             self.sidebar_state.bulk_delete_review = Some(review);
-            self.report_error("Review selected targets; click Delete again to permanently clear their conversation history", cx);
+            cx.notify();
             return;
         }
         self.sidebar_state.bulk_delete_review = None;
@@ -276,6 +278,10 @@ impl NativeApp {
             self.report_error("No selected threads can perform this action", cx);
             return;
         }
+        let departing = matches!(action, "delete" | "archive" | "settle" | "snooze");
+        let captured_selection = self.selected_thread.clone();
+        let captured_order = self.sidebar_selectable_order();
+        let batch_targets = self.sidebar_state.selection.clone();
         let action = action.to_owned();
         let capabilities = capabilities.clone();
         let generation = self.generation;
@@ -292,8 +298,12 @@ impl NativeApp {
             let mut inverses = Vec::new();
             for (id, payload, inverse) in calls {
                 let current = entity
-                    .read_with(cx, |app, _| {
-                        app.generation == generation
+                    .update(cx, |app, cx| {
+                        let checkout_safe = !matches!(action.as_str(), "archive" | "delete")
+                            || app.selected_thread.as_deref() != Some(&id)
+                            || app.can_change_checkout(cx);
+                        checkout_safe
+                            && app.generation == generation
                             && app.environment_scope == environment
                             && app.sidebar_selectable_order().contains(&id)
                             && app
@@ -341,6 +351,58 @@ impl NativeApp {
                     }
                     Err(error) => failures.push(format!("{id}: {error}")),
                 }
+            }
+            if departing
+                && captured_selection
+                    .as_ref()
+                    .is_some_and(|id| succeeded.contains(id))
+                && let Some(window) = window
+            {
+                let _ = window.update(cx, |_, window, cx| {
+                    entity.update(cx, |app, cx| {
+                        if app.generation != generation
+                            || app.environment_scope != environment
+                            || app.selected_thread != captured_selection
+                            || !app.can_change_checkout(cx)
+                        {
+                            return;
+                        }
+                        // Prefer a survivor outside this batch, never a pending
+                        // destructive target. A rejected target remains a fallback.
+                        let available = app.sidebar_selectable_order();
+                        let survivor = captured_order
+                            .iter()
+                            .find(|id| !batch_targets.contains(id) && available.contains(id))
+                            .or_else(|| {
+                                captured_order
+                                    .iter()
+                                    .find(|id| !succeeded.contains(id) && available.contains(id))
+                            });
+                        if let Some(id) = survivor {
+                            app.select_thread(id, window, cx);
+                        } else {
+                            if let Some(previous) = &app.selected_thread {
+                                app.drafts.insert(
+                                    previous.clone(),
+                                    app.composer.read(cx).value().to_string(),
+                                );
+                            }
+                            app.stash_attachment_draft();
+                            app.reset_checkout_context(window, cx);
+                            app.selected_thread = None;
+                            app.pending_history_attached = false;
+                            app.sidebar_state.message_anchor = None;
+                            if app.commands.is_some() && app.send_thread_selection(None).is_err() {
+                                app.report_error("Connection busy or closed; retry selection", cx);
+                            }
+                            app.detail = Default::default();
+                            app.conversation_rows = Default::default();
+                            app.composer
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                        }
+                        cx.notify();
+                    })
+                });
             }
             let _ = entity.update(cx, |app, cx| {
                 if app.generation != generation || app.environment_scope != environment {

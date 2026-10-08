@@ -2,7 +2,6 @@ use crate::NativeApp;
 use gpui_kit::component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
-    menu::{DropdownMenu, PopupMenuItem},
 };
 use gpui_kit::{Context, div, prelude::*};
 impl NativeApp {
@@ -49,12 +48,6 @@ impl NativeApp {
             )
     }
     pub(crate) fn render_diff_options(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let refs = self
-            .refs
-            .iter()
-            .map(|row| row.name.clone())
-            .collect::<Vec<_>>();
-        let entity = cx.entity().downgrade();
         div()
             .flex()
             .flex_wrap()
@@ -67,7 +60,7 @@ impl NativeApp {
                     .label(if self.diffs.split { "Unified" } else { "Split" })
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.diffs.split = !app.diffs.split;
-                        cx.notify();
+                        app.save_diff_preferences(cx);
                     })),
             )
             .when(self.diffs.git_scope.is_some(), |view| {
@@ -83,6 +76,7 @@ impl NativeApp {
                         })
                         .on_click(cx.listener(|app, _, _, cx| {
                             app.diffs.ignore_whitespace = !app.diffs.ignore_whitespace;
+                            app.save_diff_preferences(cx);
                             if let Some(scope) = app.diffs.git_scope.clone() {
                                 app.view_git_diff(&scope, cx);
                             }
@@ -111,7 +105,15 @@ impl NativeApp {
                             .ghost()
                             .small()
                             .label("Load full before / after")
-                            .disabled(self.diffs.full_file_loading || !self.connection_ready())
+                            .disabled(
+                                self.diffs.full_file_loading
+                                    || !self.connection_ready()
+                                    || self
+                                        .diffs
+                                        .files
+                                        .get(self.diffs.selected_file)
+                                        .is_none_or(|file| !file.loaded),
+                            )
                             .on_click(cx.listener(|app, _, _, cx| app.load_diff_file_contents(cx))),
                     )
                 },
@@ -121,38 +123,16 @@ impl NativeApp {
                 |view| {
                     view.child(
                         Button::new("diff-base-ref")
+                            .debug_selector(|| "diff-base-ref".into())
                             .ghost()
                             .small()
                             .label(format!(
                                 "Base: {}",
                                 self.diffs.base_ref.as_deref().unwrap_or("Automatic")
                             ))
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for base in std::iter::once(None)
-                                    .chain(refs.iter().map(|r| Some(r.clone())))
-                                {
-                                    let entity = entity.clone();
-                                    let label =
-                                        base.clone().unwrap_or_else(|| "Automatic base".into());
-                                    menu = menu.item(PopupMenuItem::new(label).on_click(
-                                        move |_, _, cx| {
-                                            let _ = entity.update(cx, |app, cx| {
-                                                app.diffs.base_ref = base.clone();
-                                                app.view_git_diff("branch-range", cx);
-                                            });
-                                        },
-                                    ));
-                                }
-                                menu
-                            }),
-                    )
-                    .child(
-                        Button::new("diff-refresh-refs")
-                            .ghost()
-                            .small()
-                            .label("Refresh refs")
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.worktree_operation("vcs.listRefs", false, cx)
+                            .disabled(!self.connection_ready())
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.show_diff_comparison(window, cx)
                             })),
                     )
                 },

@@ -39,6 +39,9 @@ impl Projection {
                 }
             }
             Update::Subscription { .. } => {}
+            Update::ThreadError { thread_id, error } => {
+                if self.selected.as_deref() == Some(&thread_id) { return Err(error.into()); }
+            }
             Update::Phase(connection::Phase::Error(error)) | Update::Error(error) => return Err(error.into()),
             Update::Phase(_) => {}
             Update::Status(status) => {

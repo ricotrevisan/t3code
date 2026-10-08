@@ -40,7 +40,7 @@ impl NativeApp {
     }
     fn render_header_band(
         &self,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let width = f32::from(window.viewport_size().width)
@@ -60,6 +60,16 @@ impl NativeApp {
             .overflow_focus
             .get_or_init(|| cx.focus_handle())
             .clone();
+        let title_focus = self
+            .header_rename
+            .title_focus
+            .get_or_init(|| cx.focus_handle())
+            .clone();
+        self.header_rename.title_blur.get_or_init(|| {
+            cx.on_blur(&title_focus, window, |app, _, _| {
+                app.header_rename.pending_title_menu = None;
+            })
+        });
         let overflow_bounds = self.header_rename.overflow_bounds.clone();
         let overflow_offset = self
             .header_rename
@@ -160,6 +170,7 @@ impl NativeApp {
                             view.child(
                                 div()
                                     .id("header-title")
+                                    .track_focus(&title_focus)
                                     .debug_selector(|| "header-title".into())
                                     .flex_1()
                                     .min_w_0()
@@ -172,18 +183,28 @@ impl NativeApp {
                                         }
                                     })
                                     .cursor_pointer()
+                                    .on_key_down(cx.listener(|app, event: &gpui_kit::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                            app.header_rename.pending_title_menu = None;
+                                            app.close_thread_menu();
+                                            app.thread_menu_open = true;
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }
+                                    }))
                                     .on_click(cx.listener({
                                         let title = title.clone();
                                         move |app, event: &gpui_kit::ClickEvent, window, cx| {
+                                            if let Some(focus) = app.header_rename.title_focus.get() { window.focus(focus, cx); }
+                                            let modifiers = event.modifiers();
                                             if event.click_count() == 2 {
-                                                app.close_thread_menu();
-                                                app.begin_header_rename(title.clone(), window, cx);
-                                            } else {
-                                                let open = !app.thread_menu_open;
-                                                app.close_thread_menu();
-                                                app.thread_menu_open = open;
-                                                app.header_rename.menu_position = Some(event.position() + gpui_kit::point(gpui_kit::px(0.), window.rem_size()));
-                                                cx.notify();
+                                                app.header_rename.pending_title_menu = None;
+                                                if !modifiers.platform && !modifiers.control && !modifiers.shift && !modifiers.alt {
+                                                    app.close_thread_menu();
+                                                    app.begin_header_rename(title.clone(), window, cx);
+                                                }
+                                            } else if event.click_count() <= 1 {
+                                                app.schedule_header_title_menu(event.position() + gpui_kit::point(gpui_kit::px(0.), window.rem_size()), window, cx);
                                             }
                                         }
                                     }))
@@ -198,6 +219,7 @@ impl NativeApp {
                                 .icon(IconName::ChevronDown)
                                 .tooltip("Thread actions")
                                 .on_click(cx.listener(|app, event: &gpui_kit::ClickEvent, window, cx| {
+                                    app.header_rename.pending_title_menu = None;
                                     let open = !app.thread_menu_open;
                                     app.close_thread_menu();
                                     app.thread_menu_open = open;
@@ -265,8 +287,6 @@ impl NativeApp {
                                     .id("header-overflow-panel")
                                     .debug_selector(|| "header-overflow-panel".into())
                                     .occlude()
-                                    .track_focus(&overflow_focus)
-                                    .focus_trap("header-overflow-trap", &overflow_focus)
                                     .w_80()
                                     .max_w_full()
                                     .flex()
@@ -372,6 +392,15 @@ impl NativeApp {
                                                     cx.notify();
                                                 })),
                                         )
+                                    })
+                                    .map(|view| {
+                                        // Kit selects active traps from an unordered map.
+                                        // The nested branch picker must be the sole trap.
+                                        if self.branch_picker.is_some() {
+                                            view.into_any_element()
+                                        } else {
+                                            view.focus_trap("header-overflow-trap", &overflow_focus).into_any_element()
+                                        }
                                     }),
                             ),
                         )))
@@ -561,7 +590,9 @@ impl NativeApp {
                             .icon(IconName::ExternalLink)
                             .label("PR")
                             .tooltip(format!("{label}\n{url}"))
-                            .on_click(cx.listener(move |app, _, window, cx| app.open_pull_request_url(&url, window, cx))),
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.open_pull_request_url(&url, window, cx)
+                            })),
                     )
                 },
             )

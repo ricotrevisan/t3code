@@ -1,4 +1,6 @@
 //! Native shell integration, kept separate from the conversation renderer.
+pub(crate) mod input_trace;
+pub(crate) mod keystrokes;
 use crate::NativeApp;
 use gpui_kit::{
     App, Bounds, Context, Div, KeyBinding, Menu, MenuItem, OsAction, PromptLevel, SystemMenuType,
@@ -70,10 +72,21 @@ pub(crate) fn window_menu() -> Menu {
 pub(crate) fn window_actions(element: Div, cx: &mut Context<NativeApp>) -> Div {
     element
         .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
-        .on_action(cx.listener(|_, _: &Maximize, window, _| window.zoom_window()))
-        .on_action(cx.listener(|_, _: &Fullscreen, window, _| window.toggle_fullscreen()))
+        .on_action(cx.listener(|app, _: &Maximize, window, cx| {
+            if app.once_per_keystroke("Maximize", window, cx) {
+                window.zoom_window();
+            }
+        }))
+        .on_action(cx.listener(|app, _: &Fullscreen, window, cx| {
+            if app.once_per_keystroke("Fullscreen", window, cx) {
+                window.toggle_fullscreen();
+            }
+        }))
         .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
-        .on_action(cx.listener(|_, _: &About, window, cx| {
+        .on_action(cx.listener(|app, _: &About, window, cx| {
+            if !app.once_per_keystroke("About", window, cx) {
+                return;
+            }
             drop(window.prompt(
                 PromptLevel::Info,
                 "T3 Code Native",

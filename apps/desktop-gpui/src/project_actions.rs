@@ -1,6 +1,91 @@
 //! Project actions resolve through the authoritative server settings layers.
 use serde_json::{Value, json};
 
+/// Explicit composer choices belong to one project on one environment page.
+/// Passing this record while retargeting a draft cannot leak its permissions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DraftDefaultsOverride {
+    pub environment: String,
+    pub project: String,
+    pub runtime_mode: Option<String>,
+    pub workspace_mode: Option<String>,
+    #[serde(default)]
+    pub interaction_mode: Option<String>,
+    #[serde(default)]
+    pub run_setup_script: Option<bool>,
+    #[serde(default)]
+    pub start_from_origin: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadDefaults {
+    pub runtime_mode: String,
+    pub workspace_mode: String,
+    pub interaction_mode: String,
+    pub run_setup_script: bool,
+    pub start_from_origin: bool,
+}
+
+/// Same precedence as shared/projectSettings.ts. Missing settings are an error,
+/// not permission to silently bootstrap a full-access thread. A caller without
+/// t3.json must load it before using the workspace result when the server tier
+/// is unset (the built-in local tier is returned for a confirmed absent file).
+pub fn thread_defaults(
+    settings: Option<&Value>,
+    environment: &str,
+    project: &str,
+    legacy_workspace: Option<&str>,
+    project_file: Option<&Value>,
+    explicit: Option<&DraftDefaultsOverride>,
+) -> Result<ThreadDefaults, String> {
+    let settings = settings
+        .filter(|v| v.is_object())
+        .ok_or("Load server settings before creating a thread")?;
+    let entry = &settings["projectSettingsOverrides"][project];
+    let explicit =
+        explicit.filter(|choice| choice.environment == environment && choice.project == project);
+    let runtime = explicit
+        .and_then(|choice| choice.runtime_mode.as_deref())
+        .or_else(|| entry["defaultRuntimeMode"].as_str())
+        .or_else(|| settings["defaultRuntimeMode"].as_str())
+        .unwrap_or("full-access");
+    if ![
+        "approval-required",
+        "auto-accept-edits",
+        "auto",
+        "full-access",
+    ]
+    .contains(&runtime)
+    {
+        return Err(format!("Unsupported runtime default: {runtime}"));
+    }
+    // A present null project tier defers to the file, not the environment.
+    let workspace_tier = if let Some(value) = entry.get("defaultThreadEnvMode") {
+        value.as_str()
+    } else if settings["projectSettingsFolded"] != true && legacy_workspace.is_some() {
+        legacy_workspace
+    } else {
+        settings["defaultThreadEnvMode"].as_str()
+    };
+    let workspace = explicit
+        .and_then(|choice| choice.workspace_mode.as_deref())
+        .or(workspace_tier)
+        .or_else(|| project_file.and_then(|file| file["defaultThreadEnvMode"].as_str()))
+        .unwrap_or("local");
+    if !["local", "worktree"].contains(&workspace) {
+        return Err(format!("Unsupported workspace default: {workspace}"));
+    }
+    let interaction = explicit.and_then(|c| c.interaction_mode.as_deref()).unwrap_or("default");
+    if !["default", "plan"].contains(&interaction) { return Err(format!("Unsupported interaction default: {interaction}")); }
+    Ok(ThreadDefaults {
+        runtime_mode: runtime.into(),
+        workspace_mode: workspace.into(),
+        interaction_mode: interaction.into(),
+        run_setup_script: explicit.and_then(|c| c.run_setup_script).unwrap_or(true),
+        start_from_origin: explicit.and_then(|c| c.start_from_origin).unwrap_or_else(|| workspace == "worktree" && entry["newWorktreesStartFromOrigin"].as_bool().or_else(|| settings["newWorktreesStartFromOrigin"].as_bool()).unwrap_or(true)),
+    })
+}
+
 pub fn resolve(settings: &Value, project: &str, legacy_scripts: &[Value]) -> Vec<Value> {
     if let Some(scripts) =
         settings["projectSettingsOverrides"][project]["defaultProjectScripts"].as_array()
@@ -109,6 +194,93 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r16_f_defaults_project_environment_explicit_and_retarget() {
+        let settings = json!({"defaultRuntimeMode":"approval-required","defaultThreadEnvMode":"worktree","projectSettingsFolded":true,"projectSettingsOverrides":{"p":{"defaultRuntimeMode":"auto-accept-edits","defaultThreadEnvMode":"local"}}});
+        let resolve = |environment, project, explicit| {
+            thread_defaults(
+                Some(&settings),
+                environment,
+                project,
+                Some("worktree"),
+                None,
+                explicit,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            resolve("office", "other", None),
+            ThreadDefaults {
+                runtime_mode: "approval-required".into(),
+                workspace_mode: "worktree".into(),
+                interaction_mode: "default".into(),
+                run_setup_script: true,
+                start_from_origin: true,
+            }
+        );
+        assert_eq!(
+            resolve("office", "p", None),
+            ThreadDefaults {
+                runtime_mode: "auto-accept-edits".into(),
+                workspace_mode: "local".into(),
+                interaction_mode: "default".into(),
+                run_setup_script: true,
+                start_from_origin: false,
+            }
+        );
+        let choice = DraftDefaultsOverride {
+            environment: "office".into(),
+            project: "p".into(),
+            runtime_mode: Some("full-access".into()),
+            workspace_mode: Some("worktree".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve("office", "p", Some(&choice)).runtime_mode,
+            "full-access"
+        );
+        assert_eq!(
+            resolve("office", "other", Some(&choice)).runtime_mode,
+            "approval-required"
+        );
+        assert_eq!(
+            resolve("lab", "p", Some(&choice)).runtime_mode,
+            "auto-accept-edits"
+        );
+        assert!(thread_defaults(None, "office", "p", None, None, None).is_err());
+    }
+
+    #[test]
+    fn r16_f_defaults_folded_legacy_file_null_and_invalid_modes() {
+        let mut settings = json!({"defaultRuntimeMode":"approval-required","defaultThreadEnvMode":"worktree","projectSettingsOverrides":{}});
+        let file = json!({"defaultThreadEnvMode":"worktree"});
+        assert_eq!(
+            thread_defaults(Some(&settings), "e", "p", Some("local"), Some(&file), None)
+                .unwrap()
+                .workspace_mode,
+            "local"
+        );
+        settings["projectSettingsFolded"] = json!(true);
+        settings["projectSettingsOverrides"]["p"] = json!({"defaultThreadEnvMode":null});
+        assert_eq!(
+            thread_defaults(Some(&settings), "e", "p", Some("local"), Some(&file), None)
+                .unwrap()
+                .workspace_mode,
+            "worktree"
+        );
+        assert_eq!(
+            thread_defaults(Some(&settings), "e", "p", None, None, None)
+                .unwrap()
+                .workspace_mode,
+            "local"
+        );
+        settings["defaultRuntimeMode"] = json!("invalid");
+        assert!(thread_defaults(Some(&settings), "e", "p", None, None, None).is_err());
+        settings["defaultRuntimeMode"] = json!("approval-required");
+        settings["projectSettingsOverrides"]["p"]["defaultThreadEnvMode"] = json!("remote");
+        assert!(thread_defaults(Some(&settings), "e", "p", None, None, None).is_err());
+    }
+
     #[test]
     fn model_defaults_resolve_null_inheritance_legacy_and_preserve_other_overrides() {
         let settings = json!({"defaultModelSelection":{"instanceId":"codex","model":"global"},"projectSettingsFolded":true,"projectSettingsOverrides":{"p":{"defaultProjectScripts":[{"id":"owned"}],"defaultModelSelection":null}}});

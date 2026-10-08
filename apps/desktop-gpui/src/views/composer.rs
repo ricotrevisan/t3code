@@ -665,6 +665,7 @@ impl NativeApp {
                                 .child(menu),
                         ))
                     })
+                    .child(self.render_durable_plan(cx))
                     .child(div().debug_selector(|| "composer-input".into()).child(Textarea::new(&self.composer).on_paste({
                         let app = cx.entity().downgrade();
                         move |clipboard, window, cx| app.update(cx, |app, cx| app.paste_context_fragment(clipboard, window, cx) || app.paste_composer(clipboard, cx)).unwrap_or(false)
@@ -701,8 +702,8 @@ impl NativeApp {
                     .child(format!("{}: {}", record.kind(), record.label()))
                     .when(record.kind() == "assistant-citation", |view| {
                         let citation = record.value()["payload"].clone();
-                        view.child(Button::new(gpui_kit::SharedString::from(format!("draft-citation-source-{id}"))).ghost().small().label("Quoted source")
-                            .on_click(cx.listener(move |app, _, _, cx| app.jump_to_citation(&citation, cx))))
+                        view.child(Button::new(gpui_kit::SharedString::from(format!("draft-citation-source-{id}"))).debug_selector({ let id = id.clone(); move || format!("draft-citation-source-{id}") }).ghost().small().label("Quoted source")
+                            .on_click(cx.listener(move |app, _, window, cx| app.navigate_to_citation(&citation, window, cx))))
                     })
                     .child(Button::new(gpui_kit::SharedString::from(format!("context-remove-{id}"))).ghost().small().label("Remove")
                         .on_click(cx.listener(move |app, _, window, cx| app.remove_draft_context(&id, window, cx))))

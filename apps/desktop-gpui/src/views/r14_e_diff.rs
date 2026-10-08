@@ -17,12 +17,37 @@ use gpui_kit::{
 };
 use std::{cell::Cell, rc::Rc};
 
+fn language(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or_default() {
+        "rs" => "rust",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "json" => "json",
+        "py" => "python",
+        "go" => "go",
+        "rb" => "ruby",
+        "c" | "h" => "c",
+        "cpp" | "hpp" | "cc" => "cpp",
+        "css" => "css",
+        "html" => "html",
+        "md" => "markdown",
+        "sh" | "bash" => "bash",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        _ => "text",
+    }
+}
+
 #[derive(Clone)]
 struct Line {
     text: SharedString,
     old: Option<u64>,
     new: Option<u64>,
     kind: char,
+    // Buffer side, byte offset and patch-prefix width; wrapping retains this mapping.
+    syntax: Option<(usize, usize, usize)>,
+    old_syntax: Option<(usize, usize, usize)>,
 }
 #[derive(Clone, PartialEq)]
 pub(crate) struct Options {
@@ -31,6 +56,7 @@ pub(crate) struct Options {
 }
 pub(crate) struct PatchView {
     lines: Vec<Line>,
+    syntax: Rc<Vec<gpui_kit::component::highlighter::SyntaxHighlighter>>,
     pairs: Vec<(Option<usize>, Option<usize>)>,
     displayed: Rc<Vec<(Option<Line>, Option<Line>)>>,
     options: Options,
@@ -66,19 +92,36 @@ fn fragments(line: &Line, columns: Option<usize>) -> Vec<Line> {
         cells += width;
     }
     chunks.push(chunk);
+    let mut offset: usize = 0;
     chunks
         .into_iter()
         .enumerate()
-        .map(|(index, text)| Line {
-            text: text.into(),
-            old: (index == 0).then_some(line.old).flatten(),
-            new: (index == 0).then_some(line.new).flatten(),
-            kind: line.kind,
+        .map(|(index, text)| {
+            let syntax = line.syntax.map(|(side, start, prefix)| {
+                (
+                    side,
+                    start + offset.saturating_sub(prefix),
+                    if index == 0 { prefix } else { 0 },
+                )
+            });
+            offset += text.len();
+            Line {
+                text: text.into(),
+                old: (index == 0).then_some(line.old).flatten(),
+                new: (index == 0).then_some(line.new).flatten(),
+                kind: line.kind,
+                syntax,
+                old_syntax: None,
+            }
         })
         .collect()
 }
 impl PatchView {
+    #[cfg(test)]
     pub(crate) fn new(patch: &str, options: Options) -> Self {
+        Self::with_path(patch, options, "")
+    }
+    pub(crate) fn with_path(patch: &str, options: Options, path: &str) -> Self {
         let parsed = lines(patch);
         let indices = parsed
             .iter()
@@ -92,17 +135,46 @@ impl PatchView {
                 (a.map(index), b.map(index))
             })
             .collect();
-        let lines = parsed
+        let mut lines: Vec<Line> = parsed
             .into_iter()
             .map(|line| Line {
                 text: line.text.to_owned().into(),
                 old: line.old,
                 new: line.new,
                 kind: line.kind,
+                syntax: None,
+                old_syntax: None,
+            })
+            .collect();
+        let mut bodies = [String::new(), String::new()];
+        for line in &mut lines {
+            if line.old.is_none() && line.new.is_none() {
+                continue;
+            }
+            let side = usize::from(line.kind != '-');
+            let start = bodies[side].len();
+            let prefix = usize::from(matches!(line.kind, '+' | '-' | ' '));
+            line.syntax = Some((side, start, prefix));
+            bodies[side].push_str(&line.text[prefix..]);
+            bodies[side].push('\n');
+            if line.kind == ' ' {
+                line.old_syntax = Some((0, bodies[0].len(), prefix));
+                bodies[0].push_str(&line.text[prefix..]);
+                bodies[0].push('\n');
+            }
+        }
+        let syntax = bodies
+            .iter()
+            .map(|body| {
+                let mut parser =
+                    gpui_kit::component::highlighter::SyntaxHighlighter::new(language(path));
+                parser.update(None, &gpui_kit::component::Rope::from_str(body), None);
+                parser
             })
             .collect();
         let mut view = Self {
             lines,
+            syntax: Rc::new(syntax),
             pairs,
             displayed: Rc::new(Vec::new()),
             options,
@@ -133,7 +205,15 @@ impl PatchView {
                 .into_iter()
                 .flat_map(|(old, new)| {
                     let old = old
-                        .map(|i| fragments(&self.lines[i], self.options.columns))
+                        .map(|i| {
+                            let mut line = self.lines[i].clone();
+                            if self.options.split
+                                && let Some(before) = line.old_syntax
+                            {
+                                line.syntax = Some(before);
+                            }
+                            fragments(&line, self.options.columns)
+                        })
                         .unwrap_or_default();
                     let new = new
                         .map(|i| fragments(&self.lines[i], self.options.columns))
@@ -160,6 +240,7 @@ impl Render for PatchView {
         let rows = self.displayed.clone();
         let split = self.options.split;
         let count = self.constructions.clone();
+        let syntax = self.syntax.clone();
         uniform_list("patch-lines", rows.len(), move |range, _, cx| {
             count.set(count.get() + range.len());
             range
@@ -202,14 +283,40 @@ impl Render for PatchView {
                                         div()
                                             .w(if split { rems(2.5) } else { rems(5.) })
                                             .flex_shrink_0()
-                                            .text_color(cx.theme().muted_foreground)
+                                            .text_color(color)
                                             .child(number),
                                     )
                                     .child(
                                         div().whitespace_nowrap().text_color(color).child(
                                             line.as_ref()
-                                                .map(|line| line.text.clone())
-                                                .unwrap_or_default(),
+                                                .map(|line| {
+                                                    let mut text = gpui_kit::StyledText::new(
+                                                        line.text.clone(),
+                                                    );
+                                                    if let Some((side, start, prefix)) = line.syntax
+                                                    {
+                                                        let end = start + line.text.len() - prefix;
+                                                        text = text.with_highlights(
+                                                            syntax[side]
+                                                                .styles(
+                                                                    &(start..end),
+                                                                    &*cx.theme().highlight_theme,
+                                                                )
+                                                                .into_iter()
+                                                                .map(|(range, style)| {
+                                                                    (
+                                                                        (range.start - start
+                                                                            + prefix)
+                                                                            ..(range.end - start
+                                                                                + prefix),
+                                                                        style,
+                                                                    )
+                                                                }),
+                                                        );
+                                                    }
+                                                    text
+                                                })
+                                                .unwrap_or_else(|| gpui_kit::StyledText::new("")),
                                         ),
                                     )
                             }),
@@ -233,20 +340,47 @@ impl Render for PatchView {
 pub(crate) struct FullFileView {
     bodies: [SharedString; 2],
     lines: [Rc<Vec<SharedString>>; 2],
+    offsets: [Rc<Vec<usize>>; 2],
+    syntax: [Rc<gpui_kit::component::highlighter::SyntaxHighlighter>; 2],
     longest: [usize; 2],
     scroll: [UniformListScrollHandle; 2],
     pub(crate) constructions: Rc<Cell<usize>>,
 }
 impl FullFileView {
-    pub(crate) fn new(old: SharedString, new: SharedString) -> Self {
+    pub(crate) fn new(old: SharedString, new: SharedString, path: &str) -> Self {
+        let bodies = [old, new];
+        let offsets = std::array::from_fn(|side| {
+            Rc::new(
+                bodies[side]
+                    .split_inclusive('\n')
+                    .scan(0, |start, line| {
+                        let offset = *start;
+                        *start += line.len();
+                        Some(offset)
+                    })
+                    .collect(),
+            )
+        });
+        let syntax = std::array::from_fn(|side| {
+            let mut parser =
+                gpui_kit::component::highlighter::SyntaxHighlighter::new(language(path));
+            parser.update(
+                None,
+                &gpui_kit::component::Rope::from_str(&bodies[side]),
+                None,
+            );
+            Rc::new(parser)
+        });
         let lines = [
             Rc::new(
-                old.lines()
+                bodies[0]
+                    .lines()
                     .map(|line| SharedString::from(line.to_owned()))
                     .collect::<Vec<_>>(),
             ),
             Rc::new(
-                new.lines()
+                bodies[1]
+                    .lines()
                     .map(|line| SharedString::from(line.to_owned()))
                     .collect::<Vec<_>>(),
             ),
@@ -259,8 +393,10 @@ impl FullFileView {
                 .map_or(0, |(index, _)| index)
         });
         Self {
-            bodies: [old, new],
+            bodies,
             lines,
+            offsets,
+            syntax,
             longest,
             scroll: std::array::from_fn(|_| UniformListScrollHandle::new()),
             constructions: Rc::new(Cell::new(0)),
@@ -276,6 +412,8 @@ impl Render for FullFileView {
                 .map(|(index, label)| {
                     let lines = self.lines[index].clone();
                     let body = self.bodies[index].clone();
+                    let offsets = self.offsets[index].clone();
+                    let syntax = self.syntax[index].clone();
                     let count = self.constructions.clone();
                     div()
                         .flex()
@@ -298,14 +436,29 @@ impl Render for FullFileView {
                             uniform_list(
                                 SharedString::from(format!("full-lines-{index}")),
                                 lines.len(),
-                                move |range, _, _| {
+                                move |range, _, cx| {
                                     count.set(count.get() + range.len());
                                     range
                                         .map(|i| {
-                                            div()
-                                                .h(rems(1.5))
-                                                .whitespace_nowrap()
-                                                .child(lines[i].clone())
+                                            div().h(rems(1.5)).whitespace_nowrap().child(
+                                                gpui_kit::StyledText::new(lines[i].clone())
+                                                    .with_highlights(
+                                                        syntax
+                                                            .styles(
+                                                                &(offsets[i]
+                                                                    ..offsets[i] + lines[i].len()),
+                                                                &*cx.theme().highlight_theme,
+                                                            )
+                                                            .into_iter()
+                                                            .map(|(range, style)| {
+                                                                (
+                                                                    (range.start - offsets[i])
+                                                                        ..(range.end - offsets[i]),
+                                                                    style,
+                                                                )
+                                                            }),
+                                                    ),
+                                            )
                                         })
                                         .collect::<Vec<_>>()
                                 },

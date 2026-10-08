@@ -48,7 +48,7 @@ pub(crate) fn quick(status: &Value) -> GitChoice {
     let behind = status["behindCount"].as_u64().unwrap_or(0);
     let delta = status["aheadOfDefaultCount"].as_u64().unwrap_or(ahead);
     if status["isRepo"] != true {
-        return choice("Commit", "commit", Some("Not a repository"));
+        return choice("Initialize Git", "init", None);
     }
     if !status["refName"].is_string() {
         return choice(
@@ -118,6 +118,41 @@ pub(crate) fn quick(status: &Value) -> GitChoice {
 }
 
 impl NativeApp {
+    pub(crate) fn initialize_header_git(&mut self, cx: &mut Context<Self>) {
+        if !self.connection_ready() || self.pending_actions > 0 {
+            return;
+        }
+        let (Some(cwd), Some(sender)) = (self.selected_workspace(), self.commands.clone()) else {
+            return;
+        };
+        let generation = self.generation;
+        let context = self.checkout_context();
+        self.pending_actions += 1;
+        self.git_header.error = None;
+        cx.spawn(async move |entity, cx| {
+            let result = connection::call(&sender, "vcs.init", json!({"cwd":cwd})).await;
+            let _ = entity.update(cx, |app, cx| {
+                app.pending_actions = app.pending_actions.saturating_sub(1);
+                if app.generation != generation || app.checkout_context() != context {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(_) => {
+                        app.git_header.open = false;
+                        app.toggle_git_header(cx);
+                    }
+                    Err(error) => {
+                        app.git_header.error = Some(error.clone());
+                        app.report_error(error, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     pub(crate) fn render_git_split(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let action =
             self.live_git_status()
@@ -252,6 +287,10 @@ impl NativeApp {
         window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) {
+        if action == "init" {
+            self.initialize_header_git(cx);
+            return;
+        }
         if !self.connection_ready()
             || self.git_header.context.as_ref() != Some(&self.checkout_context())
             || self.pending_actions > 0
@@ -403,6 +442,9 @@ impl NativeApp {
                 view.child("Checkout changed; reopen Git to refresh")
             })
             .children(self.git_header.error.clone())
+            .when(status.is_some_and(|status| status["isRepo"] == true && !status["refName"].is_string()), |view| {
+                view.child(div().text_xs().child("Detached HEAD: commit is available; create and check out a branch before pushing or opening a PR"))
+            })
             .when_some(self.live_git_error(), |view, error| {
                 view.child(format!("Live checkout status unavailable: {error}"))
             })

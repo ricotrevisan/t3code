@@ -77,7 +77,9 @@ struct ThreadQueue {
     observed_tool: Option<String>,
     tools: HashMap<u64, Option<String>>,
     source_plans: HashMap<u64, Value>,
+    recovery_stashes: HashMap<u64, String>,
     contexts: HashMap<u64, Value>,
+    bootstraps: HashMap<u64, Value>,
     consumed_tools: HashSet<String>,
     /// Rejected messages require explicit retry or removal.
     held: HashSet<u64>,
@@ -152,9 +154,17 @@ impl Queues {
         queue.tools.remove(&id);
         queue.source_plans.remove(&id);
         queue.contexts.remove(&id);
+        queue.bootstraps.remove(&id);
         queue.held.remove(&id);
         self.forget_if_empty(thread_id);
         Some(message)
+    }
+
+    pub fn set_bootstrap(&mut self, thread_id: &str, id: u64, bootstrap: Value) {
+        if let Some(queue) = self.threads.get_mut(thread_id) { queue.bootstraps.insert(id, bootstrap); }
+    }
+    pub fn bootstrap(&self, thread_id: &str, id: u64) -> Option<Value> {
+        self.threads.get(thread_id)?.bootstraps.get(&id).cloned()
     }
 
     pub fn set_context(&mut self, thread_id: &str, id: u64, context: Value) {
@@ -164,6 +174,25 @@ impl Queues {
     }
     pub fn context(&self, thread_id: &str, id: u64) -> Option<Value> {
         self.threads.get(thread_id)?.contexts.get(&id).cloned()
+    }
+    pub fn set_recovery_stash(&mut self, thread_id: &str, id: u64, stash: String) {
+        if let Some(queue) = self.threads.get_mut(thread_id) {
+            queue.recovery_stashes.insert(id, stash);
+        }
+    }
+    pub fn recovery_stash_active(&self, stash: &str) -> bool {
+        self.threads.values().any(|q| {
+            q.messages
+                .iter()
+                .any(|m| q.recovery_stashes.get(&m.id).is_some_and(|s| s == stash))
+        })
+    }
+    pub fn recovery_stash(&self, thread_id: &str, id: u64) -> Option<String> {
+        self.threads
+            .get(thread_id)?
+            .recovery_stashes
+            .get(&id)
+            .cloned()
     }
     pub fn set_source_plan(&mut self, thread_id: &str, id: u64, source: Value) {
         if let Some(queue) = self.threads.get_mut(thread_id) {
@@ -302,6 +331,7 @@ impl Queues {
             queue.tools.remove(&id);
             queue.source_plans.remove(&id);
             queue.contexts.remove(&id);
+            queue.bootstraps.remove(&id);
             queue.awaiting_turn =
                 queue.observed == queue.baseline && queue.observed_detail == queue.baseline_detail;
         } else {

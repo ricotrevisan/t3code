@@ -308,7 +308,7 @@ impl NativeApp {
         let previous_project = self.selected_project.replace(id);
         let previous_thread = self.selected_thread.clone();
         self.new_thread(window, cx);
-        if self.selected_thread == previous_thread {
+        if self.selected_thread == previous_thread && !self.new_thread_loading {
             self.selected_project = previous_project;
         }
     }

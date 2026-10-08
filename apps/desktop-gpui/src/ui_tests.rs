@@ -1,9 +1,13 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
 mod r13_int_glue;
+mod r16_a_reliability;
+mod r16_a_native_events;
+mod r16_a_cold_selection;
 mod r13_int_requests;
 use r13_int_requests::Requests;
 mod attachment_ownership;
 mod r13_d_timeline;
+mod r16_d_citations;
 mod r13_d2_timeline;
 mod r14_d_timeline;
 mod r14_k_input;
@@ -19,6 +23,8 @@ mod r13_c_context;
 mod r13_c_transfers;
 mod r14_c_upload;
 mod r14_c_search;
+mod r16_c_plan;
+mod r16_c_queue;
 mod r13_c_recovery;
 mod composer_fixd;
 mod branch_workflows;
@@ -39,6 +45,7 @@ mod header_parity_controls;
 mod header_pol;
 mod r13_e_header;
 mod r14_e_header;
+mod r16_e_completeness;
 mod notification_preferences;
 mod connection_health;
 mod outcomes;
@@ -46,15 +53,21 @@ mod project_actions_run;
 mod settings_parity;
 mod r13_f_settings;
 mod r14_f_settings;
+mod r16_f_defaults;
+mod r16_int_defaults;
+mod r16_int_focus;
+mod r16_int_pending;
 mod r13_f_auth;
 mod settings_polc;
 mod workspace_context;
 mod sidebar_parity;
 mod r13_b_sidebar;
+mod r16_b_lifecycle;
 mod sidebar_fixb;
 mod sidebar_pols;
 mod surfaces_agents;
 mod r14_w_browser;
+mod r16_w_threads;
 mod r14_int_glue;
 mod r15_m_environments;
 
@@ -68,6 +81,8 @@ mod r13_h_terminal;
 mod r14_t_terminal;
 mod r14_t_backpressure;
 mod r14_t_links;
+mod r16_t_terminal;
+mod r16_t_preview;
 #[path = "ui_tests/surfaces_terminal_polT.rs"]
 mod surfaces_terminal_pol_t;
 mod fixa_feedback;
@@ -104,6 +119,7 @@ fn harness(
     let (sender, requests) = async_channel::bounded(16);
     cx.update(|window,cx| app.update(cx,|app,cx| {
         app.commands = Some(sender);
+        app.project_settings = Some(json!({"defaultRuntimeMode":"full-access","defaultThreadEnvMode":"local"}));
         app.apply_connection_phase(connection::Phase::Syncing, cx);
         app.apply_shell_item(serde_json::from_value(json!({"kind":"snapshot","snapshot":{"snapshotSequence":0,"projects":[{"id":"p","title":"Fixture","workspaceRoot":"/tmp/fixture"}],"threads":[{"id":"t","projectId":"p","title":"Thread","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access","interactionMode":"default","archivedAt":null}]}})).unwrap(), cx).unwrap();
         assert!(!app.connection_ready(), "snapshot alone must not enable mutations");
@@ -677,6 +693,7 @@ fn header_thread_toolbar_needs_a_selected_thread(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(1280.), px(1000.)));
     let app = app.unwrap();
     cx.update(|_, cx| app.update(cx, |app, cx| {
+        app.project_settings = Some(json!({"defaultRuntimeMode":"full-access","defaultThreadEnvMode":"local"}));
         app.shell.apply(serde_json::from_value(json!({"kind":"snapshot","snapshot":{"snapshotSequence":0,"projects":[{"id":"p","title":"Fixture","workspaceRoot":"/tmp/fixture"}],"threads":[{"id":"t","projectId":"p","title":"Thread","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access","interactionMode":"default","archivedAt":null,"branch":"main"}]}})).unwrap()).unwrap();
         cx.notify();
     }));
@@ -2627,9 +2644,8 @@ fn first_turn_bootstrap_keeps_failed_draft_and_subscribes_history_only_after_acc
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
-            app.prepare_new_worktree = true;
-            app.start_from_origin = true;
-            app.run_setup_script = true;
+            app.choose_next_workspace(true);
+            app.choose_next_setup(Some(true), Some(true));
             app.worktree_ref
                 .update(cx, |input, cx| input.set_value("main", window, cx));
             app.worktree_branch
@@ -2852,6 +2868,10 @@ fn materialized_bootstrap_draft_attaches_history_once_before_turn_receipt(cx: &m
                 created_at: commands::now(),
                 prepare_worktree: None,
                 run_setup_script: true,
+                defaults_override: Default::default(),
+                project_file: None,
+                project_file_loaded: false,
+                base_branch: None,
             });
             app.pending_history_attached = false;
             app.attach_created_pending(cx);
@@ -2930,7 +2950,7 @@ fn project_default_changes_read_fresh_settings_and_new_draft_keeps_saved_options
     };
     assert_eq!(tag, "server.getSettings");
     let selection = json!({"instanceId":"codex","model":"gpt-5.4","options":[{"id":"reasoningEffort","value":"high"}]});
-    let settings = json!({"projectSettingsFolded":true,"projectSettingsOverrides":{"p":{"defaultProjectScripts":[{"id":"owned"}]}}});
+    let settings = json!({"defaultThreadEnvMode":"local","projectSettingsFolded":true,"projectSettingsOverrides":{"p":{"defaultProjectScripts":[{"id":"owned"}]}}});
     reply.send_blocking(Ok(settings.clone())).unwrap();
     cx.run_until_parked();
     let connection::Command::Call {

@@ -42,7 +42,7 @@ impl Names {
         }
         let key = Self::key(scope, thread, id);
         let old = self.labels.insert(key.clone(), title.to_owned());
-        let result = self.save();
+        let result = self.save(&key, title);
         if result.is_err() {
             if let Some(old) = old {
                 self.labels.insert(key, old);
@@ -52,15 +52,22 @@ impl Names {
         }
         result
     }
-    fn save(&self) -> io::Result<()> {
+    fn save(&self, key: &str, title: &str) -> io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
+        // Retained environment pages loaded independent snapshots. Preserve
+        // labels written by another page since this page was constructed.
+        let mut current = Self::load(path.clone())?;
+        current.labels.insert(key.to_owned(), title.to_owned());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension("tmp");
-        std::fs::write(&temp, serde_json::to_vec(self).map_err(io::Error::other)?)?;
+        std::fs::write(
+            &temp,
+            serde_json::to_vec(&current).map_err(io::Error::other)?,
+        )?;
         std::fs::rename(temp, path)
     }
 }
@@ -77,6 +84,19 @@ mod tests {
         assert_eq!(names.get("env-a", "thread", "term-1"), Some("Build"));
         assert_eq!(names.get("env-b", "thread", "term-1"), None);
         assert_eq!(names.get("env-a", "other", "term-1"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn r16_t_terminal_names_merge_independent_environment_pages() {
+        let root = std::env::temp_dir().join(format!("r16-t-names-{}", uuid::Uuid::new_v4()));
+        let path = root.join("names.json");
+        let mut office = Names::load(path.clone()).unwrap();
+        let mut lab = Names::load(path.clone()).unwrap();
+        office.set("office", "t", "one", "Build").unwrap();
+        lab.set("lab", "t", "one", "Test").unwrap();
+        let restored = Names::load(path).unwrap();
+        assert_eq!(restored.get("office", "t", "one"), Some("Build"));
+        assert_eq!(restored.get("lab", "t", "one"), Some("Test"));
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

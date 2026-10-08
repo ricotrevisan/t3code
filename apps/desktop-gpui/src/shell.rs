@@ -12,6 +12,8 @@ pub struct Project {
     #[serde(default)]
     pub default_model_selection: Option<serde_json::Value>,
     #[serde(default)]
+    pub default_thread_env_mode: Option<String>,
+    #[serde(default)]
     pub scripts: Vec<serde_json::Value>,
 }
 

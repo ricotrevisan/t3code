@@ -71,7 +71,7 @@ impl NativeApp {
     }
     /// Retired keys keep their original command channel until cancellation is queued.
     /// At most 16 recent screens are retained; only the visible thread receives output.
-    pub(super) fn terminal_retire(&mut self, _cx: &mut Context<Self>) {
+    pub(super) fn terminal_retire(&mut self, cx: &mut Context<Self>) {
         if self.terminal_drawer.confirm.as_ref().is_some_and(|owner| {
             self.terminal_active().is_none_or(|tab| {
                 owner
@@ -121,6 +121,7 @@ impl NativeApp {
         }
         let visible_ids = self.terminal_visible_ids();
         let mut retained = Vec::new();
+        let mut closed = Vec::new();
         for mut tab in self.terminal_drawer.tabs.drain(..) {
             let visible = self.terminal_drawer.open
                 && tab.scope == self.environment_scope
@@ -142,9 +143,14 @@ impl NativeApp {
             }
             if keep {
                 retained.push(tab);
+            } else if !tab.exists && !tab.busy {
+                closed.push((tab.scope.clone(), tab.thread.clone(), tab.id.clone()));
             }
         }
         self.terminal_drawer.tabs = retained;
+        for (scope, thread, id) in closed {
+            self.terminal_remove_layout(&scope, &thread, &id, cx);
+        }
         if let Some((scope, thread, ids)) = &mut self.terminal_drawer.split {
             ids.retain(|id| {
                 self.terminal_drawer
@@ -164,6 +170,9 @@ impl NativeApp {
         });
     }
     pub(super) fn terminal_split(&mut self, cx: &mut Context<Self>) {
+        self.terminal_split_direction(false, cx);
+    }
+    pub(super) fn terminal_split_direction(&mut self, vertical: bool, cx: &mut Context<Self>) {
         let Some(tab) = self.terminal_active() else {
             return;
         };
@@ -191,7 +200,7 @@ impl NativeApp {
             && let Some(id) = &self.terminal_drawer.active
         {
             ids.push(id.clone());
-            self.terminal_drawer.split = Some((scope, thread, ids));
+            self.terminal_record_split(ids, vertical, cx);
         }
         cx.notify();
     }
@@ -206,18 +215,19 @@ impl NativeApp {
                     && tab.epoch == owner.4
             })
     }
-    pub(super) fn terminal_menu_owner(&self) -> Option<(String, String, String, u64)> {
+    pub(super) fn terminal_menu_owner(&self) -> Option<(String, String, String, u64, u64)> {
         let tab = self.terminal_active()?;
         Some((
             tab.scope.clone(),
             tab.thread.clone(),
             tab.id.clone(),
             self.generation,
+            tab.epoch,
         ))
     }
     pub(super) fn terminal_menu_current(
         &self,
-        owner: &Option<(String, String, String, u64)>,
+        owner: &Option<(String, String, String, u64, u64)>,
     ) -> bool {
         owner.is_some() && &self.terminal_menu_owner() == owner
     }
@@ -479,6 +489,7 @@ impl NativeApp {
                         for summary in terminals {
                             self.terminal_discover_summary(summary);
                         }
+                        self.terminal_reconcile_layout(terminals, cx);
                     } else {
                         self.terminal_drawer.local_error =
                             Some("Invalid terminal metadata snapshot".into());
@@ -522,6 +533,7 @@ impl NativeApp {
                 .map(|tab| tab.id.clone());
             if let Some(id) = recovered {
                 self.terminal_drawer.active = Some(id);
+                self.terminal_restore_layout(cx);
             } else {
                 self.new_terminal(cx);
             }

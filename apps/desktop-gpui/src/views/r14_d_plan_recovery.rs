@@ -48,6 +48,11 @@ pub(crate) fn recover(
 
 impl NativeApp {
     pub(super) fn render_plan_draft_recovery(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        // Durable attribution is rendered and reconfirmed by the composer owner.
+        // Never replace edited/cross-thread intent by matching its prompt text.
+        if self.durable_plan_intent().is_some() {
+            return div();
+        }
         let text = self.composer.read(cx).value();
         let Some(detail) = self.detail.thread.as_ref() else {
             return div();

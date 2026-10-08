@@ -21,6 +21,13 @@ pub(crate) struct MessageJump {
     pub(crate) message: String,
 }
 
+pub(crate) struct CitationNavigation {
+    pub(crate) generation: u64,
+    pub(crate) environment: String,
+    pub(crate) citation: serde_json::Value,
+    pub(crate) unavailable: bool,
+}
+
 pub(crate) struct PlanFollowup {
     pub(crate) generation: u64,
     pub(crate) environment: String,
@@ -62,6 +69,7 @@ pub(crate) struct ConversationPresentation {
     pub(crate) agents: Vec<t3code_desktop_gpui::surfaces::agents::Agent>,
     pub(crate) message_tail: Option<(usize, serde_json::Value)>,
     pub(crate) citation_target: Option<serde_json::Value>,
+    pub(crate) citation_navigation: Option<CitationNavigation>,
     pub(crate) saving: bool,
     pub(crate) plan_save: Option<PlanSave>,
     pub(crate) plan_followup: Option<PlanFollowup>,

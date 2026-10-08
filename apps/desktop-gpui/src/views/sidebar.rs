@@ -244,26 +244,34 @@ impl NativeApp {
                         "thread.delete",
                     ),
                 ] {
-                    let applies = self.sidebar_state.selection.iter().any(|id| {
-                        self.shell
-                            .threads
-                            .iter()
-                            .chain(&self.archived_shell.threads)
-                            .find(|thread| &thread.id == id)
-                            .is_some_and(|thread| {
-                                sidebar::thread_action_policy(
-                                    Some(thread),
-                                    action,
-                                    now,
-                                    capabilities,
-                                ) && !(matches!(action, "settle" | "snooze")
-                                    && self.queues.has_queued(id))
-                            })
-                    });
-                    if applies {
+                    let applicable_count = self
+                        .sidebar_state
+                        .selection
+                        .iter()
+                        .filter(|id| {
+                            self.shell
+                                .threads
+                                .iter()
+                                .chain(&self.archived_shell.threads)
+                                .find(|thread| &thread.id == *id)
+                                .is_some_and(|thread| {
+                                    sidebar::thread_action_policy(
+                                        Some(thread),
+                                        action,
+                                        now,
+                                        capabilities,
+                                    ) && !(matches!(action, "settle" | "snooze")
+                                        && self.queues.has_queued(id))
+                                })
+                        })
+                        .count();
+                    if applicable_count > 0 {
                         rows.push((
                             format!("bulk-{action}"),
-                            label.into(),
+                            format!(
+                                "{label} ({applicable_count}/{})",
+                                self.sidebar_state.selection.len()
+                            ),
                             format!("bulk:{action}:{kind}"),
                         ));
                     }
@@ -305,6 +313,14 @@ impl NativeApp {
                 ));
             }
         }
+        let deletion_review = self.sidebar_state.bulk_delete_review.as_ref().filter(
+            |(generation, environment, _)| {
+                *generation == self.generation && environment == &self.environment_scope
+            },
+        );
+        if deletion_review.is_some() {
+            rows.clear();
+        }
         div()
             .id("thread-menu-popover")
             .occlude()
@@ -320,6 +336,49 @@ impl NativeApp {
             .border_1()
             .border_color(cx.theme().border)
             .shadow_lg()
+            .when_some(deletion_review, |menu, (_, _, ids)| {
+                menu.child(
+                    div()
+                        .id("bulk-delete-review")
+                        .debug_selector(|| "bulk-delete-review".into())
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(format!("Delete {} threads?", ids.len()))
+                        .child(
+                            "This permanently clears conversation history. This cannot be undone.",
+                        )
+                        .children(ids.iter().map(|id| {
+                            let title = self
+                                .shell
+                                .threads
+                                .iter()
+                                .chain(&self.archived_shell.threads)
+                                .find(|thread| &thread.id == id)
+                                .map(|thread| thread.title.as_str())
+                                .unwrap_or("Unavailable thread");
+                            div().child(format!("{title} · {id}"))
+                        }))
+                        .child(
+                            Button::new("bulk-delete")
+                                .debug_selector(|| "bulk-delete".into())
+                                .danger()
+                                .label(format!("Delete {} threads permanently", ids.len()))
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.sidebar_menu_action("", "bulk-delete-confirm", window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("bulk-delete-cancel")
+                                .debug_selector(|| "bulk-delete-cancel".into())
+                                .ghost()
+                                .label("Cancel")
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.sidebar_menu_action("", "bulk-delete-cancel", window, cx);
+                                })),
+                        ),
+                )
+            })
             .children(
                 rows.into_iter()
                     .filter(|(_, _, kind)| {

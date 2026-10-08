@@ -15,6 +15,7 @@ pub(crate) mod message_media;
 mod message_paths;
 mod diff_lines;
 pub(crate) mod r14_e_diff;
+pub(crate) mod r16_e_files;
 mod inspector;
 mod overlay;
 mod palette;

@@ -132,8 +132,8 @@ impl NativeApp {
                         "Unsent drafts only. Local uses the root, never the typed base. Worktree prepares from the saved base when sent."
                     )))
                 .when(page == BranchWorkflow::Environment, |view| view
-                    .child(gpui_kit::component::switch::Switch::new("picker-origin").small().label("Start from origin").checked(self.start_from_origin).on_click(cx.listener(|app, value: &bool, _, cx| { app.start_from_origin = *value; cx.notify(); })))
-                    .child(gpui_kit::component::switch::Switch::new("picker-setup").small().label("Run setup script").checked(self.run_setup_script).on_click(cx.listener(|app, value: &bool, _, cx| { app.run_setup_script = *value; cx.notify(); }))))
+                    .child(gpui_kit::component::switch::Switch::new("picker-origin").small().label("Start from origin").checked(self.start_from_origin).on_click(cx.listener(|app, value: &bool, _, cx| { app.choose_next_setup(Some(*value), None); cx.notify(); })))
+                    .child(gpui_kit::component::switch::Switch::new("picker-setup").small().label("Run setup script").checked(self.run_setup_script).on_click(cx.listener(|app, value: &bool, _, cx| { app.choose_next_setup(None, Some(*value)); cx.notify(); }))))
                 .when(busy, |view| view.child(div().text_sm().child("Preparing checkout…")))
                 .when_some(self.branch_workflow_error.as_deref().or(restriction), |view, error| view.child(
                     div().debug_selector(|| "branch-workflow-error".into()).text_sm().text_color(cx.theme().danger).child(error.to_owned())
@@ -258,7 +258,7 @@ impl NativeApp {
                         .label("Start from origin")
                         .checked(self.start_from_origin)
                         .on_click(cx.listener(|app, value: &bool, _, cx| {
-                            app.start_from_origin = *value;
+                            app.choose_next_setup(Some(*value), None);
                             cx.notify();
                         })),
                 )

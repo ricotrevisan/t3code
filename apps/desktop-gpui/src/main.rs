@@ -210,6 +210,7 @@ struct NativeApp {
     sidebar_state: sidebar::State,
     /// Actions already handled for the current keystroke; see `once_per_keystroke`.
     keystroke_actions: std::collections::HashSet<&'static str>,
+    keystroke_event: Option<platform_shell::keystrokes::EventIdentity>,
     /// Off in the headless harness, which has no native menu to double-dispatch.
     keystroke_guard: bool,
     sidebar_rows: views::r13_b_sidebar_rows::Rows,
@@ -316,6 +317,9 @@ struct NativeApp {
     search_results: Vec<Value>,
     pending_threads: Vec<drafts::PendingThread>,
     prepare_new_worktree: bool,
+    next_thread_defaults: t3code_desktop_gpui::project_actions::DraftDefaultsOverride,
+    new_thread_loading: bool,
+    pending_defaults_loading: Option<String>,
     start_from_origin: bool,
     run_setup_script: bool,
     setup_progress: Option<workspaces::SetupProgress>,
@@ -386,31 +390,14 @@ impl NativeApp {
     /// macOS delivers a menu item's key equivalent to the menu as well as to the
     /// focused view while a text input has focus, so one keystroke can dispatch the
     /// same menu-bound action twice. Toggles then cancel out and mutations repeat.
-    /// Returns false for the repeat. Both deliveries arrive within microseconds, so
-    /// the action is released after a short window rather than on the next frame,
-    /// which a hidden window may never draw.
+    /// Returns false only for duplicate delivery of the same native key event.
     fn once_per_keystroke(
         &mut self,
         action: &'static str,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.keystroke_guard {
-            return true;
-        }
-        if !self.keystroke_actions.insert(action) {
-            return false;
-        }
-        cx.spawn(async move |app, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(80))
-                .await;
-            let _ = app.update(cx, |app, _| {
-                app.keystroke_actions.remove(action);
-            });
-        })
-        .detach();
-        true
+        platform_shell::keystrokes::accept(self, action, _window, cx)
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>, auto_connect: bool) -> Self {
@@ -656,6 +643,7 @@ impl NativeApp {
             sidebar_view: sidebar::View::Active,
             sidebar_state: sidebar::State::default(),
             keystroke_actions: Default::default(),
+            keystroke_event: None,
             keystroke_guard: !cfg!(test),
             sidebar_rows: views::r13_b_sidebar_rows::Rows::default(),
             server_config: server_config_projection::Projection::default(),
@@ -763,6 +751,9 @@ impl NativeApp {
             search_results: vec![],
             pending_threads: vec![],
             prepare_new_worktree: false,
+            next_thread_defaults: Default::default(),
+            new_thread_loading: false,
+            pending_defaults_loading: None,
             start_from_origin: true,
             run_setup_script: true,
             setup_progress: None,
@@ -973,9 +964,12 @@ impl Render for NativeApp {
         div()
             .relative()
             .key_context("NativeApp")
-            .capture_any_mouse_down(cx.listener(|app, _, _, cx| {
+            .capture_key_down(cx.listener(|app, _, _, cx| platform_shell::keystrokes::begin_key(app, cx)))
+            .capture_any_mouse_down(cx.listener(|app, event, window, cx| {
+                platform_shell::input_trace::root_mouse(app, event, window, cx);
                 app.browser_panel.update(cx, |panel, _| panel.release_native_focus());
             }))
+            .capture_any_mouse_up(cx.listener(|_, _, _, cx| platform_shell::input_trace::root_mouse_up(cx)))
             .map(|root| platform_shell::window_actions(root, cx))
             .track_focus(&self.focus)
             .on_action(cx.listener(|app, _: &UndoThreadNavigation, _, cx| app.undo_thread_navigation(cx)))
@@ -1103,6 +1097,7 @@ impl Render for NativeApp {
                 }
             }))
             .children(self.render_overlay_layer(cx))
+            .children(platform_shell::input_trace::listener(cx))
             .into_any_element()
     }
 }

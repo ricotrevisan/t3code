@@ -58,6 +58,7 @@ pub enum Update {
     Phase(Phase),
     Status(String),
     Error(String),
+    ThreadError { thread_id: String, error: String },
     Resynchronizing,
     Shell(Box<ShellItem>),
     Thread {
@@ -946,9 +947,9 @@ where
                                     let message = match exit { RpcExit::Success { .. } => "Read subscription ended".into(),RpcExit::Failure { cause } => rpc_failure(&cause) };
                                     sender.send(Update::Subscription { key,item:Err(message) }).await.map_err(|_| "Client closed")?;
                                 }
-                                Pending::Thread(_) => {
-                                    let status = match exit { RpcExit::Success { .. } => "Thread subscription ended".to_owned(), RpcExit::Failure { cause } => rpc_failure(&cause) };
-                                    sender.send(Update::Error(status)).await.map_err(|_| "Client closed")?;
+                                Pending::Thread(thread_id) => {
+                                    let error = match exit { RpcExit::Success { .. } => "Thread subscription ended".to_owned(), RpcExit::Failure { cause } => rpc_failure(&cause) };
+                                    sender.send(Update::ThreadError { thread_id, error }).await.map_err(|_| "Client closed")?;
                                 }
                                 Pending::Shell => return Err("Shell subscription ended or failed; reconnect to synchronize"),
                             }
@@ -1113,6 +1114,7 @@ mod tests {
             match update {
                 Update::Status(status)
                 | Update::Error(status)
+                | Update::ThreadError { error: status, .. }
                 | Update::Phase(Phase::Error(status)) => {
                     assert!(!status.contains("private-secret"));
                     failed |= status.contains("Authorization rejected");

@@ -62,6 +62,26 @@ fn details(record: &Value) -> (String, Option<String>) {
     }
 }
 
+fn reusable_snapshot(
+    record: &Value,
+) -> Result<t3code_desktop_gpui::draft_context::DraftContextRecord, &'static str> {
+    use t3code_desktop_gpui::draft_context::DraftContextRecord;
+    let kind = record["kind"]
+        .as_str()
+        .ok_or("Context kind is unavailable")?;
+    let label = record["label"].as_str().unwrap_or("Saved context");
+    if kind == "assistant-citation" {
+        return DraftContextRecord::citation(label, record["payload"].clone());
+    }
+    if !matches!(
+        kind,
+        "terminal" | "review-comment" | "element" | "preview-annotation" | "mention" | "skill"
+    ) {
+        return Err("This context cannot be reused without its original resource");
+    }
+    DraftContextRecord::capture(kind, label, record.clone())
+}
+
 impl NativeApp {
     pub(super) fn render_received_context(
         &self,
@@ -104,6 +124,10 @@ impl NativeApp {
             record["contextId"].as_str().unwrap_or("unknown")
         );
         let copy_key = key.clone();
+        let reusable = reusable_snapshot(record).ok();
+        let scope = self.environment_scope.clone();
+        let thread = self.selected_thread.clone().unwrap_or_default();
+        let generation = self.generation;
         div()
             .flex()
             .flex_col()
@@ -157,8 +181,36 @@ impl NativeApp {
                                         .xsmall()
                                         .label("Jump to quoted source")
                                         .on_click(
-                                            cx.listener(move |app, _, _, cx| {
-                                                app.jump_to_citation(&citation, cx)
+                                            cx.listener(move |app, _, window, cx| {
+                                                app.navigate_to_citation(&citation, window, cx)
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when_some(reusable, |view, snapshot| {
+                                    view.child(
+                                        Button::new(SharedString::from(format!(
+                                            "context-reuse-{copy_key}"
+                                        )))
+                                        .debug_selector(|| "context-reuse-snapshot".into())
+                                        .ghost()
+                                        .xsmall()
+                                        .label("Reuse saved context")
+                                        .tooltip("Add the saved snapshot, not a new live capture")
+                                        .on_click(
+                                            cx.listener(move |app, _, window, cx| {
+                                                if app.generation != generation {
+                                                    return;
+                                                }
+                                                if let Err(error) = app.intake_draft_context(
+                                                    &scope,
+                                                    &thread,
+                                                    snapshot.clone(),
+                                                    window,
+                                                    cx,
+                                                ) {
+                                                    app.report_error(error, cx);
+                                                }
                                             }),
                                         ),
                                     )

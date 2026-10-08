@@ -554,10 +554,30 @@ impl NativeApp {
             })
             .into_any_element()
     }
-    fn render_pr_activity(&self, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_pr_activity(&self, cx: &mut Context<Self>) -> AnyElement {
         let activity = &self.pull_requests.activity;
-        let mut view = div().flex().flex_col().gap_2();
-        for c in activity["comments"].as_array().into_iter().flatten() {
+        let mut view = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(self.render_pr_reactions(None, cx));
+        let threaded_ids: std::collections::HashSet<_> = activity["reviewThreads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|thread| thread["comments"].as_array().into_iter().flatten())
+            .filter_map(|comment| comment["id"].as_str())
+            .collect();
+        for c in activity["comments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|comment| {
+                !comment["id"]
+                    .as_str()
+                    .is_some_and(|id| threaded_ids.contains(id))
+            })
+        {
             view = view.child(
                 div()
                     .flex()
@@ -569,39 +589,16 @@ impl NativeApp {
                         text(c, "kind"),
                         text(c, "createdAt")
                     )))
-                    .child(div().text_sm().child(text(c, "body").to_owned())),
+                    .child(div().text_sm().child(text(c, "body").to_owned()))
+                    .children(
+                        c["id"]
+                            .as_str()
+                            .map(|id| self.render_pr_reactions(Some(id), cx)),
+                    ),
             );
         }
         for thread in activity["reviewThreads"].as_array().into_iter().flatten() {
-            view = view
-                .child(div().text_xs().child(format!(
-                    "{}:{}{} · {}",
-                    text(thread, "path"),
-                    thread["line"],
-                    if thread["isOutdated"] == true {
-                        " (outdated location)"
-                    } else {
-                        ""
-                    },
-                    if thread["isResolved"] == true {
-                        "resolved"
-                    } else {
-                        "unresolved"
-                    }
-                )))
-                .children(
-                    thread["comments"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|c| {
-                            div().text_sm().child(format!(
-                                "{}: {}",
-                                text(&c["author"], "login"),
-                                text(c, "body")
-                            ))
-                        }),
-                );
+            view = view.child(self.render_pr_thread(thread, cx));
         }
         for commit in activity["commits"].as_array().into_iter().flatten() {
             view = view.child(div().text_xs().child(format!(
@@ -1011,36 +1008,9 @@ impl NativeApp {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .max_h_24()
+                        .max_h_64()
                         .overflow_y_scroll()
-                        .children(notes.into_iter().map(|t| {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(div().text_xs().child(format!(
-                                    "{}:{}{} · {}",
-                                    file.path,
-                                    t["line"],
-                                    if t["isOutdated"] == true {
-                                        " (outdated location)"
-                                    } else {
-                                        ""
-                                    },
-                                    if t["isResolved"] == true {
-                                        "resolved"
-                                    } else {
-                                        "unresolved"
-                                    }
-                                )))
-                                .children(t["comments"].as_array().into_iter().flatten().map(|c| {
-                                    div().text_sm().child(format!(
-                                        "{}: {}",
-                                        text(&c["author"], "login"),
-                                        text(c, "body")
-                                    ))
-                                }))
-                        })),
+                        .children(notes.into_iter().map(|t| self.render_pr_thread(t, cx))),
                 );
             }
             let lines = file.lines.clone();

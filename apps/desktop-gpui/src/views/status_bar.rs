@@ -39,8 +39,18 @@ impl NativeApp {
         // Keep the phase readable as well as color-coded, including for unnamed hosts.
         let environment_label = format!("{environment_label} · {}", self.connection_state_text());
         let mut environment_choices = self.environment_choices(cx);
-        if !environment_choices.iter().any(|(origin, _, _)| origin == &self.environment_scope) {
-            environment_choices.insert(0, (self.environment_scope.clone(), environment_label.clone(), true));
+        if !environment_choices
+            .iter()
+            .any(|(origin, _, _)| origin == &self.environment_scope)
+        {
+            environment_choices.insert(
+                0,
+                (
+                    self.environment_scope.clone(),
+                    environment_label.clone(),
+                    true,
+                ),
+            );
         }
         // Size only the identity's contents, not a proportion of the whole bar.
         // The text system caches this shape; extra space is kit xs icon/padding.
@@ -75,6 +85,11 @@ impl NativeApp {
         div()
             .id("status-bar")
             .debug_selector(|| "status-bar".into())
+            .when(crate::platform_shell::input_trace::enabled(), |bar| {
+                bar.capture_any_mouse_down(cx.listener(|app, event, window, cx| {
+                    crate::platform_shell::input_trace::mouse("status-bar", app, event, window, cx);
+                }))
+            })
             .flex()
             .items_center()
             .justify_start()
@@ -162,14 +177,19 @@ impl NativeApp {
                                         .dropdown_menu_with_anchor(
                                             Anchor::BottomLeft,
                                             move |mut menu, _, cx| {
-                                                let previous_focus = previous_focus.borrow().clone();
+                                                let previous_focus =
+                                                    previous_focus.borrow().clone();
                                                 menu = menu.label("Run on · saved endpoints");
                                                 for (index, (origin, label, enabled)) in
                                                     choices.iter().enumerate()
                                                 {
                                                     let app = app.clone();
                                                     let origin = origin.clone();
-                                                    let phase = app.update(cx, |app, _| app.environment_phase(&origin)).unwrap_or_else(|_| "Offline".into());
+                                                    let phase = app
+                                                        .update(cx, |app, _| {
+                                                            app.environment_phase(&origin)
+                                                        })
+                                                        .unwrap_or_else(|_| "Offline".into());
                                                     let label = format!("{label} · {phase}");
                                                     let label = if origin == active {
                                                         format!("{label} · current")
@@ -201,19 +221,20 @@ impl NativeApp {
                                                 let settings_app = app.clone();
                                                 menu.separator().item(
                                                     PopupMenuItem::element(move |_, _| {
-                                                        div().debug_selector(|| "environment-connection-settings".into()).child("Connection settings…")
+                                                        div()
+                                                            .debug_selector(|| {
+                                                                "environment-connection-settings"
+                                                                    .into()
+                                                            })
+                                                            .child("Connection settings…")
                                                     })
-                                                        .on_click(move |_, window, cx| {
-                                                            _ = settings_app.update(
-                                                                cx,
-                                                                |app, cx| {
-                                                                    app.open_settings(
-                                                                        "", window, cx,
-                                                                    );
-                                                                    app.previous_focus = previous_focus.clone();
-                                                                },
-                                                            );
-                                                        }),
+                                                    .on_click(move |_, window, cx| {
+                                                        _ = settings_app.update(cx, |app, cx| {
+                                                            app.open_settings("", window, cx);
+                                                            app.previous_focus =
+                                                                previous_focus.clone();
+                                                        });
+                                                    }),
                                                 )
                                             },
                                         )

@@ -334,6 +334,13 @@ impl NativeApp {
                 self.report_error(error, cx);
                 Ok(())
             }
+            connection::Update::ThreadError { thread_id, error } => {
+                if self.selected_thread.as_deref() == Some(&thread_id) {
+                    self.citation_navigation_failed(&thread_id, cx);
+                    self.report_error(error, cx);
+                }
+                Ok(())
+            }
             connection::Update::Status(status) => {
                 self.set_status(status, cx);
                 Ok(())
@@ -509,6 +516,11 @@ impl NativeApp {
             {
                 let _ = entity.update(cx, |app, cx| {
                     app.consume_sent_attachments(&attachment_origin, id, &sent_attachments);
+                    if let Some((text, _)) = &sent_prompt
+                        && app.drafts.get(id).is_some_and(|draft| draft == text)
+                    {
+                        app.consume_plan_intent(&attachment_origin, id, text);
+                    }
                     if let Some(context) = &sent_context {
                         app.consume_sent_context(&attachment_origin, id, context);
                     }
@@ -545,14 +557,7 @@ impl NativeApp {
                                 .iter()
                                 .any(|draft| &draft.thread.id == id)
                         {
-                            app.pending_threads.retain(|draft| &draft.thread.id != id);
-                            if let Some(store) = &mut app.draft_store {
-                                store.remove_pending(&app.environment_scope, id);
-                            }
-                            app.schedule_draft_save(cx);
-                            if app.selected_thread.as_ref() == Some(id) {
-                                let _ = app.send_thread_selection(Some(id.clone()));
-                            }
+                            app.accept_pending_thread(id, cx);
                         }
                         if tag == "projectClone.start" {
                             app.selected_project = value["projectId"].as_str().map(str::to_owned);
@@ -616,6 +621,7 @@ impl NativeApp {
                             && let Some(id) = thread_id
                             && app.drafts.get(&id).is_some_and(|draft| draft == &text)
                         {
+                            app.consume_plan_intent(&app.environment_scope.clone(), &id, &text);
                             app.drafts.remove(&id);
                             if let Some(store) = &mut app.draft_store {
                                 store.set(&app.environment_scope, &id, String::new());

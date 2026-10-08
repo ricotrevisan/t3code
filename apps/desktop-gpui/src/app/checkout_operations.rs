@@ -79,7 +79,6 @@ pub(crate) fn restore() -> Vec<CheckoutOperation> {
 }
 
 /// Same private, atomic, fsynced replacement pattern as native draft storage.
-#[cfg(not(test))]
 pub(super) fn persist(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let directory = path

@@ -260,7 +260,7 @@ impl NativeApp {
             cx.notify();
             return;
         }
-        self.prepare_new_worktree = worktree;
+        self.choose_next_workspace(worktree);
         self.worktree_ref.update(cx, |input, cx| {
             input.set_value(
                 if worktree {
@@ -288,6 +288,12 @@ impl NativeApp {
         if let Some(index) = index {
             let draft = &mut self.pending_threads[index];
             draft.prepare_worktree = recipe;
+            draft.defaults_override.environment = self.environment_scope.clone();
+            draft.defaults_override.project = project_id.clone();
+            draft.defaults_override.workspace_mode = Some(if worktree { "worktree" } else { "local" }.into());
+            draft.defaults_override.start_from_origin = Some(self.start_from_origin);
+            draft.defaults_override.run_setup_script = Some(self.run_setup_script);
+            draft.base_branch = (!base.is_empty()).then_some(base);
             // Local selects the root, never arbitrary Worktree base text.
             draft.thread.branch = None;
             draft.thread.worktree_path = None;

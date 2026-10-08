@@ -126,7 +126,13 @@ impl NativeApp {
         let entity = file
             .view
             .get_or_init(|| {
-                cx.new(|_| super::r14_e_diff::PatchView::new(&file.patch, options.clone()))
+                cx.new(|_| {
+                    super::r14_e_diff::PatchView::with_path(
+                        &file.patch,
+                        options.clone(),
+                        &file.path,
+                    )
+                })
             })
             .clone();
         entity.update(cx, |view, cx| view.configure(options, cx));

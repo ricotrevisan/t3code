@@ -157,6 +157,13 @@ impl NativeApp {
         cx.notify();
     }
     pub(crate) fn submit_git_form(&mut self, cx: &mut Context<Self>) {
+        self.submit_git_form_with_branch(false, cx);
+    }
+    pub(crate) fn submit_git_form_with_branch(
+        &mut self,
+        feature_branch: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.pending_actions > 0
             || !self.connection_ready()
             || self.git_header.context.as_ref() != Some(&self.checkout_context())
@@ -181,7 +188,7 @@ impl NativeApp {
             self.git_header.commit_message = (!message.is_empty()).then_some(message);
             self.git_header.file_paths = Some(paths);
             self.git_header.form = None;
-            self.run_git_action(&action, false, cx);
+            self.run_git_action(&action, feature_branch, cx);
             return;
         }
         let Some(provider) = form.provider.clone() else {
@@ -260,6 +267,7 @@ impl NativeApp {
                 }))
             })))
             .child(Button::new("git-form-submit").debug_selector(|| "git-form-submit".into()).small().primary().label(match form.action.as_str() { "publish" => "Create repository & publish", "commit_push" => "Commit & push selected files", "commit_push_pr" => "Commit, push & create PR", _ => "Commit selected files" }).disabled(busy || !valid || !self.connection_ready()).on_click(cx.listener(|app, _, window, cx| { app.submit_git_form(cx); if app.git_header.form.is_none() { app.focus.focus(window,cx); } })))
+            .when(!publish, |view| view.child(Button::new("git-form-new-branch").debug_selector(|| "git-form-new-branch".into()).small().ghost().label("Commit on new branch").disabled(busy || !valid || !self.connection_ready()).on_click(cx.listener(|app, _, window, cx| { app.submit_git_form_with_branch(true, cx); if app.git_header.form.is_none() { app.focus.focus(window, cx); } }))))
             .child(Button::new("git-form-cancel").small().ghost().label("Cancel").disabled(busy).on_click(cx.listener(|app, _, window, cx| { app.git_header.form = None; app.focus.focus(window,cx); cx.notify(); })))
     }
 }

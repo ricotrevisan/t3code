@@ -7,7 +7,7 @@ use t3code_desktop_gpui::{connection, workspaces};
 
 impl NativeApp {
     pub(crate) fn next_checkout_label(&self) -> String {
-        if self.prepare_new_worktree {
+        if self.selected_project.as_ref().is_some_and(|project| self.effective_thread_defaults(project, None, None, Some(&self.next_thread_defaults)).is_ok_and(|d| d.workspace_mode == "worktree")) && !self.new_thread_checkout.as_ref().is_some_and(|(p, _, _)| Some(p) == self.selected_project.as_ref()) {
             return "Next new thread: new worktree".into();
         }
         match self
@@ -72,7 +72,7 @@ impl NativeApp {
         else {
             return;
         };
-        if self.prepare_new_worktree {
+        if self.prepare_new_worktree && self.next_thread_defaults.environment == self.environment_scope && self.next_thread_defaults.project == project.id && self.next_thread_defaults.workspace_mode.as_deref() == Some("worktree") {
             self.worktree_ref
                 .update(cx, |input, cx| input.set_value(branch, window, cx));
             self.set_status("Base selected for the planned new worktree", cx);
@@ -337,6 +337,12 @@ impl NativeApp {
             recipe
         });
         draft.run_setup_script = self.run_setup_script;
+        draft.defaults_override.environment = self.environment_scope.clone();
+        draft.defaults_override.project = project.id.clone();
+        draft.defaults_override.workspace_mode = Some(if self.prepare_new_worktree { "worktree" } else { "local" }.into());
+        draft.defaults_override.run_setup_script = Some(self.run_setup_script);
+        draft.defaults_override.start_from_origin = Some(self.start_from_origin);
+        draft.base_branch = (!base.is_empty()).then_some(base);
         draft.thread.branch = None;
         draft.thread.worktree_path = None;
         if !self.prepare_new_worktree

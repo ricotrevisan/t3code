@@ -153,6 +153,10 @@ fn workspace_actions_resolve_pending_and_archived_threads(cx: &mut TestAppContex
                 created_at: commands::now(),
                 prepare_worktree: None,
                 run_setup_script: false,
+                defaults_override: Default::default(),
+                project_file: None,
+                project_file_loaded: false,
+                base_branch: None,
             });
         })
     });

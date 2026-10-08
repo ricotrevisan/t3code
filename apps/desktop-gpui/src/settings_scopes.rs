@@ -1,7 +1,7 @@
 //! Server-backed preferences capture their environment/project owner before transport.
 use crate::NativeApp;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Sizable,
+    ActiveTheme, Disableable, Selectable, Sizable,
     button::{Button, ButtonVariants},
     switch::Switch,
 };
@@ -44,6 +44,25 @@ fn scoped_patch(settings: &Value, project: Option<&str>, key: &str, value: Value
     }
 }
 impl NativeApp {
+    /// Uses this environment page's authoritative settings snapshot. Creation
+    /// callers pass captured project/file data and only owner-scoped choices.
+    pub(crate) fn effective_thread_defaults(
+        &self,
+        project: &str,
+        legacy_workspace: Option<&str>,
+        project_file: Option<&Value>,
+        explicit: Option<&t3code_desktop_gpui::project_actions::DraftDefaultsOverride>,
+    ) -> Result<t3code_desktop_gpui::project_actions::ThreadDefaults, String> {
+        t3code_desktop_gpui::project_actions::thread_defaults(
+            self.project_settings.as_ref(),
+            &self.environment_scope,
+            project,
+            legacy_workspace,
+            project_file,
+            explicit,
+        )
+    }
+
     pub(crate) fn refresh_scoped_pages(&mut self, diagnostics: bool, cx: &mut Context<Self>) {
         if self.scoped_pages.busy
             && self.scoped_pages.generation == self.generation
@@ -88,6 +107,7 @@ impl NativeApp {
                 app.scoped_pages.busy = false;
                 match result {
                     Ok((settings, processes, traces)) => {
+                        app.project_settings = Some(settings.clone());
                         app.scoped_pages.settings = Some(settings);
                         app.scoped_pages.processes = processes;
                         app.scoped_pages.traces = traces;
@@ -134,7 +154,10 @@ impl NativeApp {
                 }
                 app.scoped_pages.busy = false;
                 match result {
-                    Ok(settings) => app.scoped_pages.settings = Some(settings),
+                    Ok(settings) => {
+                        app.project_settings = Some(settings.clone());
+                        app.scoped_pages.settings = Some(settings);
+                    }
                     Err(error) => app.scoped_pages.error = Some(error),
                 }
                 cx.notify();
@@ -159,12 +182,22 @@ impl NativeApp {
             .config(self.generation)
             .is_some_and(|v| v["environment"]["capabilities"]["projectSettingsOverrides"] == true);
         let disabled = !self.connection_ready() || busy || settings.is_none();
+        let resolved = self.effective_thread_defaults(
+            self.selected_project.as_deref().unwrap_or(""),
+            None,
+            None,
+            None,
+        );
         let storage_supported = self
             .server_config
             .config(self.generation)
             .is_some_and(|v| v["environment"]["capabilities"]["storageCleanup"] == true);
         div().flex().flex_col().gap_2()
             .child("Server preferences · selected environment")
+            .when(!diagnostics, |view| view.child(match &resolved {
+                Ok(defaults) => format!("Resolved settings · {} · {} (workspace may defer to checkout t3.json)", defaults.runtime_mode, defaults.workspace_mode),
+                Err(error) => error.clone(),
+            }))
             .when(self.selected_project.is_some() && !project_supported, |view| view.child("Project overrides unavailable: this server does not advertise project-scoped settings support."))
             .child(Button::new("scoped-refresh").debug_selector(|| "scoped-refresh".into()).label(if busy { "Loading…" } else { "Refresh server data" }).ghost().disabled(!self.connection_ready() || busy)
                 .on_click(cx.listener(move |app, _, _, cx| app.refresh_scoped_pages(diagnostics, cx))))
@@ -174,11 +207,12 @@ impl NativeApp {
                     let effective = project.as_ref().and_then(|id| settings.map(|s| &s["projectSettingsOverrides"][id]));
                     div().flex().flex_col().gap_1().child(project.as_ref().map(|id| format!("Project {id} · override (Inherit removes only this field)")).unwrap_or_else(|| "Environment defaults".into()))
                         .children([("defaultThreadEnvMode", vec!["local", "worktree"]), ("defaultRuntimeMode", vec!["approval-required", "auto-accept-edits", "auto", "full-access"])].into_iter().map(|(key, values)| {
-                            let current = effective.and_then(|s| s.get(key)).or_else(|| settings.and_then(|s| s.get(key))).and_then(Value::as_str).unwrap_or("inherit");
-                            div().flex().flex_wrap().gap_1().child(format!("{}: {current}", if key == "defaultThreadEnvMode" { "Workspace for new threads" } else { "Permissions for new threads" }))
-                                .children(values.into_iter().chain(project.is_some().then_some("inherit")).enumerate().map(|(choice, value)| {
+                            let override_value = effective.and_then(|s| s.get(key)).and_then(Value::as_str);
+                            let current = if project.is_some() { override_value.unwrap_or("inherit") } else { settings.and_then(|s| s.get(key)).and_then(Value::as_str).unwrap_or("inherit") };
+                            div().flex().flex_wrap().gap_1().child(format!("{}: {current}", if key == "defaultThreadEnvMode" { "Workspace default" } else { "Permissions default" }))
+                                .children(values.into_iter().chain((project.is_some() || key == "defaultThreadEnvMode").then_some("inherit")).enumerate().map(|(choice, value)| {
                                     let project = project.clone();
-                                    Button::new(gpui_kit::SharedString::from(format!("scope-{index}-{key}-{choice}"))).debug_selector(move || format!("scope-{index}-{key}-{choice}")).label(value).ghost().small().disabled(disabled)
+                                    Button::new(gpui_kit::SharedString::from(format!("scope-{index}-{key}-{choice}"))).debug_selector(move || format!("scope-{index}-{key}-{choice}")).label(value).ghost().small().selected(current == value).disabled(disabled)
                                         .on_click(cx.listener(move |app, _, _, cx| app.update_scoped_default(project.clone(), key, if value == "inherit" { Value::Null } else { json!(value) }, cx)))
                                 }))
                         }))

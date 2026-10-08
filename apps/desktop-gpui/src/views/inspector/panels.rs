@@ -1,6 +1,6 @@
 //! The Changes and Agents tab bodies of the right panel.
 use gpui_kit::component::{
-    ActiveTheme as _, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
 };
 use gpui_kit::{Context, div, prelude::*};
@@ -80,7 +80,7 @@ impl NativeApp {
                             .selected(self.diffs.wrap)
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.diffs.wrap = !app.diffs.wrap;
-                                cx.notify();
+                                app.save_diff_preferences(cx);
                             })),
                     )
                     .child(
@@ -109,12 +109,25 @@ impl NativeApp {
                     ),
             )
             .child(self.render_diff_options(cx))
+            .child(self.render_diff_comparison(cx))
             .child(self.render_full_diff_file(cx))
             .when(self.diffs.truncated, |view| {
                 view.child(
                     div()
                         .text_xs()
-                        .child("Patch truncated by server; only returned changes are shown"),
+                        .child(if self.diffs.files.first().is_some_and(|file| file.stats.is_some()) {
+                            "Preview truncated; select any manifest file to load its patch. Full contents are available separately."
+                        } else {
+                            "Preview truncated; this server supplied no omitted-file manifest. Only returned files are navigable."
+                        }),
+                )
+            })
+            .when(self.diffs.patch_loading, |view| view.child("Loading selected file patch…"))
+            .when_some(self.diffs.patch_error.clone(), |view, error| {
+                view.child(div().text_xs().child(error)).child(
+                    Button::new("diff-file-retry").debug_selector(|| "diff-file-retry".into())
+                        .ghost().small().label("Retry file patch")
+                        .on_click(cx.listener(|app, _, _, cx| app.load_selected_diff_patch(cx)))
                 )
             })
             .when(
@@ -215,33 +228,13 @@ impl NativeApp {
                 },
             )
             .when(current && !self.diffs.files.is_empty(), |view| {
-                view.child(
-                    div()
-                        .id("diff-files")
-                        .max_h_24()
-                        .flex_shrink_0()
-                        .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .children(self.diffs.files.iter().enumerate().map(|(index, file)| {
-                            Button::new(gpui_kit::SharedString::from(format!("diff-file-{index}")))
-                                .debug_selector(move || format!("diff-file-{index}"))
-                                .label(file.path.clone())
-                                .ghost()
-                                .small()
-                                .justify_start()
-                                .selected(self.diffs.selected_file == index)
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.select_diff_file(index, cx);
-                                }))
-                        })),
-                )
+                view.child(self.render_diff_file_list(cx))
                 .child(
                     Button::new("copy-diff")
                         .debug_selector(|| "copy-diff".into())
                         .icon(gpui_kit::assets::IconName::Copy)
                         .label("Copy patch")
+                        .disabled(self.diffs.files.get(self.diffs.selected_file).is_none_or(|file| !file.loaded))
                         .ghost()
                         .small()
                         .on_click(cx.listener(|app, _, _, cx| {
@@ -270,9 +263,8 @@ impl NativeApp {
                                 .files
                                 .iter()
                                 .enumerate()
-                                .filter(|(index, _)| {
-                                    self.diffs.expand_all || *index == self.diffs.selected_file
-                                })
+                                .skip(if self.diffs.expand_all { 0 } else { self.diffs.selected_file })
+                                .take(if self.diffs.expand_all { usize::MAX } else { 1 })
                                 .map(|(index, file)| {
                                     div()
                                         .flex()
@@ -294,7 +286,15 @@ impl NativeApp {
                                                 cx.notify();
                                             })),
                                         )
-                                        .when(!self.diffs.collapsed.contains(&index), |view| {
+                                        .when(file.truncated, |view| view.child("File patch truncated; load full before / after for complete contents"))
+                                        .when(!file.loaded && !self.diffs.collapsed.contains(&index), |view| {
+                                            view.child(
+                                                Button::new(gpui_kit::SharedString::from(format!("diff-load-{index}")))
+                                                    .ghost().small().label("Load file patch")
+                                                    .on_click(cx.listener(move |app, _, _, cx| app.select_diff_file(index, cx)))
+                                            )
+                                        })
+                                        .when(file.loaded && !self.diffs.collapsed.contains(&index), |view| {
                                             view.child(self.render_patch_lines(file, cx))
                                         })
                                 }),
@@ -303,7 +303,12 @@ impl NativeApp {
             })
     }
 
-    pub(crate) fn render_pull_requests_panel(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement { self.render_pull_requests(cx) }
+    pub(crate) fn render_pull_requests_panel(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        self.render_pull_requests(cx)
+    }
 
     pub(super) fn render_agents_panel(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         self.render_runtime_agents(cx)

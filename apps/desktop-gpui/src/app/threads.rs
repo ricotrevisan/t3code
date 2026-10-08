@@ -67,7 +67,13 @@ impl NativeApp {
         }
     }
 
-    pub(crate) fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_thread_resolved(
+        &mut self,
+        resolved: super::thread_defaults::ResolvedCreation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let super::thread_defaults::ResolvedCreation { defaults, choice, project_file, project_file_loaded, base_branch } = resolved;
         if !self.can_change_checkout(cx) {
             return;
         }
@@ -103,7 +109,7 @@ impl NativeApp {
                 }
             }
         };
-        let mut command = match commands::create_thread(&project_id, "New thread", selection) {
+        let mut command = match commands::create_thread(&project_id, "New thread", selection, &defaults) {
             Ok(value) => value,
             Err(error) => {
                 self.report_error(error, cx);
@@ -117,15 +123,15 @@ impl NativeApp {
             command["branch"] = json!(branch);
             command["worktreePath"] = json!(path);
         }
-        let prepare = if self.prepare_new_worktree {
-            let base = self.worktree_ref.read(cx).value().trim().to_owned();
+        let prepare = if defaults.workspace_mode == "worktree" {
+            let base = base_branch.clone().unwrap_or_default();
             if base.is_empty() {
                 self.report_error("Select a base branch for the new worktree", cx);
                 cx.notify();
                 return;
             }
-            let mut value = json!({"projectCwd":cwd,"baseBranch":base,"startFromOrigin":self.start_from_origin});
-            let branch = self.worktree_branch.read(cx).value().trim().to_owned();
+            let mut value = json!({"projectCwd":cwd,"baseBranch":base,"startFromOrigin":defaults.start_from_origin});
+            let branch = if choice.environment == self.environment_scope && choice.project == project_id && choice.workspace_mode.as_deref() == Some("worktree") { self.worktree_branch.read(cx).value().trim().to_owned() } else { String::new() };
             if !branch.is_empty() {
                 value["branch"] = json!(branch);
             }
@@ -139,7 +145,11 @@ impl NativeApp {
                 .expect("native create command has shell fields"),
             created_at: command["createdAt"].as_str().unwrap().into(),
             prepare_worktree: prepare,
-            run_setup_script: self.run_setup_script,
+            run_setup_script: defaults.run_setup_script,
+            defaults_override: choice,
+            project_file,
+            project_file_loaded,
+            base_branch,
         };
         let id = draft.thread.id.clone();
         if let Some(store) = &mut self.draft_store {
@@ -323,7 +333,9 @@ impl NativeApp {
             cx,
         );
         if self.commands.is_some()
-            && self.send_thread_selection(if pending { None } else { Some(id.into()) }).is_err()
+            && self
+                .send_thread_selection(if pending { None } else { Some(id.into()) })
+                .is_err()
         {
             self.report_error("Connection busy or closed; retry selection", cx);
         }
@@ -355,8 +367,7 @@ impl NativeApp {
             return;
         }
         let id = id.clone();
-        if self.commands.is_some() && self.send_thread_selection(Some(id)).is_ok()
-        {
+        if self.commands.is_some() && self.send_thread_selection(Some(id)).is_ok() {
             self.pending_history_attached = true;
             cx.notify();
         }
@@ -520,12 +531,47 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if kind == "bulk-delete-cancel" {
+            self.sidebar_state.bulk_delete_review = None;
+            self.close_thread_menu();
+            cx.notify();
+            return;
+        }
+        if kind == "bulk-delete-confirm" {
+            self.reconcile_sidebar_selection();
+            let current = (
+                self.generation,
+                self.environment_scope.clone(),
+                self.sidebar_state.selection.clone(),
+            );
+            if self.sidebar_state.bulk_delete_review.as_ref() != Some(&current) {
+                self.sidebar_state.bulk_delete_review = None;
+                self.close_thread_menu();
+                self.report_error("Selection changed; review deletion targets again", cx);
+                return;
+            }
+            self.bulk_thread_lifecycle_reviewed(
+                "delete",
+                "thread.delete",
+                None,
+                Some(window.window_handle()),
+                cx,
+            );
+            return;
+        }
         if let Some(until) = kind.strip_prefix("bulk-snooze-until:") {
-            self.bulk_thread_lifecycle_until("snooze", "thread.snooze", Some(until.into()), cx);
+            self.bulk_thread_lifecycle_reviewed(
+                "snooze",
+                "thread.snooze",
+                Some(until.into()),
+                Some(window.window_handle()),
+                cx,
+            );
             return;
         }
         if kind == "bulk-snooze-custom" {
             self.sidebar_state.bulk_snooze_review = Some(self.sidebar_state.selection.clone());
+            self.sidebar_state.bulk_snooze_window = Some(window.window_handle());
             self.sidebar_state.custom_snooze_generation = Some(self.generation);
             self.sidebar_state.custom_snooze_environment = Some(self.environment_scope.clone());
             self.sidebar_state.custom_snooze_target = Some(target.into());
@@ -552,7 +598,13 @@ impl NativeApp {
         }
         if let Some(bulk) = kind.strip_prefix("bulk:") {
             if let Some((action, kind)) = bulk.split_once(':') {
-                self.bulk_thread_lifecycle(action, kind, cx);
+                self.bulk_thread_lifecycle_reviewed(
+                    action,
+                    kind,
+                    None,
+                    Some(window.window_handle()),
+                    cx,
+                );
             }
             return;
         }
@@ -993,7 +1045,8 @@ impl NativeApp {
                 self.sidebar_state.custom_snooze_target = None;
                 return;
             }
-            self.bulk_thread_lifecycle_until(
+            let window = self.sidebar_state.bulk_snooze_window.take();
+            self.bulk_thread_lifecycle_reviewed(
                 "snooze",
                 "thread.snooze",
                 Some(
@@ -1001,6 +1054,7 @@ impl NativeApp {
                         .with_timezone(&chrono::Utc)
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 ),
+                window,
                 cx,
             );
             self.sidebar_state.custom_snooze_target = None;

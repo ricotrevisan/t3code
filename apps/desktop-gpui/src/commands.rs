@@ -48,6 +48,7 @@ pub fn create_thread(
     project_id: &str,
     title: &str,
     selection: Value,
+    defaults: &crate::project_actions::ThreadDefaults,
 ) -> Result<Value, &'static str> {
     if title.trim().is_empty()
         || selection["instanceId"]
@@ -60,7 +61,7 @@ pub fn create_thread(
         return Err("Thread title, provider instance and model are required");
     }
     Ok(
-        json!({"type":"thread.create","commandId":id(),"threadId":id(),"projectId":project_id,"title":title.trim(),"modelSelection":selection,"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"createdAt":now()}),
+        json!({"type":"thread.create","commandId":id(),"threadId":id(),"projectId":project_id,"title":title.trim(),"modelSelection":selection,"runtimeMode":defaults.runtime_mode,"interactionMode":defaults.interaction_mode,"branch":null,"worktreePath":null,"createdAt":now()}),
     )
 }
 
@@ -240,7 +241,7 @@ mod tests {
     fn empty_form_input_never_becomes_a_destructive_or_send_command() {
         assert!(create_project("", "/tmp").is_err());
         assert!(create_project("Title", "").is_err());
-        assert!(create_thread("p", "Title", Value::Null).is_err());
+        assert!(create_thread("p", "Title", Value::Null, &crate::project_actions::thread_defaults(Some(&json!({})), "e", "p", None, None, None).unwrap()).is_err());
         assert!(start_turn("t", " \n", &[], Value::Null, "full-access", "default").is_err());
     }
     #[test]
