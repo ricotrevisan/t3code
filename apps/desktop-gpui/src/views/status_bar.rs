@@ -10,7 +10,29 @@ use t3code_desktop_gpui::{connection::Phase, notifications};
 
 use crate::NativeApp;
 
+fn environment_choice_label(identity: &str, phase: &str, current: bool) -> String {
+    format!(
+        "{identity} · {phase}{}",
+        if current { " · current" } else { "" }
+    )
+}
+
 impl NativeApp {
+    pub(crate) fn status_environment_choices(
+        &self,
+        identity: &str,
+        cx: &gpui_kit::App,
+    ) -> Vec<(String, String, bool)> {
+        let mut choices = self.environment_choices(cx);
+        if !choices
+            .iter()
+            .any(|(origin, _, _)| origin == &self.environment_scope)
+        {
+            choices.insert(0, (self.environment_scope.clone(), identity.into(), true));
+        }
+        choices
+    }
+
     pub(crate) fn render_status_bar(
         &self,
         window: &gpui_kit::Window,
@@ -36,22 +58,11 @@ impl NativeApp {
             .or(self.environment_name.as_deref())
             .unwrap_or(&environment_host)
             .to_owned();
-        // Keep the phase readable as well as color-coded, including for unnamed hosts.
-        let environment_label = format!("{environment_label} · {}", self.connection_state_text());
-        let mut environment_choices = self.environment_choices(cx);
-        if !environment_choices
-            .iter()
-            .any(|(origin, _, _)| origin == &self.environment_scope)
-        {
-            environment_choices.insert(
-                0,
-                (
-                    self.environment_scope.clone(),
-                    environment_label.clone(),
-                    true,
-                ),
-            );
-        }
+        // Picker choices carry identity only; append the live phase once at presentation.
+        let environment_identity = environment_label;
+        let environment_label =
+            format!("{environment_identity} · {}", self.connection_state_text());
+        let environment_choices = self.status_environment_choices(&environment_identity, cx);
         // Size only the identity's contents, not a proportion of the whole bar.
         // The text system caches this shape; extra space is kit xs icon/padding.
         let environment_width = window
@@ -190,12 +201,11 @@ impl NativeApp {
                                                             app.environment_phase(&origin)
                                                         })
                                                         .unwrap_or_else(|_| "Offline".into());
-                                                    let label = format!("{label} · {phase}");
-                                                    let label = if origin == active {
-                                                        format!("{label} · current")
-                                                    } else {
-                                                        label.clone()
-                                                    };
+                                                    let label = environment_choice_label(
+                                                        label,
+                                                        &phase,
+                                                        origin == active,
+                                                    );
                                                     menu = menu.item(
                                                         PopupMenuItem::element(move |_, _| {
                                                             div()
@@ -366,5 +376,20 @@ impl NativeApp {
             .child(chip.ghost().xsmall().w_full().selected(open).on_click(
                 cx.listener(move |app, _, window, cx| app.open_branch_picker(trigger, window, cx)),
             ))
+    }
+}
+
+#[cfg(test)]
+mod polish_tests {
+    #[test]
+    fn r17_pol_rw27_picker_phase_and_current_marker_appear_once() {
+        assert_eq!(
+            super::environment_choice_label("Mac mini", "Connected · synchronized", true),
+            "Mac mini · Connected · synchronized · current"
+        );
+        assert_eq!(
+            super::environment_choice_label("Office", "Offline", false),
+            "Office · Offline"
+        );
     }
 }

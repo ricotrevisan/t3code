@@ -23,6 +23,11 @@ impl NativeApp {
                 .id("command-palette")
                 .debug_selector(|| "command-palette".into())
                 .key_context("NativePalette")
+                .on_action(cx.listener(|app, _: &crate::TogglePalette, window, cx| {
+                    if app.once_per_keystroke("TogglePalette", window, cx) {
+                        app.toggle_palette(window, cx);
+                    }
+                }))
                 .occlude()
                 .w(rems(640. / 14.))
                 .max_w_full()

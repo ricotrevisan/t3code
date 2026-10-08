@@ -6,6 +6,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{AnyElement, App, div, prelude::*};
 use serde_json::Value;
+pub mod formatting;
 
 #[derive(Debug, PartialEq)]
 pub struct Account {
@@ -155,6 +156,7 @@ pub fn accounts(config: &Value) -> Vec<Account> {
 pub fn render(config: &Value, cx: &mut App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let accounts = accounts(config);
+    let now = formatting::now();
     let mut body = div()
         .id("subscription-usage")
         .flex()
@@ -181,7 +183,7 @@ pub fn render(config: &Value, cx: &mut App) -> AnyElement {
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child(format!("Last checked {}", account.checked)),
+                    .child(formatting::checked(&account.checked, now)),
             );
         let show_windows = account.notice.is_none();
         if let Some(notice) = account.notice {
@@ -196,22 +198,18 @@ pub fn render(config: &Value, cx: &mut App) -> AnyElement {
                 ""
             };
             row = row.child(div().text_xs().child(format!(
-                    "{} · {:.0}% used{limit}{}",
-                    w.label,
-                    w.used,
-                    w.resets
-                        .map(|s| format!(" · resets {s}"))
-                        .unwrap_or_default()
-                )));
+                "{} · {:.0}% used{limit}{}",
+                w.label,
+                w.used,
+                formatting::resets(w.resets.as_deref(), now)
+            )));
         }
         if let Some(credits) = account.credits {
-            row = row.child(div().text_xs().text_color(muted).child(format!(
-                    "{credits} reset credits{}",
-                    account
-                        .credit_expiry
-                        .map(|s| format!(" · next expires {s}"))
-                        .unwrap_or_default()
-                )));
+            row = row.child(div().text_xs().text_color(muted).child(formatting::credits(
+                credits,
+                account.credit_expiry.as_deref(),
+                now,
+            )));
         }
         if let Some((label, url)) = account.external {
             row = row.child(

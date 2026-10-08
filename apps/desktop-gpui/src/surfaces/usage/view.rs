@@ -160,6 +160,7 @@ impl NativeApp {
             return None;
         }
         let rows = self.usage_accounts();
+        let now = usage::formatting::now();
         let muted = cx.theme().muted_foreground;
         let mut panel = div()
             .id("usage-limits-panel")
@@ -236,38 +237,41 @@ impl NativeApp {
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child(format!("Last checked {}", row.checked)),
+                    .child(usage::formatting::checked(&row.checked, now)),
             );
             if let Some(notice) = row.notice {
                 body = body.child(div().text_xs().text_color(muted).child(notice));
             } else {
                 for window in row.windows {
                     body = body.child(div().text_xs().child(format!(
-                            "{} · {:.0}% used{}",
-                            window.label,
-                            window.used,
-                            window
-                                .resets
-                                .map(|s| format!(" · resets {s}"))
-                                .unwrap_or_default()
-                        )));
+                        "{} · {:.0}% used{}",
+                        window.label,
+                        window.used,
+                        usage::formatting::resets(window.resets.as_deref(), now)
+                    )));
                 }
             }
             if let Some(count) = row.credits {
-                body = body.child(div().text_xs().child(format!(
-                        "{count} reset credits{}",
-                        row.credit_expiry
-                            .map(|s| format!(" · expires {s}"))
-                            .unwrap_or_default()
+                let mut credit_row = div()
+                    .debug_selector(move || format!("usage-credit-row-{index}"))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_start()
+                    .gap_2()
+                    .child(div().text_xs().child(usage::formatting::credits(
+                        count,
+                        row.credit_expiry.as_deref(),
+                        now,
                     )));
                 if count > 0
                     && let Some(input) = row.reset_input
                 {
                     let action_key = key.clone();
-                    body = body.child(
+                    credit_row = credit_row.child(
                         Button::new(("usage-credit", index))
                             .debug_selector(move || format!("usage-credit-{index}"))
-                            .label(if busy { "Using…" } else { "Use reset credit" })
+                            .label(if busy { "Using…" } else { "Use reset" })
                             .secondary()
                             .small()
                             .disabled(busy || !self.connection_ready())
@@ -278,6 +282,7 @@ impl NativeApp {
                             })),
                     );
                 }
+                body = body.child(credit_row);
             }
             if confirming {
                 let confirm_key = key.clone();
