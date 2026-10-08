@@ -8,7 +8,6 @@ use gpui_kit::component::{
     progress::Progress,
 };
 use gpui_kit::{Anchor, App, Context, Window, anchored, deferred, div, prelude::*, px};
-use serde_json::json;
 use t3code_desktop_gpui::conversation::{ContextWindowLevel, context_window_snapshot};
 use t3code_desktop_gpui::palette;
 
@@ -19,6 +18,44 @@ use crate::{
 };
 
 impl NativeApp {
+    pub(crate) fn render_follow_up_settings(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        use t3code_desktop_gpui::queue::FollowUpBehavior;
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child("Follow-up behavior (⌘⇧↩ uses the alternate)")
+            .child(
+                div().flex().gap_2().children(
+                    [
+                        (FollowUpBehavior::Queue, "Queue", "follow-up-queue"),
+                        (FollowUpBehavior::Steer, "Steer", "follow-up-steer"),
+                    ]
+                    .into_iter()
+                    .map(|(behavior, label, id)| {
+                        Button::new(id)
+                            .debug_selector(move || id.into())
+                            .label(label)
+                            .ghost()
+                            .small()
+                            .selected(self.follow_up_behavior == behavior)
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.follow_up_behavior = behavior;
+                                if let Some(mut state) = app.saved_window {
+                                    state.follow_up_behavior = behavior;
+                                    app.saved_window = Some(state);
+                                    t3code_desktop_gpui::window_state::save(state);
+                                }
+                                cx.notify();
+                            }))
+                    }),
+                ),
+            )
+    }
+
     fn slash_entries(&self, cx: &App) -> Vec<&'static palette::Entry> {
         palette::slash_matches(
             &self.composer.read(cx).value(),
@@ -170,9 +207,8 @@ impl NativeApp {
         let mention_menu = self.mention_open(cx).then(|| self.render_mention_menu(cx));
         let thread_id = self.selected_thread.clone().unwrap_or_default();
         let queued = self.queues.messages(&thread_id);
-        // A head that is not on the wire while the thread is idle waits on a
-        // rejected send; Send now retries it.
-        let stalled = !turn_running && !self.queues.dispatching(&thread_id);
+        // A rejected send stays available for explicit retry even mid-turn.
+        let stalled = !self.queues.dispatching(&thread_id);
         let context_window = (!self.context_meter_hidden)
             .then(|| {
                 self.detail
@@ -257,7 +293,13 @@ impl NativeApp {
                                 .rounded_sm()
                                 .bg(muted)
                                 .text_xs()
-                                .child(div().text_color(muted_foreground).child("Queued"))
+                                .child(div().text_color(muted_foreground).child(
+                                    if index == 0 && self.queues.held(&thread_id) {
+                                        "Not sent"
+                                    } else {
+                                        "Queued"
+                                    },
+                                ))
                                 .child(div().flex_1().min_w_0().truncate().child(
                                     message.text.lines().next().unwrap_or_default().to_owned(),
                                 ))
@@ -272,6 +314,7 @@ impl NativeApp {
                                     view.child(
                                         Button::new("queued-send-now")
                                             .debug_selector(|| "queued-send-now".into())
+                                            .disabled(self.checkout_transition_pending())
                                             .label("Send now")
                                             .ghost()
                                             .small()
@@ -318,6 +361,7 @@ impl NativeApp {
                             .enumerate()
                             .map(|(index, attachment)| {
                                 let id = attachment["id"].as_str().unwrap_or_default().to_owned();
+                                let attachment_scope = self.attachment_scope();
                                 let name = attachment["name"]
                                     .as_str()
                                     .unwrap_or("attachment")
@@ -342,16 +386,9 @@ impl NativeApp {
                                         .small()
                                         .on_click(
                                             cx.listener(move |app, _, _, cx| {
-                                                app.attachments.retain(|attachment| {
-                                                    attachment["id"].as_str() != Some(&id)
-                                                });
-                                                app.perform(
-                                                    "attachments.delete",
-                                                    json!({"attachmentId": id}),
-                                                    None,
-                                                    cx,
-                                                );
-                                                cx.notify();
+                                                if let Some(scope) = attachment_scope.clone() {
+                                                    app.detach_attachment(scope, id.clone(), cx);
+                                                }
                                             }),
                                         ),
                                     )
@@ -576,6 +613,7 @@ impl NativeApp {
                             .loading(self.pending_actions > 0)
                             .disabled(
                                 self.selected_thread.is_none()
+                                    || self.checkout_transition_pending()
                                     || self.composer.read(cx).value().trim().is_empty(),
                             )
                             .tooltip("Send the prompt (↩)")

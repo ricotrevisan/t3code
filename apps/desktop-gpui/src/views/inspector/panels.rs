@@ -151,7 +151,9 @@ impl NativeApp {
                         .small()
                         .on_click(cx.listener(|app, _, _, cx| {
                             if let Some(file) = app.diffs.files.get(app.diffs.selected_file) {
-                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(file.patch.clone()));
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                    file.patch.clone(),
+                                ));
                             }
                         })),
                 )

@@ -50,6 +50,7 @@ impl NativeApp {
                         .child(toast.message.clone()),
                 )
                 .when_some(toast.thread.clone(), |card, thread| {
+                    let tag = notifications::tag(&self.environment_scope, &thread);
                     card.child(
                         Button::new(("toast-open", id as usize))
                             .debug_selector(move || format!("toast-open-{id}"))
@@ -58,7 +59,7 @@ impl NativeApp {
                             .xsmall()
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.dismiss_toast(id, cx);
-                                app.open_notified_thread(&notifications::tag(&thread), window, cx);
+                                app.open_notified_thread(&tag, window, cx);
                             })),
                     )
                 })

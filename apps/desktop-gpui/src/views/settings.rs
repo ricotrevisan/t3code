@@ -2,11 +2,12 @@ use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
     input::Input,
+    radio::{Radio, RadioGroup},
     switch::Switch,
 };
 use gpui_kit::{Context, FontWeight, div, prelude::*, px};
 use serde_json::json;
-use t3code_desktop_gpui::credentials;
+use t3code_desktop_gpui::{credentials, notification_platform, notifications};
 
 use crate::NativeApp;
 
@@ -73,6 +74,7 @@ impl NativeApp {
                         .flex()
                         .flex_col()
                         .gap_2()
+                        .child(self.render_follow_up_settings(cx))
                         .child(section("CONNECTION"))
                         .child(Input::new(&self.server))
                         .child(
@@ -255,6 +257,31 @@ impl NativeApp {
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .child(section("NOTIFICATIONS"))
+                        .child(RadioGroup::vertical("settings-notification-mode")
+                            .selected_index(notifications::NotificationMode::ALL.iter().position(|mode| *mode == self.notification_preferences.mode))
+                            .disabled(!notification_platform::Platform::supported())
+                            .children(notifications::NotificationMode::ALL.into_iter().enumerate().map(|(index, mode)| Radio::new(("notification-mode", index)).label(mode.label())))
+                            .on_click(cx.listener(|app, index: &usize, _, cx| {
+                                let mut preferences = app.notification_preferences;
+                                preferences.mode = notifications::NotificationMode::ALL[*index];
+                                app.set_notification_preferences(preferences, cx);
+                            })))
+                        .child(Switch::new("settings-in-app-notifications")
+                            .label("In-app notifications for other threads")
+                            .checked(self.notification_preferences.in_app)
+                            .small()
+                            .on_click(cx.listener(|app, enabled: &bool, _, cx| {
+                                let mut preferences = app.notification_preferences;
+                                preferences.in_app = *enabled;
+                                app.set_notification_preferences(preferences, cx);
+                            })))
+                        .child(div().text_xs().text_color(muted_foreground).child(
+                            if notification_platform::Platform::supported() {
+                                "Device-local preferences. Desktop alerts require the bundled app and macOS notification permission (System Settings → Notifications). Sounds use distinct system tones."
+                            } else {
+                                "Desktop notifications, sound, and badge are unavailable on this platform; in-app notifications remain available."
+                            }))
                         .child(section("APPEARANCE"))
                         .child(div().text_sm().child("One Dark (Zed)"))
                         .child(div().text_xs().text_color(muted_foreground).child(

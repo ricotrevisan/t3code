@@ -21,8 +21,17 @@ impl NativeApp {
         let has_thread = self.selected_thread.is_some();
         let header_title = self.selected_thread_title();
         let header_branch = self.selected_thread_branch();
+        let branch_label = header_branch.clone().or_else(|| {
+            (has_thread && self.selected_workspace().is_some())
+                .then(|| "Choose checkout".to_owned())
+        });
+        let branch_trigger = if header_branch.is_some() {
+            "branch-selector"
+        } else {
+            "checkout-selector"
+        };
         let header_worktree = self.selected_thread_worktree().is_some();
-        let branch_picker = self.branch_picker == Some("branch-selector");
+        let branch_picker = self.branch_picker == Some(branch_trigger);
         let header_session = self.detail.thread.as_ref().and_then(|detail| {
             let status = detail["session"]["status"].as_str()?;
             let (label, danger) = match status {
@@ -122,7 +131,7 @@ impl NativeApp {
                         .gap_2()
                         .w_full()
                         .min_w_0()
-                        .when_some(header_branch, |view, branch| {
+                        .when_some(branch_label, |view, branch| {
                             view.child(
                                 div()
                                     .flex()
@@ -130,8 +139,8 @@ impl NativeApp {
                                     .flex_1()
                                     .min_w_0()
                                     .child(
-                                        Button::new("branch-selector")
-                                            .debug_selector(|| "branch-selector".into())
+                                        Button::new(branch_trigger)
+                                            .debug_selector(move || branch_trigger.into())
                                             .icon(IconName::GitBranch)
                                             .label(branch)
                                             .when(header_worktree, |button| {
@@ -142,16 +151,9 @@ impl NativeApp {
                                             .small()
                                             .w_full()
                                             .selected(branch_picker)
-                                            .tooltip(format!(
-                                                "Switch branch or worktree · {}",
-                                                self.selected_thread_branch().unwrap_or_default()
-                                            ))
-                                            .on_click(cx.listener(|app, _, window, cx| {
-                                                app.open_branch_picker(
-                                                    "branch-selector",
-                                                    window,
-                                                    cx,
-                                                )
+                                            .tooltip(header_branch.as_ref().map(|branch| format!("Switch branch or worktree · {branch}")).unwrap_or_else(|| "Choose this thread's checkout, create a branch, or checkout a PR".into()))
+                                            .on_click(cx.listener(move |app, _, window, cx| {
+                                                app.open_branch_picker(branch_trigger, window, cx)
                                             })),
                                     )
                                     // The wrapper puts the picker below the chip, not at the column's top.

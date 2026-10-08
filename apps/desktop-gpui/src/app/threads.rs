@@ -29,12 +29,23 @@ impl NativeApp {
     }
 
     pub(crate) fn turn_running(&self) -> bool {
-        self.detail.thread.as_ref().is_some_and(|thread| {
-            matches!(
-                thread["session"]["status"].as_str(),
-                Some("starting" | "running")
-            )
-        })
+        // The shell already knows the phase while the selected detail loads.
+        let status = if let Some(thread) = self
+            .detail
+            .thread
+            .as_ref()
+            .filter(|thread| thread["id"].as_str() == self.selected_thread.as_deref())
+        {
+            thread["session"]["status"].as_str()
+        } else {
+            self.shell
+                .threads
+                .iter()
+                .find(|thread| Some(&thread.id) == self.selected_thread.as_ref())
+                .and_then(|thread| thread.session.as_ref())
+                .map(|session| session.status.as_str())
+        };
+        matches!(status, Some("starting" | "running"))
     }
 
     /// Selects the previous or next thread in the order the sidebar shows them.
@@ -194,7 +205,9 @@ impl NativeApp {
                 .insert(previous.clone(), self.composer.read(cx).value().to_string());
         }
         self.model_override = None;
+        self.stash_attachment_draft();
         self.selected_thread = Some(id.into());
+        self.restore_attachment_draft();
         self.mention = None;
         self.pending_history_attached = false;
         self.close_thread_menu();
@@ -276,6 +289,7 @@ impl NativeApp {
                 });
             }
         }
+        self.sync_checkout_recipe_controls(window, cx);
         self.setup_progress = None;
         if let Some(sender) = &self.commands {
             let _ = sender.try_send(connection::Command::Subscribe {
@@ -354,7 +368,9 @@ impl NativeApp {
             store.remove_pending(&self.environment_scope, &id);
             store.set(&self.environment_scope, &id, String::new());
         }
+        self.stash_attachment_draft();
         self.selected_thread = None;
+        self.restore_attachment_draft();
         self.confirm_delete = None;
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));

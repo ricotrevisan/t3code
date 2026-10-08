@@ -49,7 +49,10 @@ fn git_path(path: &str) -> String {
     if !path.starts_with('"') || !path.ends_with('"') {
         return path.to_owned();
     }
-    let mut bytes = path.as_bytes()[1..path.len() - 1].iter().copied().peekable();
+    let mut bytes = path.as_bytes()[1..path.len() - 1]
+        .iter()
+        .copied()
+        .peekable();
     let mut decoded = Vec::new();
     while let Some(byte) = bytes.next() {
         if byte != b'\\' {
@@ -63,13 +66,20 @@ fn git_path(path: &str) -> String {
                 if let Some(next) = bytes.peek().copied().filter(|b| (b'0'..=b'7').contains(b)) {
                     bytes.next();
                     value = value * 8 + u16::from(next - b'0');
-                } else { break; }
+                } else {
+                    break;
+                }
             }
             decoded.push(value as u8);
         } else {
             decoded.push(match escaped {
-                b't' => b'\t', b'n' => b'\n', b'r' => b'\r',
-                b'a' => 7, b'b' => 8, b'f' => 12, b'v' => 11,
+                b't' => b'\t',
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b'a' => 7,
+                b'b' => 8,
+                b'f' => 12,
+                b'v' => 11,
                 other => other,
             });
         }
@@ -81,7 +91,9 @@ fn header_path(header: &str) -> String {
     let paths = header.trim_end().trim_start_matches("diff --git ");
     if paths.starts_with('"') {
         if let Some((_, destination)) = paths.rsplit_once(" \"b/") {
-            return git_path(&format!("\"b/{destination}")).trim_start_matches("b/").to_owned();
+            return git_path(&format!("\"b/{destination}"))
+                .trim_start_matches("b/")
+                .to_owned();
         }
     } else {
         // Unquoted names may themselves contain " b/". A non-rename header repeats
@@ -204,10 +216,22 @@ mod tests {
     #[test]
     fn patch_file_paths_decode_git_names_without_losing_patch_bytes() {
         let cases = [
-            ("diff --git a/dir b/name b/dir b/name\nBinary files a/dir b/name and b/dir b/name differ\n", "dir b/name"),
-            ("diff --git a/old name b/new name\nsimilarity index 100%\nrename from old name\nrename to new name\n", "new name"),
-            ("diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\n--- \"a/caf\\303\\251.txt\"\n+++ \"b/caf\\303\\251.txt\"\n@@ -1 +1 @@\n-old\n+new\n", "café.txt"),
-            ("diff --git a/gone b/gone\n--- a/gone\n+++ /dev/null\n", "gone"),
+            (
+                "diff --git a/dir b/name b/dir b/name\nBinary files a/dir b/name and b/dir b/name differ\n",
+                "dir b/name",
+            ),
+            (
+                "diff --git a/old name b/new name\nsimilarity index 100%\nrename from old name\nrename to new name\n",
+                "new name",
+            ),
+            (
+                "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\n--- \"a/caf\\303\\251.txt\"\n+++ \"b/caf\\303\\251.txt\"\n@@ -1 +1 @@\n-old\n+new\n",
+                "café.txt",
+            ),
+            (
+                "diff --git a/gone b/gone\n--- a/gone\n+++ /dev/null\n",
+                "gone",
+            ),
             ("@@ -1 +1 @@\n-old\n+new\n", "Patch"),
         ];
         for (patch, expected) in cases {

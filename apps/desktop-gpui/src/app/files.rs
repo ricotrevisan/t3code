@@ -37,6 +37,7 @@ impl NativeApp {
     }
 
     pub(crate) fn invalidate_checkout_context(&mut self, cx: &mut Context<Self>) {
+        self.cancel_branch_workflow(cx);
         self.diffs.invalidate();
         self.file_listing_epoch += 1;
         self.file_epoch += 1;

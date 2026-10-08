@@ -1,8 +1,14 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
-mod workspace_context;
+mod attachment_ownership;
+mod branch_workflows;
 mod checkout_context;
+mod checkout_receipts;
 mod checkpoint_diffs;
+mod followup_queue;
 mod header_layout;
+mod notification_preferences;
+mod project_actions_run;
+mod workspace_context;
 
 use super::*;
 use gpui_kit::component::Root;
@@ -134,29 +140,52 @@ fn runtime_and_interaction_mode_chips_dispatch_the_toggled_command(cx: &mut Test
 fn statusbar_long_values_resize_without_overlap_and_keep_entry_points(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     let environment = "ws://very-long-environment-name.tailnet.example:3773/ws";
-    let worktree = "/tmp/a-very-long-project-directory/worktrees/an-even-longer-worktree-checkout-name";
+    let worktree =
+        "/tmp/a-very-long-project-directory/worktrees/an-even-longer-worktree-checkout-name";
     let branch = "feature/a-very-long-branch-name-for-native-responsive-statusbar";
-    let message = "Failed to reconnect to the selected environment; check the connection settings and retry";
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.environment_scope = environment.into();
-        app.shell.threads[0].branch = Some(branch.into());
-        app.shell.threads[0].worktree_path = Some(worktree.into());
-        app.status = message.into();
-        app.pending_actions = 1;
-        cx.notify();
-    }));
+    let message =
+        "Failed to reconnect to the selected environment; check the connection settings and retry";
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.environment_scope = environment.into();
+            app.shell.threads[0].branch = Some(branch.into());
+            app.shell.threads[0].worktree_path = Some(worktree.into());
+            app.status = message.into();
+            app.pending_actions = 1;
+            cx.notify();
+        })
+    });
     for width in [1280., 960., 1100., 960.] {
         cx.simulate_resize(size(px(width), px(1000.)));
         cx.run_until_parked();
         assert!(app.read_with(cx, |app, _| app.sidebar_open && app.inspector_open));
         let bar = cx.debug_bounds("status-bar").expect("status bar painted");
         let mut previous_right = bar.left();
-        for selector in ["environment-chip", "worktree-chip", "branch-chip", "status-message"] {
+        for selector in [
+            "environment-chip",
+            "worktree-chip",
+            "branch-chip",
+            "status-message",
+        ] {
             let bounds = cx.debug_bounds(selector).expect(selector);
-            assert!(bounds.left() >= previous_right, "{selector} overlaps at {width}");
-            assert!(bounds.right() <= bar.right(), "{selector} outside bar at {width}");
+            assert!(
+                bounds.left() >= previous_right,
+                "{selector} overlaps at {width}"
+            );
+            assert!(
+                bounds.right() <= bar.right(),
+                "{selector} outside bar at {width}"
+            );
             assert!(bounds.top() >= bar.top() && bounds.bottom() <= bar.bottom());
-            assert!(bounds.size.width >= px(if selector == "status-message" { 96. } else { 24. }), "{selector} too narrow at {width}: {bounds:?}");
+            assert!(
+                bounds.size.width
+                    >= px(if selector == "status-message" {
+                        96.
+                    } else {
+                        24.
+                    }),
+                "{selector} too narrow at {width}: {bounds:?}"
+            );
             previous_right = bounds.right();
         }
     }
@@ -165,20 +194,34 @@ fn statusbar_long_values_resize_without_overlap_and_keep_entry_points(cx: &mut T
     cx.simulate_click(environment_chip.center(), Default::default());
     cx.run_until_parked();
     assert!(app.read_with(cx, |app, _| app.settings_open));
-    assert!(cx.debug_bounds("pairing-input").is_some(), "connection controls reachable");
+    assert!(
+        cx.debug_bounds("pairing-input").is_some(),
+        "connection controls reachable"
+    );
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     for trigger in ["worktree-chip", "branch-chip"] {
         let reply = open_branch_picker_at(cx, &requests, trigger, worktree);
         assert_eq!(app.read_with(cx, |app, _| app.branch_picker), Some(trigger));
-        reply.send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[]}))).unwrap();
+        reply
+            .send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[]})))
+            .unwrap();
         cx.run_until_parked();
         let manage = cx.debug_bounds("branch-picker-manage").unwrap();
         cx.simulate_click(manage.center(), Default::default());
         cx.run_until_parked();
-        assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Inspector);
-        assert_eq!(app.read_with(cx, |app, _| app.inspector_section), Some(InspectorSection::Worktrees));
+        assert_eq!(
+            app.read_with(cx, |app, _| app.right_tab),
+            RightTab::Inspector
+        );
+        assert_eq!(
+            app.read_with(cx, |app, _| app.inspector_section),
+            Some(InspectorSection::Worktrees)
+        );
         assert!(cx.debug_bounds("draft-checkout-update").is_some());
+        // Manage opens its own readonly refresh. Settle it before the next
+        // picker opens, otherwise its canceled receipt is mistaken for ours.
+        branch_workflows::refresh_refs(cx, &requests);
     }
 }
 
@@ -189,42 +232,63 @@ fn statusbar_error_and_offline_keep_readable_text_and_full_tooltip(cx: &mut Test
     let mut connected_tooltip_width = px(0.);
     for offline in [false, true] {
         cx.simulate_mouse_move(point(px(1.), px(1.)), None, Default::default());
-        cx.update(|_, cx| app.update(cx, |app, cx| {
-            app.status = message.into();
-            if offline { app.commands = None; }
-            app.pending_actions = 1;
-            cx.notify();
-        }));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.status = message.into();
+                if offline {
+                    app.commands = None;
+                }
+                app.pending_actions = 1;
+                cx.notify();
+            })
+        });
         cx.simulate_resize(size(px(960.), px(1000.)));
         cx.run_until_parked();
-        let bounds = cx.debug_bounds("status-message").expect("status message painted");
-        assert!(bounds.size.width >= px(96.), "readable message lane: {bounds:?}");
+        let bounds = cx
+            .debug_bounds("status-message")
+            .expect("status message painted");
+        assert!(
+            bounds.size.width >= px(96.),
+            "readable message lane: {bounds:?}"
+        );
         cx.simulate_mouse_move(bounds.center(), None, Default::default());
         cx.run_until_parked();
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
-        let tooltip = cx.debug_bounds("status-tooltip-text").expect("hover reveals status tooltip");
+        let tooltip = cx
+            .debug_bounds("status-tooltip-text")
+            .expect("hover reveals status tooltip");
         let viewport = cx.update(|window, _| window.viewport_size());
-        assert!(tooltip.size.width > bounds.size.width * 3., "tooltip retains the long message");
+        assert!(
+            tooltip.size.width > bounds.size.width * 3.,
+            "tooltip retains the long message"
+        );
         assert!(tooltip.left() >= px(0.) && tooltip.right() <= viewport.width);
         assert!(tooltip.top() >= px(0.) && tooltip.bottom() <= viewport.height);
         if offline {
-            assert!(tooltip.size.width > connected_tooltip_width, "Offline prefix remains in full tooltip");
+            assert!(
+                tooltip.size.width > connected_tooltip_width,
+                "Offline prefix remains in full tooltip"
+            );
         } else {
             connected_tooltip_width = tooltip.size.width;
         }
     }
     // A message longer than the viewport wraps in the tooltip, not in the bar.
     cx.simulate_mouse_move(point(px(1.), px(1.)), None, Default::default());
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.status = message.repeat(4);
-        cx.notify();
-    }));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.status = message.repeat(4);
+            cx.notify();
+        })
+    });
     cx.run_until_parked();
     let bounds = cx.debug_bounds("status-message").unwrap();
     cx.simulate_mouse_move(bounds.center(), None, Default::default());
     cx.run_until_parked();
-    cx.executor().advance_clock(std::time::Duration::from_secs(1));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
     let tooltip = cx.debug_bounds("status-tooltip-text").unwrap();
     assert!(tooltip.size.height > bounds.size.height * 2.);
@@ -278,7 +342,10 @@ fn checkpoint_revert_arms_then_dispatches(cx: &mut TestAppContext) {
         .debug_bounds("revert-checkpoint")
         .expect("revert button is visible");
     cx.simulate_click(bounds.center(), Default::default());
-    assert!(requests.try_recv().is_err(), "first click only arms the revert");
+    assert!(
+        requests.try_recv().is_err(),
+        "first click only arms the revert"
+    );
     assert_eq!(app.read_with(cx, |app, _| app.confirm_revert), Some(2));
 
     let bounds = cx.debug_bounds("revert-checkpoint").unwrap();
@@ -304,9 +371,7 @@ fn each_turn_owns_its_activity_and_checkpoint_controls(cx: &mut TestAppContext) 
             "completedAt": at
         })
     };
-    let activity = |id: &str, turn: &str, at: &str| {
-        json!({"id": id, "kind": "tool.completed", "tone": "tool", "summary": "Ran tests", "payload": {}, "turnId": turn, "createdAt": at})
-    };
+    let activity = |id: &str, turn: &str, at: &str| json!({"id": id, "kind": "tool.completed", "tone": "tool", "summary": "Ran tests", "payload": {}, "turnId": turn, "createdAt": at});
     cx.update(|_, cx| {
         app.update(cx, |app, cx| {
             app.detail.thread = Some(json!({
@@ -354,15 +419,16 @@ fn each_turn_owns_its_activity_and_checkpoint_controls(cx: &mut TestAppContext) 
     let bounds = cx.debug_bounds("revert-checkpoint").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     assert_eq!(app.read_with(cx, |app, _| app.confirm_revert), Some(2));
-    assert!(requests.try_recv().is_err(), "arming never dispatches a revert");
+    assert!(
+        requests.try_recv().is_err(),
+        "arming never dispatches a revert"
+    );
 }
 
 #[gpui_kit::test]
 fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
-    let activity = |id: &str, kind: &str, tone: &str, summary: &str, at: &str, payload: Value| {
-        json!({"id": id, "kind": kind, "tone": tone, "summary": summary, "payload": payload, "turnId": "turn-1", "createdAt": at})
-    };
+    let activity = |id: &str, kind: &str, tone: &str, summary: &str, at: &str, payload: Value| json!({"id": id, "kind": kind, "tone": tone, "summary": summary, "payload": payload, "turnId": "turn-1", "createdAt": at});
     let command = json!({"itemType": "command_execution", "toolCallId": "c1", "title": "Ran command", "data": {"item": {"command": "cargo test"}}});
     let mut command_done = command.clone();
     command_done["status"] = json!("completed");
@@ -391,19 +457,32 @@ fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) 
         })
     });
     cx.run_until_parked();
-    let bounds = cx.debug_bounds("activity-toggle").expect("the turn has its disclosure");
+    let bounds = cx
+        .debug_bounds("activity-toggle")
+        .expect("the turn has its disclosure");
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
 
-    for id in ["tool-row-e1", "tool-name-e1", "tool-row-e4", "tool-name-e4", "activity-e2"] {
+    for id in [
+        "tool-row-e1",
+        "tool-name-e1",
+        "tool-row-e4",
+        "tool-name-e4",
+        "activity-e2",
+    ] {
         assert!(cx.debug_bounds(id).is_some(), "{id} renders");
     }
-    assert!(cx.debug_bounds("activity-e3").is_none(), "the completion merges into its call's row");
+    assert!(
+        cx.debug_bounds("activity-e3").is_none(),
+        "the completion merges into its call's row"
+    );
     let names: Vec<String> = app.read_with(cx, |app, _| {
         app.conversation_rows
             .iter()
             .flat_map(|row| match &row.entry {
-                t3code_desktop_gpui::conversation::TimelineEntry::Activity { items, .. } => items.clone(),
+                t3code_desktop_gpui::conversation::TimelineEntry::Activity { items, .. } => {
+                    items.clone()
+                }
                 _ => Vec::new(),
             })
             .filter_map(|item| match item {
@@ -415,12 +494,23 @@ fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) 
     assert_eq!(names, ["Ran command", "File change"]);
     assert!(cx.debug_bounds("tool-body-e1").is_none() && cx.debug_bounds("tool-body-e4").is_none());
 
-    let bounds = cx.debug_bounds("tool-toggle-e1").expect("the command call can expand");
+    let bounds = cx
+        .debug_bounds("tool-toggle-e1")
+        .expect("the command call can expand");
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("tool-body-e1").is_some(), "the command output shows");
-    assert!(cx.debug_bounds("tool-body-e4").is_none(), "the other call stays collapsed");
-    assert!(cx.debug_bounds("activity-e2").is_some(), "the plain activity still renders");
+    assert!(
+        cx.debug_bounds("tool-body-e1").is_some(),
+        "the command output shows"
+    );
+    assert!(
+        cx.debug_bounds("tool-body-e4").is_none(),
+        "the other call stays collapsed"
+    );
+    assert!(
+        cx.debug_bounds("activity-e2").is_some(),
+        "the plain activity still renders"
+    );
     app.read_with(cx, |app, _| {
         assert_eq!(app.activity_expanded.get("tool:e1"), Some(&true));
         assert_eq!(app.activity_expanded.get("turn-1"), Some(&true));
@@ -430,20 +520,31 @@ fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) 
 #[gpui_kit::test]
 fn header_diff_chip_hides_when_the_checkpoint_changed_nothing(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
-    let detail = |files: Value| json!({
-        "id": "t", "title": "Thread", "messages": [], "activities": [], "proposedPlans": [],
-        "checkpoints": [{"turnId": "turn-1", "checkpointTurnCount": 1, "checkpointRef": "ref",
-            "status": "ready", "files": files, "assistantMessageId": null,
-            "completedAt": "2026-01-01T00:00:00Z"}],
-        "session": null,
+    let detail = |files: Value| {
+        json!({
+            "id": "t", "title": "Thread", "messages": [], "activities": [], "proposedPlans": [],
+            "checkpoints": [{"turnId": "turn-1", "checkpointTurnCount": 1, "checkpointRef": "ref",
+                "status": "ready", "files": files, "assistantMessageId": null,
+                "completedAt": "2026-01-01T00:00:00Z"}],
+            "session": null,
+        })
+    };
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(detail(json!([])));
+            cx.notify();
+        })
     });
-    cx.update(|_, cx| app.update(cx, |app, cx| { app.detail.thread = Some(detail(json!([]))); cx.notify(); }));
     cx.run_until_parked();
     assert!(cx.debug_bounds("header-diff").is_none());
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.detail.thread = Some(detail(json!([{"path": "a.rs", "kind": "modified", "additions": 1, "deletions": 0}])));
-        cx.notify();
-    }));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.detail.thread = Some(detail(
+                json!([{"path": "a.rs", "kind": "modified", "additions": 1, "deletions": 0}]),
+            ));
+            cx.notify();
+        })
+    });
     cx.run_until_parked();
     assert!(cx.debug_bounds("header-diff").is_some());
 }
@@ -463,7 +564,10 @@ fn new_draft_is_titled_new_thread_whatever_the_title_field_holds(cx: &mut TestAp
         assert_eq!(app.pending_threads.len(), 1);
         assert_eq!(app.pending_threads[0].thread.title, "New thread");
         assert_eq!(app.shell.threads[0].title, "Thread");
-        assert_eq!(app.selected_thread, Some(app.pending_threads[0].thread.id.clone()));
+        assert_eq!(
+            app.selected_thread,
+            Some(app.pending_threads[0].thread.id.clone())
+        );
     });
 }
 
@@ -500,7 +604,10 @@ fn header_thread_toolbar_needs_a_selected_thread(cx: &mut TestAppContext) {
     cx.update(|window, cx| app.update(cx, |app, cx| app.new_thread(window, cx)));
     cx.run_until_parked();
     assert!(cx.debug_bounds("push-pr").is_some());
-    assert!(cx.debug_bounds("branch-selector").is_none(), "a draft without a branch");
+    assert!(
+        cx.debug_bounds("branch-selector").is_none(),
+        "a draft without a branch"
+    );
 }
 
 #[gpui_kit::test]
@@ -514,7 +621,9 @@ fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) 
         })
     });
     cx.run_until_parked();
-    let bounds = cx.debug_bounds("open-editor").expect("open button is visible");
+    let bounds = cx
+        .debug_bounds("open-editor")
+        .expect("open button is visible");
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
     let connection::Command::Call { tag, payload, .. } = requests.try_recv().unwrap() else {
@@ -595,9 +704,9 @@ fn sidebar_projects_collapse_and_expand(cx: &mut TestAppContext) {
         .debug_bounds("project-toggle-p")
         .expect("project toggle is visible");
     cx.simulate_click(toggle.center(), Default::default());
-    assert!(app.read_with(cx, |app, _| app
-        .collapsed_projects
-        .contains(&"p".to_owned())));
+    assert!(app.read_with(cx, |app, _| {
+        app.collapsed_projects.contains(&"p".to_owned())
+    }));
     let toggle = cx.debug_bounds("project-toggle-p").unwrap();
     cx.simulate_click(toggle.center(), Default::default());
     assert!(app.read_with(cx, |app, _| app.collapsed_projects.is_empty()));
@@ -676,21 +785,39 @@ fn user_input_card_submits_answers_and_closes_once_resolved(cx: &mut TestAppCont
         cx.notify();
     }));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("user-input-custom-0").is_none(), "the single-select question forbids custom text");
+    assert!(
+        cx.debug_bounds("user-input-custom-0").is_none(),
+        "the single-select question forbids custom text"
+    );
     assert!(cx.debug_bounds("user-input-custom-1").is_some());
-    assert!(cx.debug_bounds("user-input-dismiss").is_none(), "a native callback cannot be dismissed");
-    for selector in ["user-input-option-0-0", "user-input-option-0-1", "user-input-option-1-0", "user-input-option-1-2", "user-input-option-1-1", "user-input-option-1-0"] {
+    assert!(
+        cx.debug_bounds("user-input-dismiss").is_none(),
+        "a native callback cannot be dismissed"
+    );
+    for selector in [
+        "user-input-option-0-0",
+        "user-input-option-0-1",
+        "user-input-option-1-0",
+        "user-input-option-1-2",
+        "user-input-option-1-1",
+        "user-input-option-1-0",
+    ] {
         let bounds = cx.debug_bounds(selector).expect("option chip is visible");
         cx.simulate_click(bounds.center(), Default::default());
     }
-    let submit = cx.debug_bounds("user-input-submit").expect("submit is visible");
+    let submit = cx
+        .debug_bounds("user-input-submit")
+        .expect("submit is visible");
     cx.simulate_click(submit.center(), Default::default());
     let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
         panic!("expected a user-input response");
     };
     assert_eq!(payload["type"], "thread.user-input.respond");
     assert_eq!(payload["requestId"], "req-1");
-    assert_eq!(payload["answers"], json!({"scope": "Server", "checks": ["Types", "Lint"]}));
+    assert_eq!(
+        payload["answers"],
+        json!({"scope": "Server", "checks": ["Types", "Lint"]})
+    );
 
     let custom = cx.debug_bounds("user-input-custom-1").unwrap();
     cx.simulate_click(custom.center(), Default::default());
@@ -699,15 +826,21 @@ fn user_input_card_submits_answers_and_closes_once_resolved(cx: &mut TestAppCont
     let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
         panic!("expected a user-input response");
     };
-    assert_eq!(payload["answers"], json!({"scope": "Server", "checks": "Benchmarks"}));
+    assert_eq!(
+        payload["answers"],
+        json!({"scope": "Server", "checks": "Benchmarks"})
+    );
     assert!(
         app.read_with(cx, |app, _| !app.user_input_selected.contains_key("checks")),
         "typed text replaces the chosen chips, so they no longer show selected"
     );
 
-    cx.update(|window, cx| app.update(cx, |app, cx| {
-        app.composer.update(cx, |input, cx| input.set_value("Draft ", window, cx));
-    }));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.composer
+                .update(cx, |input, cx| input.set_value("Draft ", window, cx));
+        })
+    });
     let tests = cx.debug_bounds("user-input-option-1-0").unwrap();
     cx.simulate_click(tests.center(), Default::default());
     assert_eq!(
@@ -719,7 +852,10 @@ fn user_input_card_submits_answers_and_closes_once_resolved(cx: &mut TestAppCont
     let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
         panic!("expected a user-input response");
     };
-    assert_eq!(payload["answers"], json!({"scope": "Server", "checks": ["Tests"]}));
+    assert_eq!(
+        payload["answers"],
+        json!({"scope": "Server", "checks": ["Tests"]})
+    );
 
     cx.update(|_, cx| app.update(cx, |app, cx| {
         let resolved = json!({"id":"a2","kind":"user-input.resolved","tone":"info","summary":"User input submitted","payload":{"requestId":"req-1","answers":{}},"createdAt":"2026-01-01T00:00:05Z","turnId":null});
@@ -775,13 +911,19 @@ fn attachments_render_and_detach(cx: &mut TestAppContext) {
         })
     });
     cx.run_until_parked();
-    let bounds = cx.debug_bounds("detach-0").expect("attachment chip is visible");
+    let bounds = cx
+        .debug_bounds("detach-0")
+        .expect("attachment chip is visible");
     cx.simulate_click(bounds.center(), Default::default());
-    assert!(app.read_with(cx, |app, _| app.attachments.is_empty()));
-    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+    cx.run_until_parked();
+    assert_eq!(app.read_with(cx, |app, _| app.attachments.len()), 1);
+    let connection::Command::Call { payload, reply, .. } = requests.try_recv().unwrap() else {
         panic!("expected an attachment delete");
     };
     assert_eq!(payload["attachmentId"], "a1");
+    reply.send_blocking(Ok(json!({}))).unwrap();
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| app.attachments.is_empty()));
 }
 
 #[gpui_kit::test]
@@ -821,15 +963,24 @@ fn snapshot(messages: Vec<Value>, status: &str) -> Value {
 fn conversation_follows_the_tail_until_the_user_scrolls_up(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     let load = |count: usize, cx: &mut VisualTestContext| {
-        cx.update(|_, cx| app.update(cx, |app, cx| {
-            app.apply_thread_update("t", snapshot((0..count).map(message).collect(), "idle"), cx)
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.apply_thread_update(
+                    "t",
+                    snapshot((0..count).map(message).collect(), "idle"),
+                    cx,
+                )
                 .unwrap();
-            cx.notify();
-        }));
+                cx.notify();
+            })
+        });
         cx.run_until_parked();
         app.read_with(cx, |app, _| {
             let list = &app.conversation_scroll;
-            (list.scroll_px_offset_for_scrollbar().y, list.max_offset_for_scrollbar().y)
+            (
+                list.scroll_px_offset_for_scrollbar().y,
+                list.max_offset_for_scrollbar().y,
+            )
         })
     };
     let (offset, max) = load(60, cx);
@@ -838,7 +989,9 @@ fn conversation_follows_the_tail_until_the_user_scrolls_up(cx: &mut TestAppConte
     let (offset, max) = load(80, cx);
     assert_eq!(offset, -max, "new content keeps the tail in view");
     // Reading history: later updates must not yank the viewport.
-    app.read_with(cx, |app, _| app.conversation_scroll.scroll_to(Default::default()));
+    app.read_with(cx, |app, _| {
+        app.conversation_scroll.scroll_to(Default::default())
+    });
     let (offset, _) = load(90, cx);
     assert_eq!(offset, px(0.));
 }
@@ -849,7 +1002,10 @@ fn conversation_tail_survives_streaming_and_thread_switches(cx: &mut TestAppCont
     let tail = |cx: &mut VisualTestContext| {
         app.read_with(cx, |app, _| {
             let list = &app.conversation_scroll;
-            (list.scroll_px_offset_for_scrollbar().y, list.max_offset_for_scrollbar().y)
+            (
+                list.scroll_px_offset_for_scrollbar().y,
+                list.max_offset_for_scrollbar().y,
+            )
         })
     };
     let load = |thread: &str, messages: Vec<Value>, cx: &mut VisualTestContext| {
@@ -870,7 +1026,9 @@ fn conversation_tail_survives_streaming_and_thread_switches(cx: &mut TestAppCont
     assert!(max > before, "the streamed message grew");
     assert_eq!(offset, -max, "streaming growth keeps the tail in view");
 
-    app.read_with(cx, |app, _| app.conversation_scroll.scroll_to(Default::default()));
+    app.read_with(cx, |app, _| {
+        app.conversation_scroll.scroll_to(Default::default())
+    });
     cx.update(|window, cx| app.update(cx, |app, cx| {
         app.shell.apply(serde_json::from_value(json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"projects":[{"id":"p","title":"Fixture","workspaceRoot":"/tmp/fixture"}],"threads":[{"id":"t","projectId":"p","title":"Thread","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"archivedAt":null},{"id":"u","projectId":"p","title":"Other","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"archivedAt":null}]}})).unwrap()).unwrap();
         app.select_thread("u", window, cx);
@@ -878,17 +1036,22 @@ fn conversation_tail_survives_streaming_and_thread_switches(cx: &mut TestAppCont
     load("u", (0..60).map(message).collect(), cx);
     let (offset, max) = tail(cx);
     assert!(max > px(0.));
-    assert_eq!(offset, -max, "switching threads lands on the new thread's tail");
+    assert_eq!(
+        offset, -max,
+        "switching threads lands on the new thread's tail"
+    );
 }
 
 #[gpui_kit::test]
 fn long_conversations_only_build_rows_near_the_viewport(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.apply_thread_update("t", snapshot((0..2000).map(message).collect(), "idle"), cx)
-            .unwrap();
-        cx.notify();
-    }));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.apply_thread_update("t", snapshot((0..2000).map(message).collect(), "idle"), cx)
+                .unwrap();
+            cx.notify();
+        })
+    });
     cx.run_until_parked();
     let ids: Vec<&'static str> = (0..2000)
         .map(|index| &*format!("message-m{index}").leak())
@@ -898,20 +1061,34 @@ fn long_conversations_only_build_rows_near_the_viewport(cx: &mut TestAppContext)
             .filter(|id| cx.debug_bounds(id).is_some())
             .count()
     };
-    assert!(cx.debug_bounds("message-m1999").is_some(), "the newest message is built");
+    assert!(
+        cx.debug_bounds("message-m1999").is_some(),
+        "the newest message is built"
+    );
     assert!(cx.debug_bounds("message-m1000").is_none());
     assert!(cx.debug_bounds("message-m0").is_none());
     let tail_rows = built(cx);
-    assert!((1..50).contains(&tail_rows), "{tail_rows} rows built at the tail");
+    assert!(
+        (1..50).contains(&tail_rows),
+        "{tail_rows} rows built at the tail"
+    );
 
-    app.read_with(cx, |app, _| app.conversation_scroll.scroll_to(Default::default()));
+    app.read_with(cx, |app, _| {
+        app.conversation_scroll.scroll_to(Default::default())
+    });
     cx.update(|_, cx| app.update(cx, |_, cx| cx.notify()));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("message-m0").is_some(), "the oldest message is built");
+    assert!(
+        cx.debug_bounds("message-m0").is_some(),
+        "the oldest message is built"
+    );
     assert!(cx.debug_bounds("message-m1000").is_none());
     assert!(cx.debug_bounds("message-m1999").is_none());
     let head_rows = built(cx);
-    assert!((1..50).contains(&head_rows), "{head_rows} rows built at the top");
+    assert!(
+        (1..50).contains(&head_rows),
+        "{head_rows} rows built at the top"
+    );
 }
 
 #[gpui_kit::test]
@@ -966,10 +1143,13 @@ fn running_turn_swaps_send_for_stop(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     assert!(cx.debug_bounds("send").is_some());
     assert!(cx.debug_bounds("stop-turn").is_none());
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.apply_thread_update("t", snapshot(vec![message(0)], "running"), cx).unwrap();
-        cx.notify();
-    }));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.apply_thread_update("t", snapshot(vec![message(0)], "running"), cx)
+                .unwrap();
+            cx.notify();
+        })
+    });
     cx.run_until_parked();
     assert!(cx.debug_bounds("send").is_none());
     let stop = cx.debug_bounds("stop-turn").expect("Stop replaces Send");
@@ -1527,7 +1707,10 @@ fn stashing_and_restoring_preserves_prompt_without_overwriting_edits(cx: &mut Te
             app.composer.update(cx, |input, cx| input.focus(window, cx))
         })
     });
-    assert!(cx.debug_bounds("stash").is_none(), "action dismisses the menu");
+    assert!(
+        cx.debug_bounds("stash").is_none(),
+        "action dismisses the menu"
+    );
     cx.simulate_input("Keep this edit");
     cx.simulate_click(more.center(), Default::default());
     let restore = cx.debug_bounds("restore-stash").unwrap();
@@ -1567,7 +1750,10 @@ fn composer_more_dismisses_without_changing_the_draft(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("stash").is_some());
     cx.simulate_click(point(px(640.), px(300.)), Default::default());
     assert!(cx.debug_bounds("stash").is_none());
-    assert_eq!(app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()), "Keep my draft");
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        "Keep my draft"
+    );
     assert!(requests.try_recv().is_err());
 }
 
@@ -1591,34 +1777,47 @@ fn composer_more_restores_saved_prompts_and_reports_an_empty_saved_stash(cx: &mu
     let mut store = drafts::Drafts::open(directory.path().join("drafts.json")).unwrap();
     let scope = app.read_with(cx, |app, _| app.environment_scope.clone());
     store.stash(&scope, "Saved in this environment".into());
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.draft_store = Some(store);
-        cx.notify();
-    }));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.draft_store = Some(store);
+            cx.notify();
+        })
+    });
     let more = cx.debug_bounds("composer-more").unwrap();
     cx.simulate_click(more.center(), Default::default());
     let restore = cx.debug_bounds("restore-stash").unwrap();
     cx.simulate_click(restore.center(), Default::default());
-    assert_eq!(app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()), "Saved in this environment");
-    cx.update(|window, cx| app.update(cx, |app, cx| {
-        app.composer.update(cx, |input, cx| input.set_value("", window, cx));
-        cx.notify();
-    }));
+    assert_eq!(
+        app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
+        "Saved in this environment"
+    );
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.composer
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            cx.notify();
+        })
+    });
     cx.simulate_click(more.center(), Default::default());
     let restore = cx.debug_bounds("restore-stash").unwrap();
     cx.simulate_click(restore.center(), Default::default());
-    assert_eq!(app.read_with(cx, |app, _| app.status.clone()), "Nothing stashed yet");
+    assert_eq!(
+        app.read_with(cx, |app, _| app.status.clone()),
+        "Nothing stashed yet"
+    );
     assert!(app.read_with(cx, |app, cx| app.composer.read(cx).value().is_empty()));
 }
 
 #[gpui_kit::test]
 fn narrow_composer_keeps_model_more_and_send_usable_on_one_row(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.sidebar_open = false;
-        app.inspector_open = false;
-        cx.notify();
-    }));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.sidebar_open = false;
+            app.inspector_open = false;
+            cx.notify();
+        })
+    });
     cx.simulate_resize(size(px(480.), px(700.)));
     cx.update(|window, cx| app.update(cx, |app, cx| {
         app.model.update(cx, |input, cx| input.set_value("a-very-long-provider-model-identifier-with-a-version-suffix", window, cx));
@@ -1627,25 +1826,50 @@ fn narrow_composer_keeps_model_more_and_send_usable_on_one_row(cx: &mut TestAppC
     }));
     cx.simulate_input("A narrow-window prompt");
     for (width, panels) in [(480., false), (960., true)] {
-        cx.update(|_, cx| app.update(cx, |app, cx| {
-            app.sidebar_open = panels;
-            app.inspector_open = panels;
-            cx.notify();
-        }));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.sidebar_open = panels;
+                app.inspector_open = panels;
+                cx.notify();
+            })
+        });
         cx.simulate_resize(size(px(width), px(700.)));
         let row = cx.debug_bounds("composer-actions").unwrap();
-        let selectors = ["attach", "runtime-mode", "interaction-mode", "model-catalog", "composer-more", "context-meter", "send"];
+        let selectors = [
+            "attach",
+            "runtime-mode",
+            "interaction-mode",
+            "model-catalog",
+            "composer-more",
+            "context-meter",
+            "send",
+        ];
         let mut previous_right = row.left();
         for selector in selectors {
             let bounds = cx.debug_bounds(selector).unwrap();
-            assert!(bounds.left() >= previous_right, "{selector} must not overlap its predecessor");
-            assert!(bounds.right() <= row.right(), "{selector} stays in the usable row");
-            assert!(bounds.size.width >= px(20.), "{selector} keeps a compact Kit hit target: {bounds:?}");
-            assert!((f32::from(bounds.center().y - row.center().y)).abs() <= 1., "{selector} must not wrap");
+            assert!(
+                bounds.left() >= previous_right,
+                "{selector} must not overlap its predecessor"
+            );
+            assert!(
+                bounds.right() <= row.right(),
+                "{selector} stays in the usable row"
+            );
+            assert!(
+                bounds.size.width >= px(20.),
+                "{selector} keeps a compact Kit hit target: {bounds:?}"
+            );
+            assert!(
+                (f32::from(bounds.center().y - row.center().y)).abs() <= 1.,
+                "{selector} must not wrap"
+            );
             previous_right = bounds.right();
         }
         let model = cx.debug_bounds("model-catalog").unwrap();
-        assert!(model.size.width >= px(64.), "model identity retains space beside its icon");
+        assert!(
+            model.size.width >= px(64.),
+            "model identity retains space beside its icon"
+        );
         cx.simulate_click(model.center(), Default::default());
         assert!(app.read_with(cx, |app, _| app.catalog_open));
         cx.simulate_keystrokes("escape");
@@ -1656,7 +1880,9 @@ fn narrow_composer_keeps_model_more_and_send_usable_on_one_row(cx: &mut TestAppC
     }
     let send = cx.debug_bounds("send").unwrap();
     cx.simulate_click(send.center(), Default::default());
-    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else { panic!("expected send"); };
+    let connection::Command::Call { payload, .. } = requests.try_recv().unwrap() else {
+        panic!("expected send");
+    };
     assert_eq!(payload["message"]["text"], "A narrow-window prompt");
 }
 
@@ -1949,11 +2175,17 @@ fn worktree_removal_requires_confirmation_and_dirty_rejection_preserves_choice(
         })
     });
     cx.run_until_parked();
-    let connection::Command::Call {
+    let (connection::Command::Call {
         tag,
         payload,
         reply,
-    } = requests.try_recv().unwrap()
+    }
+    | connection::Command::CallMutation {
+        tag,
+        payload,
+        reply,
+        ..
+    }) = requests.try_recv().unwrap()
     else {
         panic!("remove")
     };
@@ -1964,8 +2196,9 @@ fn worktree_removal_requires_confirmation_and_dirty_rejection_preserves_choice(
         .send_blocking(Err("Worktree contains modified files".into()))
         .unwrap();
     cx.run_until_parked();
-    assert!(!app.read_with(cx, |app, _| app.worktree_busy));
     assert!(app.read_with(cx, |app, _| app.status.contains("modified files")));
+    branch_workflows::refresh_refs(cx, &requests);
+    assert!(!app.read_with(cx, |app, _| app.worktree_busy));
     assert_eq!(
         app.read_with(cx, |app, cx| app.worktree_path.read(cx).value().to_string()),
         "/tmp/owned-worktree"
@@ -1993,14 +2226,45 @@ fn checkout_choice_preserves_draft_and_creates_new_thread_in_chosen_worktree(
                 .update(cx, |input, cx| input.set_value("codex", window, cx));
             app.model
                 .update(cx, |input, cx| input.set_value("gpt-6.1-sol", window, cx));
-            app.execute_command(palette::Command::NewThread, window, cx);
         })
     });
     cx.run_until_parked();
-    assert!(matches!(
-        requests.try_recv().unwrap(),
-        connection::Command::SelectThread(None)
-    ));
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("next-thread choice must verify read-only, never stop the old thread");
+    };
+    assert_eq!(tag, "vcs.listRefs");
+    assert_eq!(payload["cwd"], "/tmp/owned-worktree");
+    assert_eq!(
+        app.read_with(cx, |app, cx| (
+            app.selected_thread.clone(),
+            app.composer.read(cx).value().to_string(),
+            app.new_thread_checkout.clone()
+        )),
+        (Some("t".into()), "Existing draft 世界".into(), None)
+    );
+    reply.send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[{"name":"actual-owned-branch","current":true}]}))).unwrap();
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err());
+    assert_eq!(
+        app.read_with(cx, |app, _| (
+            app.shell.threads[0].branch.clone(),
+            app.shell.threads[0].worktree_path.clone(),
+            app.selected_thread.clone(),
+            app.pending_threads.len()
+        )),
+        (None, None, Some("t".into()), 0)
+    );
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.execute_command(palette::Command::NewThread, window, cx)
+        })
+    });
+    cx.run_until_parked();
     assert!(
         matches!(requests.try_recv().unwrap(),connection::Command::Subscribe {tag,..} if tag=="subscribeWorktreeSetup")
     );
@@ -2024,7 +2288,7 @@ fn checkout_choice_preserves_draft_and_creates_new_thread_in_chosen_worktree(
     assert_eq!(payload["type"], "thread.turn.start");
     assert_eq!(
         payload["bootstrap"]["createThread"]["branch"],
-        "owned-branch"
+        "actual-owned-branch"
     );
     assert_eq!(
         payload["bootstrap"]["createThread"]["worktreePath"],
@@ -2049,6 +2313,181 @@ fn checkout_choice_preserves_draft_and_creates_new_thread_in_chosen_worktree(
 }
 
 #[gpui_kit::test]
+fn next_checkout_reuses_verified_worktree_without_touching_running_selected_thread(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_input("original prompt 世界");
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.shell.threads[0].branch = Some("main".into());
+            app.shell.threads[0].session = Some(shell::Session {
+                status: "running".into(),
+                last_error: None,
+            });
+            app.refs = vec![workspaces::Ref {
+                name: "verified".into(),
+                current: false,
+                is_default: false,
+                worktree_path: Some("/tmp/verified-tree".into()),
+            }];
+            app.choose_checkout(
+                "verified".into(),
+                Some("/tmp/untrusted-override".into()),
+                window,
+                cx,
+            );
+        })
+    });
+    cx.run_until_parked();
+    assert!(
+        requests.try_recv().is_err(),
+        "known worktree reuse cannot stop or switch"
+    );
+    assert_eq!(
+        app.read_with(cx, |app, cx| (
+            app.selected_thread.clone(),
+            app.selected_workspace(),
+            app.shell.threads[0].branch.clone(),
+            app.shell.threads[0]
+                .session
+                .as_ref()
+                .map(|s| s.status.clone()),
+            app.composer.read(cx).value().to_string(),
+            app.pending_threads.len(),
+            app.new_thread_checkout.clone()
+        )),
+        (
+            Some("t".into()),
+            Some("/tmp/fixture".into()),
+            Some("main".into()),
+            Some("running".into()),
+            "original prompt 世界".into(),
+            0,
+            Some((
+                "p".into(),
+                "verified".into(),
+                Some("/tmp/verified-tree".into())
+            ))
+        )
+    );
+    // Exercise the actual New Thread entry point, not a local draft fixture.
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| (
+            app.pending_threads.len(),
+            app.pending_threads[0].thread.branch.clone(),
+            app.pending_threads[0].thread.worktree_path.clone(),
+            app.drafts.get("t").cloned(),
+            app.shell.threads[0]
+                .session
+                .as_ref()
+                .map(|s| s.status.clone())
+        )),
+        (
+            1,
+            Some("verified".into()),
+            Some("/tmp/verified-tree".into()),
+            Some("original prompt 世界".into()),
+            Some("running".into())
+        )
+    );
+}
+
+#[gpui_kit::test]
+fn next_checkout_readonly_verification_rejects_invalid_and_retired_receipts(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = harness(cx);
+    cx.simulate_input("retained original");
+    for retirement in [
+        "invalid",
+        "no-head",
+        "cancel",
+        "generation",
+        "environment",
+        "selection",
+    ] {
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.new_thread_checkout =
+                    Some(("p".into(), "previous".into(), Some("/tmp/previous".into())));
+                app.choose_checkout("claimed".into(), Some("/tmp/unverified".into()), window, cx);
+            })
+        });
+        cx.run_until_parked();
+        let connection::Command::Call {
+            tag,
+            payload,
+            reply,
+        } = requests.try_recv().unwrap()
+        else {
+            panic!("readonly verification");
+        };
+        assert_eq!(tag, "vcs.listRefs");
+        assert_eq!(payload["cwd"], "/tmp/unverified");
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| match retirement {
+                "cancel" => app.cancel_branch_workflow(cx),
+                "generation" => app.generation += 1,
+                "environment" => app.environment_scope = "another-environment".into(),
+                "selection" => {
+                    app.selected_thread = None;
+                    app.invalidate_checkout_context(cx);
+                }
+                _ => (),
+            })
+        });
+        // Selection invalidation may drop a readonly receiver; unlike a physical
+        // mutation there is no accepted outcome to retain or adopt.
+        let delivered = reply.send_blocking(Ok(if retirement == "invalid" {
+            json!({"isRepo":false,"refs":[],"nextCursor":null})
+        } else if retirement == "no-head" {
+            json!({"isRepo":true,"refs":[{"name":"claimed","current":false}],"nextCursor":null})
+        } else {
+            json!({"isRepo":true,"refs":[{"name":"late-actual","current":true}],"nextCursor":null})
+        }));
+        if retirement != "selection" {
+            delivered.unwrap();
+        }
+        cx.run_until_parked();
+        assert_eq!(
+            app.read_with(cx, |app, _| app.new_thread_checkout.clone()),
+            Some(("p".into(), "previous".into(), Some("/tmp/previous".into()))),
+            "{retirement} cannot advertise a stale or unverified destination"
+        );
+        assert!(requests.try_recv().is_err());
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.selected_thread = Some("t".into());
+                app.environment_scope = "default".into();
+                app.invalidate_checkout_context(cx);
+            })
+        });
+    }
+    assert_eq!(
+        app.read_with(cx, |app, cx| (
+            app.composer.read(cx).value().to_string(),
+            app.pending_threads.len(),
+            app.shell.threads[0].branch.clone(),
+            app.shell.threads[0].worktree_path.clone()
+        )),
+        ("retained original".into(), 0, None, None)
+    );
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.choose_checkout("unoccupied-branch".into(), None, window, cx)
+        })
+    });
+    cx.run_until_parked();
+    assert!(
+        requests.try_recv().is_err(),
+        "next-thread planning cannot switch the shared root"
+    );
+}
+
+#[gpui_kit::test]
 fn first_turn_bootstrap_keeps_failed_draft_and_subscribes_history_only_after_acceptance(
     cx: &mut TestAppContext,
 ) {
@@ -2056,6 +2495,8 @@ fn first_turn_bootstrap_keeps_failed_draft_and_subscribes_history_only_after_acc
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.prepare_new_worktree = true;
+            app.start_from_origin = true;
+            app.run_setup_script = true;
             app.worktree_ref
                 .update(cx, |input, cx| input.set_value("main", window, cx));
             app.worktree_branch
@@ -2489,7 +2930,12 @@ fn slash_menu_runs_the_arrow_selected_command_on_enter(cx: &mut TestAppContext) 
     assert_eq!(app.read_with(cx, |app, _| app.slash_index), 1);
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    let connection::Command::Call { tag, payload, reply } = requests.try_recv().unwrap() else {
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
         panic!("expected the selected command");
     };
     assert_eq!(tag, "orchestration.dispatchCommand");
@@ -2655,6 +3101,7 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
     let (app, cx, requests) = harness(cx);
     cx.update(|_, cx| {
         app.update(cx, |app, cx| {
+            app.shell.synchronized = true;
             app.shell.threads[0].branch = Some("main".into());
             cx.notify();
         })
@@ -2665,7 +3112,10 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
     let picker = cx.debug_bounds("branch-picker").expect("picker is open");
     assert!(picker.top() >= chip.bottom());
     assert!(picker.left() >= chip.left() - px(1.));
-    assert!(cx.debug_bounds("branch-picker-notice").is_some(), "loading is shown");
+    assert!(
+        cx.debug_bounds("branch-picker-notice").is_some(),
+        "loading is shown"
+    );
     reply
         .send_blocking(Ok(json!({"isRepo":true,"nextCursor":null,"refs":[
             {"name":"feature/a","current":false,"isDefault":false,"worktreePath":null},
@@ -2680,10 +3130,16 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
     assert_eq!(picker_names(&app, cx), ["feature/a"]);
     assert!(cx.debug_bounds("branch-ref-1").is_none());
     cx.simulate_keystrokes("enter");
-    let connection::Command::Call {
+    cx.run_until_parked();
+    branch_workflows::finish_owned_stop(&app, cx, &requests);
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(key) if key.starts_with("checkout-stop-"))
+    );
+    let connection::Command::CallMutation {
         tag,
         payload,
         reply,
+        ..
     } = requests.try_recv().unwrap()
     else {
         panic!("expected a ref switch")
@@ -2700,8 +3156,9 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
     };
     assert_eq!(payload["type"], "thread.meta.update");
     assert_eq!(payload["branch"], "feature/a");
-    reply.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    reply.send_blocking(Ok(json!({"sequence":14}))).unwrap();
     cx.run_until_parked();
+    branch_workflows::refresh_refs(cx, &requests);
 
     // A ref checked out in another worktree moves the thread there.
     let reply = open_branch_picker(cx, &requests, "branch-selector");
@@ -2714,7 +3171,16 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
     let row = cx.debug_bounds("branch-ref-0").expect("worktree row");
     cx.simulate_click(row.center(), Default::default());
     cx.run_until_parked();
-    let connection::Command::Call { tag, payload, .. } = requests.try_recv().unwrap() else {
+    branch_workflows::finish_owned_stop(&app, cx, &requests);
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(key) if key.starts_with("checkout-stop-"))
+    );
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
         panic!("expected a checkout move")
     };
     assert_eq!(tag, "orchestration.dispatchCommand");
@@ -2722,11 +3188,14 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
     assert_eq!(payload["threadId"], "t");
     assert_eq!(payload["branch"], "fix");
     assert_eq!(payload["worktreePath"], "/tmp/fix-worktree");
+    reply.send_blocking(Ok(json!({"sequence":15}))).unwrap();
+    cx.run_until_parked();
+    branch_workflows::refresh_refs(cx, &requests);
     assert!(app.read_with(cx, |app, _| app.branch_picker.is_none()));
 }
 
 #[gpui_kit::test]
-fn branch_picker_sets_an_unsent_draft_checkout_without_a_request(cx: &mut TestAppContext) {
+fn branch_picker_sets_an_unsent_draft_checkout_with_only_readonly_refresh(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
@@ -2746,6 +3215,7 @@ fn branch_picker_sets_an_unsent_draft_checkout_without_a_request(cx: &mut TestAp
     let row = cx.debug_bounds("branch-ref-0").expect("worktree row");
     cx.simulate_click(row.center(), Default::default());
     cx.run_until_parked();
+    branch_workflows::refresh_refs(cx, &requests);
     assert!(requests.try_recv().is_err());
     let (branch, path) = app.read_with(cx, |app, _| {
         let draft = &app.pending_threads[0].thread;
@@ -2782,7 +3252,9 @@ fn branch_picker_closes_on_escape_and_outside_click_without_a_request(cx: &mut T
     assert!(requests.try_recv().is_err());
 
     // The status bar chip opens the same picker upward from itself.
-    let chip = cx.debug_bounds("branch-chip").expect("status bar branch chip");
+    let chip = cx
+        .debug_bounds("branch-chip")
+        .expect("status bar branch chip");
     let reply = open_branch_picker(cx, &requests, "branch-chip");
     let picker = cx.debug_bounds("branch-picker").expect("picker is open");
     assert!(picker.bottom() <= chip.top());
@@ -2800,11 +3272,13 @@ fn branch_picker_closes_on_escape_and_outside_click_without_a_request(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn branch_picker_manage_row_reveals_worktree_controls_from_a_hidden_panel(
-    cx: &mut TestAppContext,
-) {
+fn branch_picker_manage_row_reveals_worktree_controls_from_a_hidden_panel(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
-    cx.update(|_, cx| app.update(cx, |app, _| app.shell.threads[0].branch = Some("main".into())));
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| {
+            app.shell.threads[0].branch = Some("main".into())
+        })
+    });
     hide_right_panel_on_changes(&app, cx);
     assert!(cx.debug_bounds("draft-checkout-update").is_none());
     let reply = open_branch_picker(cx, &requests, "branch-selector");
@@ -2819,7 +3293,10 @@ fn branch_picker_manage_row_reveals_worktree_controls_from_a_hidden_panel(
     cx.run_until_parked();
     assert!(app.read_with(cx, |app, _| app.branch_picker.is_none()));
     assert!(app.read_with(cx, |app, _| app.inspector_open));
-    assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Inspector);
+    assert_eq!(
+        app.read_with(cx, |app, _| app.right_tab),
+        RightTab::Inspector
+    );
     assert!(cx.debug_bounds("draft-checkout-update").is_some());
 }
 
@@ -2924,11 +3401,14 @@ fn enter_while_running_queues_and_the_completed_turn_sends_it_with_its_settings(
     queue_prompt(cx, "and then this");
     assert!(cx.debug_bounds("queued-1").is_some());
     // Settings changed after queueing do not reach the queued send.
-    cx.update(|window, cx| app.update(cx, |app, cx| {
-        app.shell.threads[0].runtime_mode = Some("approval-required".into());
-        app.shell.threads[0].interaction_mode = Some("plan".into());
-        app.model.update(cx, |input, cx| input.set_value("gpt-5.5", window, cx));
-    }));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.shell.threads[0].runtime_mode = Some("approval-required".into());
+            app.shell.threads[0].interaction_mode = Some("plan".into());
+            app.model
+                .update(cx, |input, cx| input.set_value("gpt-5.5", window, cx));
+        })
+    });
 
     set_session(&app, cx, "t", "ready");
     let mut sent = calls(&requests);
@@ -2957,13 +3437,17 @@ fn enter_while_running_queues_and_the_completed_turn_sends_it_with_its_settings(
 fn a_removed_queued_message_is_never_sent(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     set_session(&app, cx, "t", "running");
-    cx.update(|_, cx| app.update(cx, |app, _| {
-        app.attachments.push(
+    cx.update(|_, cx| {
+        app.update(cx, |app, _| {
+            app.attachments.push(
             json!({"id": "a1", "name": "notes.md", "mimeType": "text/markdown", "sizeBytes": 12}),
         );
-    }));
+        })
+    });
     queue_prompt(cx, "never mind");
-    let remove = cx.debug_bounds("queued-remove-0").expect("queued row is visible");
+    let remove = cx
+        .debug_bounds("queued-remove-0")
+        .expect("queued row is visible");
     cx.simulate_click(remove.center(), Default::default());
     cx.run_until_parked();
     assert!(cx.debug_bounds("queued-0").is_none());
@@ -2976,23 +3460,35 @@ fn a_removed_queued_message_is_never_sent(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn steering_interrupts_then_sends_ahead_of_the_queue(cx: &mut TestAppContext) {
+fn alternate_submission_preserves_an_existing_automatic_queue(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     set_session(&app, cx, "t", "running");
     queue_prompt(cx, "later");
     cx.simulate_input("change course");
     cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
-    let mut sent = calls(&requests);
-    assert_eq!(sent.len(), 1);
-    let (payload, reply) = sent.remove(0);
-    assert_eq!(payload["type"], "thread.turn.interrupt");
+    assert!(
+        calls(&requests).is_empty(),
+        "an alternate submission must not interrupt or overtake the queue"
+    );
+    assert_eq!(
+        app.read_with(cx, |app, _| app.queues.messages("t").len()),
+        2
+    );
     assert_eq!(
         app.read_with(cx, |app, cx| app.composer.read(cx).value().to_string()),
         ""
     );
+    set_session(&app, cx, "t", "ready");
+    let mut sent = calls(&requests);
+    assert_eq!(sent.len(), 1);
+    let (payload, reply) = sent.remove(0);
+    assert_eq!(payload["type"], "thread.turn.start");
+    assert_eq!(payload["message"]["text"], "later");
     reply.send_blocking(Ok(json!({"sequence":2}))).unwrap();
     cx.run_until_parked();
+    set_session(&app, cx, "t", "running");
+    set_session(&app, cx, "t", "ready");
     let sent = calls(&requests);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0["type"], "thread.turn.start");
@@ -3010,19 +3506,30 @@ fn a_queue_waits_for_its_own_thread_to_complete(cx: &mut TestAppContext) {
             {"id":"u","projectId":"p","title":"Other","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"session":{"status":"running"}}
         ]}})
     };
-    cx.update(|window, cx| app.update(cx, |app, cx| {
-        app.shell.apply(serde_json::from_value(shell("running")).unwrap()).unwrap();
-        app.select_thread("u", window, cx);
-    }));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.shell
+                .apply(serde_json::from_value(shell("running")).unwrap())
+                .unwrap();
+            app.select_thread("u", window, cx);
+        })
+    });
     set_session(&app, cx, "u", "running");
     set_session(&app, cx, "u", "ready");
     assert!(calls(&requests).is_empty());
-    assert!(cx.debug_bounds("queued-0").is_none(), "the queue belongs to t");
+    assert!(
+        cx.debug_bounds("queued-0").is_none(),
+        "the queue belongs to t"
+    );
 
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.shell.apply(serde_json::from_value(shell("ready")).unwrap()).unwrap();
-        app.flush_queues(cx);
-    }));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.shell
+                .apply(serde_json::from_value(shell("ready")).unwrap())
+                .unwrap();
+            app.flush_queues(cx);
+        })
+    });
     cx.run_until_parked();
     let sent = calls(&requests);
     assert_eq!(sent.len(), 1);
@@ -3033,10 +3540,11 @@ fn a_queue_waits_for_its_own_thread_to_complete(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn context_meter_follows_streamed_readings_and_the_setting_hides_it(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
-    let reading = |id: &str, sequence: u64, used: u64| {
-        json!({"id":id,"kind":"context-window.updated","tone":"info","summary":"Context window updated","turnId":null,"sequence":sequence,"createdAt":"2026-01-01T00:00:00Z","payload":{"usedTokens":used,"maxTokens":200_000}})
-    };
-    assert!(cx.debug_bounds("context-meter").is_none(), "no reading, no meter");
+    let reading = |id: &str, sequence: u64, used: u64| json!({"id":id,"kind":"context-window.updated","tone":"info","summary":"Context window updated","turnId":null,"sequence":sequence,"createdAt":"2026-01-01T00:00:00Z","payload":{"usedTokens":used,"maxTokens":200_000}});
+    assert!(
+        cx.debug_bounds("context-meter").is_none(),
+        "no reading, no meter"
+    );
     cx.update(|_, cx| app.update(cx, |app, cx| {
         let item = json!({"kind":"snapshot","snapshot":{"snapshotSequence":1,"thread":{"id":"t","title":"Thread","messages":[message(0)],"activities":[reading("a1",1,132_400)],"session":{"status":"running"}}}});
         app.apply_thread_update("t", item, cx).unwrap();
@@ -3053,9 +3561,14 @@ fn context_meter_follows_streamed_readings_and_the_setting_hides_it(cx: &mut Tes
     }));
     cx.run_until_parked();
     assert!(cx.debug_bounds("context-meter-66%").is_none());
-    assert!(cx.debug_bounds("context-meter-95%").is_some(), "streamed reading updates the meter");
+    assert!(
+        cx.debug_bounds("context-meter-95%").is_some(),
+        "streamed reading updates the meter"
+    );
 
-    let bounds = cx.debug_bounds("settings-open").expect("title bar settings button");
+    let bounds = cx
+        .debug_bounds("settings-open")
+        .expect("title bar settings button");
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
     let bounds = cx
@@ -3064,7 +3577,10 @@ fn context_meter_follows_streamed_readings_and_the_setting_hides_it(cx: &mut Tes
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
     assert!(app.read_with(cx, |app, _| app.context_meter_hidden));
-    assert!(cx.debug_bounds("context-meter").is_none(), "the setting hides the meter");
+    assert!(
+        cx.debug_bounds("context-meter").is_none(),
+        "the setting hides the meter"
+    );
 }
 
 fn composer_focused(app: &Entity<NativeApp>, cx: &mut VisualTestContext) -> bool {
@@ -3291,9 +3807,15 @@ fn upsert_thread(
 }
 
 #[gpui_kit::test]
-fn approval_on_another_thread_notifies_and_the_click_selects_it(cx: &mut TestAppContext) {
+fn notifications_default_off_and_scoped_navigation_selects_thread(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     seed_second_thread(&app, cx, false);
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.apply_shell_item(shell::ShellItem::Synchronized, cx)
+                .unwrap();
+        })
+    });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     assert!(app.read_with(cx, |app, _| app.window_active));
@@ -3315,14 +3837,15 @@ fn approval_on_another_thread_notifies_and_the_click_selects_it(cx: &mut TestApp
         3,
         json!({"id": "u", "title": "Other", "hasPendingApprovals": true}),
     );
-    let shown = cx.shown_system_notifications();
-    assert_eq!(shown.len(), 1);
-    assert_eq!(shown[0].title.as_ref(), "Approval needed");
-    assert_eq!(shown[0].body.as_ref(), "Other");
-
-    cx.simulate_system_notification_response(gpui_kit::SystemNotificationResponse {
-        tag: shown[0].tag.clone(),
-        action_id: None,
+    assert!(
+        cx.shown_system_notifications().is_empty(),
+        "default preferences are off"
+    );
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let tag = notifications::tag(&app.environment_scope, "u");
+            app.open_notified_thread(&tag, window, cx);
+        })
     });
     cx.run_until_parked();
     assert_eq!(
@@ -3360,7 +3883,11 @@ fn type_mention_and_answer(
         })
         .collect();
     let (tag, payload, reply) = searches.pop().expect("a file search");
-    assert!(searches.iter().all(|(tag, ..)| tag == "projects.searchEntries"));
+    assert!(
+        searches
+            .iter()
+            .all(|(tag, ..)| tag == "projects.searchEntries")
+    );
     assert_eq!(tag, "projects.searchEntries");
     assert_eq!(payload["cwd"], "/tmp/owned-worktree");
     assert_eq!(payload["query"], "src");
@@ -3496,7 +4023,10 @@ fn connection_controls_live_in_settings_not_the_sidebar(cx: &mut TestAppContext)
     cx.update(|window, _| {
         for input in inputs {
             let bounds = window.find(("input", input)).bounds();
-            assert!(settings.contains(&bounds.center()), "connection inputs sit inside settings");
+            assert!(
+                settings.contains(&bounds.center()),
+                "connection inputs sit inside settings"
+            );
         }
     });
     for id in [
@@ -3509,7 +4039,10 @@ fn connection_controls_live_in_settings_not_the_sidebar(cx: &mut TestAppContext)
         let bounds = cx
             .debug_bounds(id)
             .unwrap_or_else(|| panic!("{id} is in settings"));
-        assert!(settings.contains(&bounds.center()), "{id} sits inside settings");
+        assert!(
+            settings.contains(&bounds.center()),
+            "{id} sits inside settings"
+        );
     }
 }
 

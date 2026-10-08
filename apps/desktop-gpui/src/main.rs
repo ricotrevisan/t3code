@@ -1,17 +1,16 @@
 use gpui_kit::component::{
-    ActiveTheme as _,
+    ActiveTheme as _, TitleBar,
     input::{InputEvent, InputState, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel},
-    TitleBar,
 };
 use gpui_kit::{
-    App, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, Point,
-    Subscription, Task, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, Point, Subscription, Task,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use serde_json::Value;
 use t3code_desktop_gpui::{
-    auth, connection, credentials, drafts, files, notifications, palette, providers, queue,
-    shell, sidebar, thread, window_state, workspaces,
+    auth, connection, credentials, drafts, files, notifications, palette, providers, queue, shell,
+    sidebar, thread, window_state, workspaces,
 };
 // Used only by ui_tests through `use super::*`.
 #[cfg(test)]
@@ -112,9 +111,9 @@ enum InspectorSection {
 }
 
 mod app;
+mod theme;
 #[cfg(test)]
 mod ui_tests;
-mod theme;
 mod views;
 
 fn single_line_input(window: &mut Window, cx: &mut Context<InputState>) -> InputState {
@@ -197,6 +196,7 @@ struct NativeApp {
     user_input_selected: std::collections::HashMap<String, Vec<String>>,
     user_input_custom: std::collections::HashMap<String, Entity<InputState>>,
     attachments: Vec<Value>,
+    attachment_drafts: app::attachments::AttachmentDrafts,
     auth_state: Option<Value>,
     auth_callback: Entity<InputState>,
     right_tab: RightTab,
@@ -204,6 +204,7 @@ struct NativeApp {
     /// The persisted window state; None when the app runs without persistence.
     saved_window: Option<window_state::WindowState>,
     context_meter_hidden: bool,
+    notification_preferences: notifications::Preferences,
     inspector_section: Option<InspectorSection>,
     project_settings: Option<Value>,
     action_name: Entity<InputState>,
@@ -213,6 +214,10 @@ struct NativeApp {
     action_wait: bool,
     action_busy: bool,
     action_task: Option<Task<()>>,
+    action_runs: Vec<app::project_actions::ActionRun>,
+    checkout_operations: Vec<app::checkout_operations::CheckoutOperation>,
+    checkout_stops: app::checkout_receipts::CheckoutStops,
+    checkout_recipes: Vec<app::checkout_recipes::CheckoutRecipe>,
     confirm_action_delete: Option<String>,
     search: Entity<InputState>,
     search_results: Vec<Value>,
@@ -235,6 +240,10 @@ struct NativeApp {
     /// The trigger the branch picker hangs off while it is open.
     branch_picker: Option<&'static str>,
     branch_query: Entity<InputState>,
+    branch_workflow: app::branch_workflows::BranchWorkflow,
+    branch_workflow_input: Entity<InputState>,
+    branch_workflow_error: Option<String>,
+    branch_workflow_busy: bool,
     worktree_task: Option<Task<()>>,
     worktree_epoch: u64,
     worktree_busy: bool,
@@ -264,8 +273,14 @@ struct NativeApp {
     stash_memory: Vec<String>,
     /// Prompts waiting for their thread's turn to finish, by thread.
     queues: queue::Queues,
+    queue_details: std::collections::HashMap<String, app::queue_subscriptions::QueueDetail>,
+    queue_subscription_epoch: u64,
+    follow_up_behavior: queue::FollowUpBehavior,
     /// The toast stack, oldest first.
     toasts: Vec<notifications::Toast>,
+    notification_tracker: notifications::Tracker,
+    notification_badge: std::collections::HashSet<String>,
+    notification_platform: t3code_desktop_gpui::notification_platform::Platform,
     toast_id: u64,
     /// Whether the window has OS focus; a focused window still notifies for other threads.
     window_active: bool,
@@ -301,6 +316,9 @@ impl NativeApp {
             cx.new(|cx| single_line_input(window, cx).placeholder("Search commands…"));
         let branch_query =
             cx.new(|cx| single_line_input(window, cx).placeholder("Search branches…"));
+        let branch_workflow_input = cx.new(|cx| {
+            single_line_input(window, cx).placeholder("Branch name, base branch, or PR reference")
+        });
         let title =
             cx.new(|cx| single_line_input(window, cx).placeholder("Project / thread title"));
         let workspace =
@@ -405,24 +423,66 @@ impl NativeApp {
             ),
         );
         subscriptions.push(cx.subscribe_in(
-            &branch_query,
+            &branch_workflow_input,
             window,
-            |app, _, event, window, cx| match event {
-                InputEvent::Change => cx.notify(),
-                InputEvent::PressEnter { .. } => {
-                    let first = app
-                        .branch_picker_rows(cx)
-                        .first()
-                        .map(|row| (row.name.clone(), row.worktree_path.clone()));
-                    if let Some((branch, path)) = first {
-                        app.pick_checkout(branch, path, window, cx);
+            |app, _, event, window, cx| {
+                use app::branch_workflows::BranchWorkflow;
+                match event {
+                    InputEvent::Change => {
+                        app.branch_workflow_error = None;
+                        cx.notify();
                     }
+                    InputEvent::PressEnter { .. } => match app.branch_workflow {
+                        BranchWorkflow::Create => app.run_branch_workflow(false, window, cx),
+                        BranchWorkflow::PullRequest => app.run_branch_workflow(true, window, cx),
+                        BranchWorkflow::Environment => {
+                            app.select_branch_environment(true, window, cx)
+                        }
+                        BranchWorkflow::Browse => {}
+                    },
+                    _ => {}
                 }
-                _ => {}
             },
         ));
-        subscriptions.push(cx.observe_window_activation(window, |app, window, _| {
+        subscriptions.push(
+            cx.subscribe_in(
+                &branch_query,
+                window,
+                |app, _, event, window, cx| match event {
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::PressEnter { .. } => {
+                        if app.branch_workflow != app::branch_workflows::BranchWorkflow::Browse {
+                            return;
+                        }
+                        let first = app
+                            .branch_picker_rows(cx)
+                            .first()
+                            .map(|row| (row.name.clone(), row.worktree_path.clone()));
+                        if let Some((branch, path)) = first {
+                            app.pick_checkout(branch, path, window, cx);
+                        }
+                    }
+                    _ => {}
+                },
+            ),
+        );
+        subscriptions.push(
+            cx.subscribe(&file_contents, |app, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change)
+                    && app
+                        .file_editor
+                        .dirty(app.file_contents.read(cx).value().as_str())
+                {
+                    app.cancel_checkout_interest();
+                    cx.notify();
+                }
+            }),
+        );
+        subscriptions.push(cx.observe_window_activation(window, |app, window, cx| {
             app.window_active = window.is_window_active();
+            if app.window_active {
+                app.clear_notification_badge(cx);
+            }
         }));
         subscriptions.push(cx.observe_window_bounds(window, |app, window, cx| {
             app.reset_splits(cx);
@@ -501,6 +561,7 @@ impl NativeApp {
             user_input_selected: Default::default(),
             user_input_custom: Default::default(),
             attachments: Vec::new(),
+            attachment_drafts: Default::default(),
             auth_state: None,
             auth_callback: cx.new(|cx| {
                 single_line_input(window, cx).placeholder("Paste the authorization callback URL")
@@ -509,6 +570,7 @@ impl NativeApp {
             available_editors: Vec::new(),
             saved_window: None,
             context_meter_hidden: false,
+            notification_preferences: notifications::Preferences::default(),
             inspector_section: Some(InspectorSection::Project),
             project_settings: None,
             action_name: cx.new(|cx| single_line_input(window, cx).placeholder("Action name")),
@@ -520,6 +582,10 @@ impl NativeApp {
             action_wait: false,
             action_busy: false,
             action_task: None,
+            action_runs: Vec::new(),
+            checkout_operations: app::checkout_operations::restore(),
+            checkout_stops: Default::default(),
+            checkout_recipes: app::checkout_recipes::restore(),
             confirm_action_delete: None,
             search,
             search_results: vec![],
@@ -544,6 +610,10 @@ impl NativeApp {
             refs_error: None,
             branch_picker: None,
             branch_query,
+            branch_workflow: app::branch_workflows::BranchWorkflow::Browse,
+            branch_workflow_input,
+            branch_workflow_error: None,
+            branch_workflow_busy: false,
             worktree_task: None,
             worktree_epoch: 0,
             worktree_busy: false,
@@ -576,7 +646,15 @@ impl NativeApp {
                 .unwrap_or_else(|| "disconnected".into()),
             stash_memory: Vec::new(),
             queues: queue::Queues::default(),
+            queue_details: std::collections::HashMap::new(),
+            queue_subscription_epoch: 0,
+            follow_up_behavior: queue::FollowUpBehavior::default(),
             toasts: Vec::new(),
+            notification_tracker: notifications::Tracker::default(),
+            notification_badge: std::collections::HashSet::new(),
+            notification_platform: t3code_desktop_gpui::notification_platform::Platform::new(
+                !auto_connect,
+            ),
             toast_id: 0,
             window_active: window.is_window_active(),
             _subscriptions: subscriptions,
@@ -592,11 +670,12 @@ impl NativeApp {
         });
         // Keyboard shortcuts dispatch along the focus path, so an unfocused window
         // has none; start in the composer, where the user types first anyway.
-        app.composer
-            .update(cx, |input, cx| input.focus(window, cx));
+        app.composer.update(cx, |input, cx| input.focus(window, cx));
         if auto_connect {
             let state = window_state::load();
             app.context_meter_hidden = state.context_meter_hidden;
+            app.notification_preferences = state.notifications;
+            app.follow_up_behavior = state.follow_up_behavior;
             app.sidebar_open = state.sidebar_open;
             app.sidebar_width = state.sidebar_width;
             app.inspector_open = state.right_panel_open;
@@ -627,7 +706,9 @@ impl Drop for NativeApp {
         }
         self.remember_layout();
         if let Some(mut state) = self.saved_window {
+            state.follow_up_behavior = self.follow_up_behavior;
             state.context_meter_hidden = self.context_meter_hidden;
+            state.notifications = self.notification_preferences;
             window_state::save(state);
         }
     }
@@ -698,12 +779,26 @@ impl Render for NativeApp {
             .key_context("NativeApp")
             .track_focus(&self.focus)
             .on_action(cx.listener(|app, _: &ContentSubmit, window, cx| {
-                if app.content_results.as_ref().is_some_and(|results| !results.matches.is_empty()) { app.open_content_hit(app.content_index,window,cx); } else { app.search_contents(cx); }
+                if app
+                    .content_results
+                    .as_ref()
+                    .is_some_and(|results| !results.matches.is_empty())
+                {
+                    app.open_content_hit(app.content_index, window, cx);
+                } else {
+                    app.search_contents(cx);
+                }
             }))
-            .on_action(cx.listener(|app, _: &ContentNext, _, cx| app.move_content_hit(true,cx)))
-            .on_action(cx.listener(|app, _: &ContentPrevious, _, cx| app.move_content_hit(false,cx)))
-            .on_action(cx.listener(|app, _: &OpenFiles, window, cx| app.execute_command(palette::Command::Files,window,cx)))
-            .on_action(cx.listener(|app, _: &OpenContentSearch, window, cx| app.execute_command(palette::Command::ContentSearch,window,cx)))
+            .on_action(cx.listener(|app, _: &ContentNext, _, cx| app.move_content_hit(true, cx)))
+            .on_action(
+                cx.listener(|app, _: &ContentPrevious, _, cx| app.move_content_hit(false, cx)),
+            )
+            .on_action(cx.listener(|app, _: &OpenFiles, window, cx| {
+                app.execute_command(palette::Command::Files, window, cx)
+            }))
+            .on_action(cx.listener(|app, _: &OpenContentSearch, window, cx| {
+                app.execute_command(palette::Command::ContentSearch, window, cx)
+            }))
             .on_action(
                 cx.listener(|app, _: &TogglePalette, window, cx| app.toggle_palette(window, cx)),
             )
@@ -732,12 +827,14 @@ impl Render for NativeApp {
                     cx.propagate();
                 }
             }))
-            .on_action(cx.listener(|app, _: &PreviousThread, window, cx| {
-                app.step_thread(false, window, cx)
-            }))
-            .on_action(cx.listener(|app, _: &NextThread, window, cx| {
-                app.step_thread(true, window, cx)
-            }))
+            .on_action(
+                cx.listener(|app, _: &PreviousThread, window, cx| {
+                    app.step_thread(false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|app, _: &NextThread, window, cx| app.step_thread(true, window, cx)),
+            )
             .on_action(cx.listener(|app, _: &OpenSettings, _, cx| {
                 app.settings_open = !app.settings_open;
                 cx.notify();
@@ -864,62 +961,62 @@ fn main() {
     gpui_kit::application()
         .with_assets(NATIVE_ASSETS)
         .run(move |cx: &mut App| {
-        gpui_kit::init(cx);
-        theme::init(cx);
-        bind_native_keys(cx);
-        cx.set_app_identity("codes.t3.native", "T3 Code Native");
-        cx.on_action(|_: &QuitNative, cx| cx.quit());
-        cx.set_menus(vec![
-            gpui_kit::Menu {
-                name: "T3 Code Native".into(),
-                disabled: false,
-                items: vec![gpui_kit::MenuItem::action("Quit", QuitNative)],
-            },
-            gpui_kit::Menu {
-                name: "Thread".into(),
-                disabled: false,
-                items: vec![
-                    gpui_kit::MenuItem::action("New thread", NewThread),
-                    gpui_kit::MenuItem::action("Previous thread", PreviousThread),
-                    gpui_kit::MenuItem::action("Next thread", NextThread),
-                    gpui_kit::MenuItem::action("Toggle settlement", ToggleSettle),
-                    gpui_kit::MenuItem::action("Toggle pin", TogglePin),
-                    gpui_kit::MenuItem::action("Stash prompt", StashPrompt),
-                ],
-            },
-            gpui_kit::Menu {
-                name: "View".into(),
-                disabled: false,
-                items: vec![
-                    gpui_kit::MenuItem::action("Commands", TogglePalette),
-                    gpui_kit::MenuItem::action("Settings", OpenSettings),
-                    gpui_kit::MenuItem::action("Toggle sidebar", ToggleSidebar),
-                    gpui_kit::MenuItem::action("Toggle right panel", ToggleRightPanel),
-                    gpui_kit::MenuItem::action("Workspace files", OpenFiles),
-                    gpui_kit::MenuItem::action("Search contents", OpenContentSearch),
-                ],
-            },
-        ]);
-        let window_size = window_state::load()
-            .size()
-            .map(|(width, height)| size(px(width), px(height)))
-            .unwrap_or_else(|| size(px(1280.), px(900.)));
-        let bounds = Bounds::centered(None, window_size, cx);
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..TitleBar::window_options()
-            },
-            cx,
-            |window, cx| cx.new(|cx| NativeApp::new(window, cx, true)),
-        )
-        .expect("could not open native window");
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        cx.activate(true);
-    });
+            gpui_kit::init(cx);
+            theme::init(cx);
+            bind_native_keys(cx);
+            cx.set_app_identity("codes.t3.native", "T3 Code Native");
+            cx.on_action(|_: &QuitNative, cx| cx.quit());
+            cx.set_menus(vec![
+                gpui_kit::Menu {
+                    name: "T3 Code Native".into(),
+                    disabled: false,
+                    items: vec![gpui_kit::MenuItem::action("Quit", QuitNative)],
+                },
+                gpui_kit::Menu {
+                    name: "Thread".into(),
+                    disabled: false,
+                    items: vec![
+                        gpui_kit::MenuItem::action("New thread", NewThread),
+                        gpui_kit::MenuItem::action("Previous thread", PreviousThread),
+                        gpui_kit::MenuItem::action("Next thread", NextThread),
+                        gpui_kit::MenuItem::action("Toggle settlement", ToggleSettle),
+                        gpui_kit::MenuItem::action("Toggle pin", TogglePin),
+                        gpui_kit::MenuItem::action("Stash prompt", StashPrompt),
+                    ],
+                },
+                gpui_kit::Menu {
+                    name: "View".into(),
+                    disabled: false,
+                    items: vec![
+                        gpui_kit::MenuItem::action("Commands", TogglePalette),
+                        gpui_kit::MenuItem::action("Settings", OpenSettings),
+                        gpui_kit::MenuItem::action("Toggle sidebar", ToggleSidebar),
+                        gpui_kit::MenuItem::action("Toggle right panel", ToggleRightPanel),
+                        gpui_kit::MenuItem::action("Workspace files", OpenFiles),
+                        gpui_kit::MenuItem::action("Search contents", OpenContentSearch),
+                    ],
+                },
+            ]);
+            let window_size = window_state::load()
+                .size()
+                .map(|(width, height)| size(px(width), px(height)))
+                .unwrap_or_else(|| size(px(1280.), px(900.)));
+            let bounds = Bounds::centered(None, window_size, cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..TitleBar::window_options()
+                },
+                cx,
+                |window, cx| cx.new(|cx| NativeApp::new(window, cx, true)),
+            )
+            .expect("could not open native window");
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
 }

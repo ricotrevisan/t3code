@@ -1,17 +1,27 @@
 //! Checkout-scoped requests and ordered session receipts.
+use super::branch_workflows::{complete_stop, finish_owned_stop, refresh_refs, stop_observation};
 use super::*;
 
 fn call(
     requests: &async_channel::Receiver<connection::Command>,
     tag: &str,
 ) -> (Value, async_channel::Sender<Result<Value, String>>) {
-    let connection::Command::Call {
-        tag: actual,
-        payload,
-        reply,
-    } = requests.try_recv().unwrap()
-    else {
-        panic!("expected {tag}");
+    let (actual, payload, reply) = loop {
+        match requests.try_recv().unwrap() {
+            connection::Command::Call {
+                tag,
+                payload,
+                reply,
+            }
+            | connection::Command::CallMutation {
+                tag,
+                payload,
+                reply,
+                ..
+            } => break (tag, payload, reply),
+            connection::Command::Unsubscribe(key) if key.starts_with("checkout-stop-") => continue,
+            _ => panic!("expected {tag}"),
+        }
     };
     assert_eq!(actual, tag);
     (payload, reply)
@@ -271,6 +281,12 @@ fn root_worktree_path_is_normalized_to_null_before_metadata(cx: &mut TestAppCont
     active_worktree(&app, cx);
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
+            app.refs.push(
+                serde_json::from_value(
+                    json!({"name":"root-branch","current":false,"worktreePath":"/tmp/fixture/"}),
+                )
+                .unwrap(),
+            );
             app.pick_checkout(
                 "root-branch".into(),
                 Some("/tmp/fixture/".into()),
@@ -280,9 +296,12 @@ fn root_worktree_path_is_normalized_to_null_before_metadata(cx: &mut TestAppCont
         })
     });
     cx.run_until_parked();
-    let (_, stop) = call(&requests, "orchestration.dispatchCommand");
-    stop.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    let key = stop_observation(&app, cx, &requests);
+    let (stop_payload, stop) = call(&requests, "orchestration.dispatchCommand");
+    stop.send_blocking(Ok(json!({"sequence":10}))).unwrap();
     cx.run_until_parked();
+    assert!(requests.try_recv().is_err(), "acceptance is not shutdown");
+    complete_stop(&app, cx, &key, &stop_payload["commandId"]);
     let (payload, meta) = call(&requests, "orchestration.dispatchCommand");
     assert_eq!(payload["branch"], "root-branch");
     assert!(payload["worktreePath"].is_null());
@@ -295,6 +314,7 @@ fn root_worktree_path_is_normalized_to_null_before_metadata(cx: &mut TestAppCont
     });
     meta.send_blocking(Ok(json!({"sequence":2}))).unwrap();
     cx.run_until_parked();
+    refresh_refs(cx, &requests);
     app.read_with(cx, |app, _| {
         assert!(!app.worktree_busy);
         assert!(app.shell.threads[0].worktree_path.is_none());
@@ -330,10 +350,12 @@ fn remote_ref_metadata_uses_actual_branch_and_detached_null(cx: &mut TestAppCont
     for actual in [json!("foo"), Value::Null] {
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
+                app.shell.synchronized = true;
                 app.pick_checkout("origin/foo".into(), None, window, cx);
             })
         });
         cx.run_until_parked();
+        finish_owned_stop(&app, cx, &requests);
         let (payload, switch) = call(&requests, "vcs.switchRef");
         assert_eq!(
             payload,
@@ -354,6 +376,7 @@ fn remote_ref_metadata_uses_actual_branch_and_detached_null(cx: &mut TestAppCont
         });
         meta.send_blocking(Ok(json!({"sequence":2}))).unwrap();
         cx.run_until_parked();
+        refresh_refs(cx, &requests);
         app.read_with(cx, |app, _| {
             assert_eq!(app.shell.threads[0].branch.as_deref(), actual.as_str());
             assert_eq!(app.detail.thread.as_ref().unwrap()["branch"], actual);
@@ -365,6 +388,7 @@ fn remote_ref_metadata_uses_actual_branch_and_detached_null(cx: &mut TestAppCont
 fn active_worktree(app: &Entity<NativeApp>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
+            app.shell.synchronized = true;
             app.shell.threads[0].worktree_path = Some("/tmp/active-tree".into());
             app.shell.threads[0].session = Some(shell::Session {
                 status: "ready".into(),
@@ -383,6 +407,68 @@ fn active_worktree(app: &Entity<NativeApp>, cx: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
+fn root_picker_blocks_other_active_session_but_reuse_does_not_switch_root(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    active_worktree(&app, cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let mut other = app.shell.threads[0].clone();
+            other.id = "other".into();
+            other.worktree_path = None;
+            app.shell.threads.push(other);
+            app.pick_checkout("main".into(), None, window, cx);
+            assert!(app.checkout_operations.is_empty());
+            assert!(
+                app.status
+                    .contains("Stop it first or use a separate worktree")
+            );
+        })
+    });
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err());
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.pick_checkout("reuse".into(), Some("/tmp/reused-tree".into()), window, cx);
+        })
+    });
+    cx.run_until_parked();
+    finish_owned_stop(&app, cx, &requests);
+    let (payload, metadata) = call(&requests, "orchestration.dispatchCommand");
+    assert_eq!(payload["type"], "thread.meta.update");
+    assert_eq!(payload["worktreePath"], "/tmp/reused-tree");
+    metadata.send_blocking(Ok(json!({"sequence":20}))).unwrap();
+    cx.run_until_parked();
+    refresh_refs(cx, &requests);
+    assert!(
+        requests.try_recv().is_err(),
+        "reuse emits no physical switch"
+    );
+}
+
+#[gpui_kit::test]
+fn other_worktree_session_does_not_block_root_switch(cx: &mut TestAppContext) {
+    let (app, cx, requests) = harness(cx);
+    other_checkout(&app, cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.shell.synchronized = true;
+            app.shell.threads[1].session = Some(shell::Session {
+                status: "ready".into(),
+                last_error: None,
+            });
+            app.pick_checkout("feature".into(), None, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    finish_owned_stop(&app, cx, &requests);
+    let (payload, switch) = call(&requests, "vcs.switchRef");
+    assert_eq!(payload["cwd"], "/tmp/fixture");
+    switch.send_blocking(Err("not transmitted".into())).unwrap();
+    cx.run_until_parked();
+    assert!(requests.try_recv().is_err());
+}
+
+#[gpui_kit::test]
 fn default_root_waits_for_stop_then_switch_then_metadata(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
     active_worktree(&app, cx);
@@ -392,11 +478,14 @@ fn default_root_waits_for_stop_then_switch_then_metadata(cx: &mut TestAppContext
         })
     });
     cx.run_until_parked();
+    let key = stop_observation(&app, cx, &requests);
     let (payload, stop) = call(&requests, "orchestration.dispatchCommand");
     assert_eq!(payload["type"], "thread.session.stop");
     assert!(requests.try_recv().is_err());
-    stop.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    stop.send_blocking(Ok(json!({"sequence":10}))).unwrap();
     cx.run_until_parked();
+    assert!(requests.try_recv().is_err(), "acceptance is not shutdown");
+    complete_stop(&app, cx, &key, &payload["commandId"]);
     let (payload, switch) = call(&requests, "vcs.switchRef");
     assert_eq!(payload, json!({"cwd":"/tmp/fixture","refName":"main"}));
     assert!(requests.try_recv().is_err());
@@ -408,6 +497,7 @@ fn default_root_waits_for_stop_then_switch_then_metadata(cx: &mut TestAppContext
     assert!(payload.get("worktreePath").unwrap().is_null());
     meta.send_blocking(Ok(json!({"sequence":2}))).unwrap();
     cx.run_until_parked();
+    refresh_refs(cx, &requests);
     cx.update(|_, cx| {
         app.read_with(cx, |app, cx| {
             assert_eq!(app.selected_workspace().as_deref(), Some("/tmp/fixture"));
@@ -428,18 +518,27 @@ fn failed_stop_and_failed_switch_never_move_thread(cx: &mut TestAppContext) {
             })
         });
         cx.run_until_parked();
-        let (_, stop) = call(&requests, "orchestration.dispatchCommand");
+        let key = stop_observation(&app, cx, &requests);
+        let (payload, stop) = call(&requests, "orchestration.dispatchCommand");
         stop.send_blocking(if fail_stop {
             Err("stop rejected".into())
         } else {
-            Ok(json!({"sequence":1}))
+            Ok(json!({"sequence":10}))
         })
         .unwrap();
         cx.run_until_parked();
         if !fail_stop {
+            assert!(requests.try_recv().is_err());
+            complete_stop(&app, cx, &key, &payload["commandId"]);
             let (_, switch) = call(&requests, "vcs.switchRef");
             switch.send_blocking(Err("switch rejected".into())).unwrap();
             cx.run_until_parked();
+        }
+        if fail_stop {
+            assert!(matches!(
+                requests.try_recv().unwrap(),
+                connection::Command::Unsubscribe(_)
+            ));
         }
         assert!(requests.try_recv().is_err());
         app.read_with(cx, |app, _| {
@@ -462,16 +561,20 @@ fn existing_worktree_waits_for_stop_without_switching_ref(cx: &mut TestAppContex
         })
     });
     cx.run_until_parked();
+    let key = stop_observation(&app, cx, &requests);
     let (payload, stop) = call(&requests, "orchestration.dispatchCommand");
     assert_eq!(payload["type"], "thread.session.stop");
     assert!(requests.try_recv().is_err());
-    stop.send_blocking(Ok(json!({"sequence":1}))).unwrap();
+    stop.send_blocking(Ok(json!({"sequence":10}))).unwrap();
     cx.run_until_parked();
+    assert!(requests.try_recv().is_err(), "acceptance is not shutdown");
+    complete_stop(&app, cx, &key, &payload["commandId"]);
     let (payload, meta) = call(&requests, "orchestration.dispatchCommand");
     assert_eq!(payload["type"], "thread.meta.update");
     assert_eq!(payload["worktreePath"], "/tmp/reused-tree");
     meta.send_blocking(Ok(json!({"sequence":2}))).unwrap();
     cx.run_until_parked();
+    refresh_refs(cx, &requests);
     assert!(requests.try_recv().is_err());
 }
 
@@ -583,13 +686,26 @@ fn unsent_draft_checkout_stays_local_and_retains_prompt(cx: &mut TestAppContext)
                 .update(cx, |input, cx| input.set_value("local prompt", window, cx));
             app.pick_checkout("feature".into(), Some("/tmp/local-tree".into()), window, cx);
             assert_eq!(app.composer.read(cx).value().as_str(), "local prompt");
-            assert_eq!(
-                app.pending_threads[0].thread.worktree_path.as_deref(),
-                Some("/tmp/local-tree")
-            );
+
             assert_eq!(app.selected_thread.as_deref(), Some("t"));
         })
     });
     cx.run_until_parked();
+    let (payload, actual) = call(&requests, "vcs.listRefs");
+    assert_eq!(payload["cwd"], "/tmp/local-tree");
+    actual.send_blocking(Ok(json!({"isRepo":true,"refs":[{"name":"actual-existing","current":true}],"nextCursor":null}))).unwrap();
+    cx.run_until_parked();
+    refresh_refs(cx, &requests);
+    assert_eq!(
+        app.read_with(cx, |app, _| app.pending_threads[0].thread.branch.clone()),
+        Some("actual-existing".into())
+    );
+    assert_eq!(
+        app.read_with(cx, |app, _| app.pending_threads[0]
+            .thread
+            .worktree_path
+            .clone()),
+        Some("/tmp/local-tree".into())
+    );
     assert!(requests.try_recv().is_err());
 }

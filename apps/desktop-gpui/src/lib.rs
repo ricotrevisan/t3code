@@ -7,6 +7,7 @@ pub mod dpop;
 pub mod drafts;
 pub mod files;
 pub mod mentions;
+pub mod notification_platform;
 pub mod notifications;
 pub mod palette;
 pub mod project_actions;

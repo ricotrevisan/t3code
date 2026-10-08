@@ -1,5 +1,6 @@
 //! Prompt drafts and stash, sending and queueing, attachments, and replies to agent requests.
 
+use super::attachments::{AttachmentScope, read_attachment, upload_target};
 use crate::{NativeApp, attachment_mime};
 use gpui_kit::{App, Context, Window};
 use serde_json::json;
@@ -224,10 +225,29 @@ impl NativeApp {
         Ok((id, message))
     }
 
-    /// Enter: sends the prompt, or queues it behind the running turn.
+    /// Enter follows the preference; the alternate submission reverses it.
     pub(crate) fn send_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.turn_running() {
+        self.submit_follow_up(false, window, cx);
+    }
+
+    fn submit_follow_up(&mut self, alternate: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.checkout_transition_pending() {
+            self.set_status("Finish checkout reconciliation before sending; message retained", cx);
+            cx.notify();
+            return;
+        }
+        let thread_id = self.selected_thread.clone().unwrap_or_default();
+        let active_queue = self.queues.dispatching(&thread_id)
+            || (self.queues.has_queued(&thread_id) && !self.queues.held(&thread_id));
+        let queue = active_queue
+            || (self.turn_running()
+                && ((self.follow_up_behavior == queue::FollowUpBehavior::Queue) != alternate));
+        if queue {
             self.queue_prompt(false, window, cx);
+            return;
+        }
+        if self.turn_running() {
+            self.queue_prompt(true, window, cx);
             return;
         }
         if self.pending_actions > 0 {
@@ -236,6 +256,14 @@ impl NativeApp {
             return;
         }
         if self.selected_thread.is_none() {
+            return;
+        }
+        if self
+            .queue_observation(&thread_id)
+            .is_some_and(|state| state.blocked || state.connecting)
+        {
+            self.set_status("Resolve pending requests and reconnect before sending", cx);
+            cx.notify();
             return;
         }
         let (id, message) = match self.composer_message(cx) {
@@ -258,6 +286,15 @@ impl NativeApp {
                         payload["bootstrap"]["prepareWorktree"] = prepare.clone();
                     }
                 }
+                match self.materialized_checkout_bootstrap(&id) {
+                    Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
+                    Ok(None) => {},
+                    Err(error) => {
+                        self.set_status(error, cx);
+                        cx.notify();
+                        return;
+                    }
+                }
                 let text = message.text;
                 self.drafts.insert(id, text.clone());
                 self.perform(
@@ -274,15 +311,19 @@ impl NativeApp {
         }
     }
 
-    /// Takes the composer's prompt into the selected thread's queue. Steering
-    /// puts it first and interrupts the turn; it goes out once the interrupt
-    /// is accepted.
+    /// Moves the complete draft into the queue. Steer uses the same in-turn
+    /// start contract as web; providers reject unsupported sends without losing it.
     pub(crate) fn queue_prompt(
         &mut self,
         steer: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.checkout_transition_pending() {
+            self.set_status("Finish checkout reconciliation before sending; message retained", cx);
+            cx.notify();
+            return;
+        }
         let (thread_id, message) = match self.composer_message(cx) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -291,77 +332,192 @@ impl NativeApp {
                 return;
             }
         };
-        let id = self.queues.push(&thread_id, message, steer);
+        let state = self.queue_observation(&thread_id);
+        if steer
+            && state
+                .as_ref()
+                .is_none_or(|state| state.blocked || state.connecting)
+        {
+            self.set_status("Resolve the pending agent request before steering", cx);
+            cx.notify();
+            return;
+        }
+        let id = self.queues.push_at(
+            &thread_id,
+            message,
+            steer,
+            state.as_ref().and_then(|state| state.tool.clone()),
+        );
+        if let Some(state) = &state {
+            // Record the projection before an explicit Send now/steer receipt.
+            if let Some(message) = self.queues.observe_state(&thread_id, state) {
+                self.dispatch_queued(thread_id.clone(), message, cx);
+            }
+        }
         self.attachments.clear();
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.remember_composer_draft(cx);
         self.set_status(
             if steer {
-                "Interrupting to steer…"
+                "Steering…"
             } else {
-                "Queued — sends when the turn finishes"
+                "Queued — sends at the next tool boundary or turn end"
             },
             cx,
         );
         cx.notify();
+        self.reconcile_queue_subscriptions();
         if !steer {
             return;
         }
-        let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
-            return;
-        };
-        let mut payload = commands::command("thread.turn.interrupt", &thread_id);
-        payload["createdAt"] = json!(commands::now());
-        cx.spawn(async move |entity, cx| {
-            let result = connection::call(&sender, "orchestration.dispatchCommand", payload).await;
-            let _ = entity.update(cx, |app, cx| match result {
-                Ok(_) => app.send_queued(&thread_id, id, cx),
-                Err(error) => {
-                    app.set_status(error, cx);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.send_queued(&thread_id, id, cx);
     }
 
-    /// ⌘⇧↩: steers while a turn runs, otherwise sends as Enter does.
+    /// ⌘⇧↩ submits with the alternate follow-up behavior.
     pub(crate) fn steer_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.turn_running() {
-            self.queue_prompt(true, window, cx);
-        } else {
-            self.send_prompt(window, cx);
-        }
+        self.submit_follow_up(true, window, cx);
     }
 
-    /// Whether `thread_id`'s turn runs, from the open detail when it is the
-    /// selected thread and the shell otherwise. None when the server has not said.
-    pub(crate) fn thread_running(&self, thread_id: &str) -> Option<bool> {
-        let session = if self.selected_thread.as_deref() == Some(thread_id)
-            && let Some(detail) = &self.detail.thread
-        {
-            detail["session"]["status"].as_str()
+    pub(crate) fn queue_observation(&self, thread_id: &str) -> Option<queue::Observation> {
+        self.queue_observation_for(thread_id, false)
+    }
+
+    pub(crate) fn queue_observation_for(
+        &self,
+        thread_id: &str,
+        background: bool,
+    ) -> Option<queue::Observation> {
+        let shell = self
+            .shell
+            .threads
+            .iter()
+            .find(|thread| thread.id == thread_id)?;
+        let cache = self.queue_details.get(thread_id);
+        // Creating a queue stream must not hide the selected projection. Once
+        // its baseline is valid, keep using that stream across selection changes
+        // so switching views cannot introduce a tool or dispatch receipt.
+        let cached =
+            cache.filter(|cache| cache.detail.synchronized && cache.detail.thread.is_some());
+        let selected = !background
+            && self.selected_thread.as_deref() == Some(thread_id)
+            && self
+                .detail
+                .thread
+                .as_ref()
+                .is_some_and(|detail| detail["id"] == thread_id)
+            && cached.is_none();
+        let (detail, detail_sequence) = if selected {
+            (self.detail.thread.as_ref(), self.detail.sequence)
         } else {
-            self.shell
-                .threads
-                .iter()
-                .find(|thread| thread.id == thread_id)?
+            (
+                cached.and_then(|cache| cache.detail.thread.as_ref()),
+                cached.and_then(|cache| cache.detail.sequence),
+            )
+        };
+        let activities = detail.and_then(|detail| detail["activities"].as_array());
+        let blocked = shell.archived_at.is_some()
+            || shell.has_pending_approvals
+            || shell.has_pending_user_input
+            || activities.is_some_and(|activities| {
+                t3code_desktop_gpui::conversation::pending_approval(activities).is_some()
+                    || t3code_desktop_gpui::conversation::pending_user_input(activities).is_some()
+            })
+            || self.commands.is_none();
+        // Keep the shell marker independent of selection. Losing detail must
+        // not look like an acknowledgment (or a completed tool).
+        let identity = json!([
+            shell
+                .latest_turn
+                .as_ref()
+                .map(|turn| (&turn.turn_id, &turn.completed_at)),
+            shell.latest_user_message_at,
+            shell
                 .session
                 .as_ref()
-                .map(|session| session.status.as_str())
+                .map(|session| (&session.status, &session.last_error)),
+        ])
+        .to_string();
+        let detail_identity = detail.map(|detail| {
+            let user = detail["messages"].as_array().and_then(|messages| {
+                messages
+                    .iter()
+                    .rev()
+                    .find(|message| message["role"] == "user")
+            });
+            let user_id = user.and_then(|message| message["id"].as_str());
+            let failure = activities.and_then(|activities| {
+                activities.iter().rev().find(|activity| {
+                    activity["kind"] == "provider.turn.start.failed"
+                        && user_id.is_some()
+                        && activity["payload"]["requestId"].as_str() == user_id
+                })
+            });
+            // Match web's dispatch snapshot signals, not a clock or generic
+            // thread updatedAt (which also changes for unrelated metadata).
+            json!([
+                user_id,
+                user.map(|message| &message["createdAt"]),
+                detail["latestTurn"]["turnId"],
+                detail["latestTurn"]["requestedAt"],
+                detail["latestTurn"]["startedAt"],
+                detail["latestTurn"]["completedAt"],
+                detail["session"]["status"],
+                detail["session"]["updatedAt"],
+                failure.map(|activity| &activity["id"]),
+            ])
+            .to_string()
+        });
+        let shell_status = shell
+            .session
+            .as_ref()
+            .map(|session| session.status.as_str());
+        let detail_status = detail.and_then(|detail| detail["session"]["status"].as_str());
+        let status = if !selected && self.shell.sequence >= detail_sequence {
+            shell_status.or(detail_status)
+        } else {
+            detail_status.or(shell_status)
         };
-        Some(matches!(session, Some("starting" | "running")))
+        let tool = activities.and_then(|activities| {
+            activities
+                .iter()
+                .filter(|activity| activity["kind"] == "tool.completed")
+                .max_by_key(|activity| {
+                    (
+                        activity["sequence"].as_i64().unwrap_or(-1),
+                        activity["createdAt"].as_str().unwrap_or(""),
+                    )
+                })
+                .and_then(|activity| activity["id"].as_str())
+                .map(str::to_owned)
+        });
+        Some(queue::Observation {
+            running: status == Some("running"),
+            // Known completion needs no future live event. Running streams
+            // still need a valid detail baseline before tools can be used.
+            connecting: status == Some("starting")
+                || (self.queues.has_queued(thread_id)
+                    && (status.is_none()
+                        || (!selected && cached.is_none() && status == Some("running")))),
+            blocked,
+            identity,
+            detail_identity,
+            tool,
+            tool_available: activities.is_some(),
+        })
     }
 
     /// Sends each queue's next message whose thread finished its turn.
     pub(crate) fn flush_queues(&mut self, cx: &mut Context<Self>) {
+        if self.checkout_transition_pending() {
+            return;
+        }
+        self.reconcile_queue_subscriptions();
         for thread_id in self.queues.thread_ids() {
-            let Some(running) = self.thread_running(&thread_id) else {
+            let Some(state) = self.queue_observation(&thread_id) else {
                 continue;
             };
-            if let Some(message) = self.queues.observe(&thread_id, running) {
+            if let Some(message) = self.queues.observe_state(&thread_id, &state) {
                 self.dispatch_queued(thread_id, message, cx);
             }
         }
@@ -369,6 +525,23 @@ impl NativeApp {
 
     /// Sends queued message `id` now, ahead of the turn finishing.
     pub(crate) fn send_queued(&mut self, thread_id: &str, id: u64, cx: &mut Context<Self>) {
+        if self.checkout_transition_pending() {
+            self.set_status("Finish checkout reconciliation before sending; queued message retained", cx);
+            cx.notify();
+            return;
+        }
+        let state = self.queue_observation(thread_id);
+        if state
+            .as_ref()
+            .is_none_or(|state| state.blocked || state.connecting)
+        {
+            self.set_status("Resolve pending requests and reconnect before sending", cx);
+            cx.notify();
+            return;
+        }
+        if let Some(state) = state {
+            self.queues.record(thread_id, &state);
+        }
         if let Some(message) = self.queues.take(thread_id, id) {
             self.dispatch_queued(thread_id.to_owned(), message, cx);
         }
@@ -380,13 +553,18 @@ impl NativeApp {
         message: queue::QueuedMessage,
         cx: &mut Context<Self>,
     ) {
+        if self.checkout_transition_pending() {
+            self.queues.settle(&thread_id, message.id, false);
+            cx.notify();
+            return;
+        }
         let Some(sender) = self.commands.clone() else {
             self.queues.settle(&thread_id, message.id, false);
             self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
-        let payload = match message.start_command(&thread_id) {
+        let mut payload = match message.start_command(&thread_id) {
             Ok(payload) => payload,
             Err(error) => {
                 self.queues.settle(&thread_id, message.id, false);
@@ -395,12 +573,41 @@ impl NativeApp {
                 return;
             }
         };
+        match self.materialized_checkout_bootstrap(&thread_id) {
+            Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
+            Ok(None) => {},
+            Err(error) => {
+                self.queues.settle(&thread_id, message.id, false);
+                self.set_status(error, cx);
+                cx.notify();
+                return;
+            }
+        }
+        let generation = self.generation;
+        let scope = self.environment_scope.clone();
         self.set_status("Sending queued message…", cx);
         cx.notify();
         cx.spawn(async move |entity, cx| {
+            let ready = entity.update(cx, |app, cx| {
+                let ready = app.generation == generation && app.environment_scope == scope && !app.checkout_transition_pending();
+                if !ready && app.environment_scope == scope {
+                    app.queues.settle(&thread_id, message.id, false);
+                    cx.notify();
+                }
+                ready
+            }).unwrap_or(false);
+            if !ready { return; }
             let result = connection::call(&sender, "orchestration.dispatchCommand", payload).await;
             let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation {
+                    if app.environment_scope == scope {
+                        app.queues.settle(&thread_id, message.id, false);
+                        cx.notify();
+                    }
+                    return;
+                }
                 app.queues.settle(&thread_id, message.id, result.is_ok());
+                app.flush_queues(cx);
                 app.set_status(
                     match result {
                         Ok(_) => "Queued message sent".into(),
@@ -429,6 +636,7 @@ impl NativeApp {
                 );
             }
         }
+        self.flush_queues(cx);
         cx.notify();
     }
 
@@ -549,90 +757,261 @@ impl NativeApp {
         self.dispatch(payload, cx);
     }
 
-    /// Open the platform file picker, upload each selected file, and stage it as
-    /// an attachment for the next turn.
+    /// Save before changing selected thread or environment; shelves are never
+    /// cleared by disconnect. Merge late receipts without replacing draft context.
+    pub(crate) fn stash_attachment_draft(&mut self) {
+        if let Some(thread) = &self.selected_thread {
+            let shelf = self
+                .attachment_drafts
+                .shelves
+                .entry((self.environment_scope.clone(), thread.clone()))
+                .or_default();
+            for attachment in std::mem::take(&mut self.attachments) {
+                if !shelf.iter().any(|item| item["id"] == attachment["id"]) {
+                    shelf.push(attachment);
+                }
+            }
+        } else {
+            self.attachments.clear();
+        }
+    }
+
+    /// Restore immediately after installing the new environment/thread selection.
+    pub(crate) fn restore_attachment_draft(&mut self) {
+        self.attachments = self
+            .selected_thread
+            .as_ref()
+            .and_then(|thread| {
+                self.attachment_drafts
+                    .shelves
+                    .remove(&(self.environment_scope.clone(), thread.clone()))
+            })
+            .unwrap_or_default();
+    }
+
+    /// Consume only refs actually transmitted by an accepted send. Failed sends
+    /// never call this; a late success must not erase attachments added meanwhile.
+    pub(crate) fn consume_sent_attachments(
+        &mut self,
+        origin: &str,
+        thread: &str,
+        sent: &[serde_json::Value],
+    ) {
+        let keep = |item: &serde_json::Value| !sent.iter().any(|sent| sent["id"] == item["id"]);
+        if self.environment_scope == origin && self.selected_thread.as_deref() == Some(thread) {
+            self.attachments.retain(keep);
+        }
+        let key = (origin.to_owned(), thread.to_owned());
+        if let Some(shelf) = self.attachment_drafts.shelves.get_mut(&key) {
+            shelf.retain(keep);
+            if shelf.is_empty() {
+                self.attachment_drafts.shelves.remove(&key);
+            }
+        }
+    }
+
+    pub(crate) fn attachment_scope(&self) -> Option<AttachmentScope> {
+        Some(AttachmentScope {
+            origin: self.environment_scope.clone(),
+            thread: self.selected_thread.clone()?,
+            generation: self.generation,
+            sender: self.commands.clone()?,
+        })
+    }
+
+    fn attachment_connection_current(&self, scope: &AttachmentScope) -> bool {
+        self.generation == scope.generation
+            && self.environment_scope == scope.origin
+            && !scope.sender.is_closed()
+            && self
+                .commands
+                .as_ref()
+                .is_some_and(|sender| sender.same_channel(&scope.sender))
+    }
+
+    fn attachment_selected(&self, scope: &AttachmentScope) -> bool {
+        self.attachment_connection_current(scope)
+            && self.selected_thread.as_deref() == Some(&scope.thread)
+    }
+
+    fn attachment_notice(
+        &mut self,
+        scope: &AttachmentScope,
+        text: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.attachment_selected(scope) {
+            self.set_status(text.into(), cx);
+            cx.notify();
+        }
+    }
+
+    /// Explicit detach deletes the selected resource on its captured connection.
+    /// A failed delete retains it, allowing a retry on that same draft.
+    pub(crate) fn detach_attachment(
+        &mut self,
+        scope: AttachmentScope,
+        id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let resources = if self.environment_scope == scope.origin
+            && self.selected_thread.as_deref() == Some(&scope.thread)
+        {
+            Some(&self.attachments)
+        } else {
+            self.attachment_drafts.shelves.get(&scope.key())
+        };
+        let sent: Vec<_> = resources
+            .into_iter()
+            .flatten()
+            .filter(|item| item["id"].as_str() == Some(&id))
+            .cloned()
+            .collect();
+        if sent.is_empty() {
+            return;
+        }
+        cx.spawn(async move |entity, cx| {
+            let ready = entity
+                .update(cx, |app, _| app.attachment_connection_current(&scope))
+                .unwrap_or(false);
+            if !ready {
+                return;
+            }
+            let result = connection::call(
+                &scope.sender,
+                "attachments.delete",
+                json!({"attachmentId":id}),
+            )
+            .await;
+            let _ = entity.update(cx, |app, cx| {
+                if result.is_ok() {
+                    app.consume_sent_attachments(&scope.origin, &scope.thread, &sent);
+                    cx.notify();
+                } else {
+                    app.attachment_notice(
+                        &scope,
+                        "Attachment delete failed; attachment retained",
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Reject a missing target before opening the picker. Cancel has no effect
+    /// on status, pending work, text or attachment context.
     pub(crate) fn attach_files(&mut self, cx: &mut Context<Self>) {
-        let Some(sender) = self.commands.clone() else {
+        if self.selected_thread.is_none() {
+            self.set_status("Select a thread first", cx);
+            cx.notify();
+            return;
+        }
+        let Some(scope) = self.attachment_scope() else {
             self.set_status("Not connected", cx);
             cx.notify();
             return;
         };
-        let origin = self.environment_scope.clone();
+        if self.attachment_drafts.uploading {
+            return;
+        }
         let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
             prompt: Some("Attach files".into()),
         });
-        self.pending_actions += 1;
-        self.set_status("Uploading attachments…", cx);
-        cx.notify();
         cx.spawn(async move |entity, cx| {
-            let paths = match receiver.await {
-                Ok(Ok(Some(paths))) => paths,
-                _ => Vec::new(),
-            };
+            let paths = receiver.await.ok().and_then(Result::ok).flatten();
+            let _ = entity.update(cx, |app, cx| app.attach_paths(scope, paths, cx));
+        })
+        .detach();
+    }
+
+    /// Shared picker/path seam. Reads run off the UI executor, sequentially with
+    /// one bounded body alive; accepted uploads always return to their owner.
+    pub(crate) fn attach_paths(
+        &mut self,
+        scope: AttachmentScope,
+        paths: Option<Vec<std::path::PathBuf>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
+            return;
+        };
+        if !self.attachment_connection_current(&scope) || self.attachment_drafts.uploading {
+            return;
+        }
+        let count = if self.attachment_selected(&scope) {
+            self.attachments.len()
+        } else {
+            self.attachment_drafts
+                .shelves
+                .get(&scope.key())
+                .map_or(0, Vec::len)
+        };
+        if paths.len().saturating_add(count) > 100 {
+            self.attachment_notice(&scope, "You can attach up to 100 files per message", cx);
+            return;
+        }
+        self.attachment_drafts.uploading = true;
+        self.pending_actions += 1;
+        self.attachment_notice(&scope, "Uploading attachments…", cx);
+        cx.spawn(async move |entity, cx| {
             for path in paths {
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("attachment")
-                    .to_owned();
-                let bytes = match std::fs::read(&path) {
+                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("").to_owned();
+                if name.trim().is_empty() || name.chars().count() > 255 {
+                    let _ = entity.update(cx, |app, cx| app.attachment_notice(&scope, "Invalid attachment filename", cx));
+                    continue;
+                }
+                let mime = attachment_mime(&name).to_owned();
+                let image = mime.starts_with("image/");
+                let bytes = cx.background_executor().spawn(async move { read_attachment(&path, image) }).await;
+                let bytes = match bytes {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        let _ = entity.update(cx, |app, cx| {
-                            app.set_status(format!("Could not read {name}: {error}"), cx);
-                            cx.notify();
-                        });
+                        let _ = entity.update(cx, |app, cx| app.attachment_notice(&scope, error, cx));
                         continue;
                     }
                 };
-                let mime = attachment_mime(&name).to_owned();
+                let ready = entity.update(cx, |app, _| app.attachment_connection_current(&scope)).unwrap_or(false);
+                if !ready { break; }
                 let size = bytes.len() as u64;
-                let input = json!({
-                    "type": if mime.starts_with("image/") { "image" } else { "file" },
-                    "name": name,
-                    "mimeType": mime,
-                    "sizeBytes": size,
-                });
-                let attachment = match connection::call(&sender, "attachments.createUploadUrl", input).await {
-                    Ok(value) => {
-                        let id = value["attachmentId"].as_str().unwrap_or_default().to_owned();
-                        let relative = value["relativeUrl"].as_str().unwrap_or_default().to_owned();
-                        match connection::upload(&sender, format!("{origin}{relative}"), mime.clone(), bytes).await {
-                            Ok(()) => Some(json!({"id": id, "name": name, "mimeType": mime, "sizeBytes": size})),
-                            Err(error) => {
-                                let _ = entity.update(cx, |app, cx| {
-                                    app.set_status(error, cx);
-                                    cx.notify();
-                                });
-                                None
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let _ = entity.update(cx, |app, cx| {
-                            app.set_status(error, cx);
-                            cx.notify();
-                        });
-                        None
+                let input = json!({"type":if image {"image"} else {"file"}, "name":name, "mimeType":mime, "sizeBytes":size});
+                let result = connection::call(&scope.sender, "attachments.createUploadUrl", input).await;
+                let target = result.and_then(|value| upload_target(&scope.origin, &value));
+                let (id, url) = match target {
+                    Ok(target) => target,
+                    Err(_) => {
+                        let _ = entity.update(cx, |app, cx| app.attachment_notice(&scope, "Could not prepare attachment upload", cx));
+                        continue;
                     }
                 };
-                if let Some(attachment) = attachment {
-                    let label = attachment["name"].as_str().unwrap_or("attachment").to_owned();
-                    let _ = entity.update(cx, |app, cx| {
-                        app.attachments.push(attachment);
-                        app.set_status(format!("Attached {label}"), cx);
+                let ready = entity.update(cx, |app, _| app.attachment_connection_current(&scope)).unwrap_or(false);
+                if !ready { break; }
+                let result = connection::upload(&scope.sender, url, mime.clone(), bytes).await;
+                let _ = entity.update(cx, |app, cx| {
+                    if result.is_ok() {
+                        let attachment = json!({"id":id, "name":name, "mimeType":mime, "sizeBytes":size});
+                        if app.attachment_selected(&scope) {
+                            app.attachments.push(attachment);
+                        } else {
+                            app.attachment_drafts.shelves.entry(scope.key()).or_default().push(attachment);
+                        }
+                        app.attachment_notice(&scope, format!("Attached {name}"), cx);
                         cx.notify();
-                    });
-                }
+                    } else {
+                        app.attachment_notice(&scope, "Attachment upload failed; retry from the original draft", cx);
+                    }
+                });
             }
             let _ = entity.update(cx, |app, cx| {
-                app.pending_actions = app.pending_actions.saturating_sub(1);
+                app.attachment_drafts.uploading = false;
+                if app.attachment_connection_current(&scope) {
+                    app.pending_actions = app.pending_actions.saturating_sub(1);
+                }
                 cx.notify();
             });
-        })
-        .detach();
+        }).detach();
     }
 }

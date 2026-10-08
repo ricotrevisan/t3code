@@ -231,7 +231,7 @@ impl NativeApp {
                         .unwrap_or_else(|| "No worktree checkout".into()),
                 )
                 .on_click(cx.listener(move |app, _, window, cx| {
-                    app.pick_checkout(branch.clone(), path.clone(), window, cx)
+                    app.choose_checkout(branch.clone(), path.clone(), window, cx)
                 }))
             }))
             .when_some(self.worktree_outcome.as_ref(), |view, result| {

@@ -1,10 +1,32 @@
-//! Prompts held back while a thread's turn runs. Each completed turn sends one,
-//! with the model and modes it was queued with. In memory only.
-use std::collections::HashMap;
+//! Prompts held for a tool boundary or turn end, with captured model and modes.
+//! Rejected sends remain available for explicit retry. In memory only.
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
 use crate::commands;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FollowUpBehavior {
+    #[default]
+    Queue,
+    Steer,
+}
+
+/// Projection identity, not elapsed time, acknowledges an accepted dispatch.
+#[derive(Clone, Debug, Default)]
+pub struct Observation {
+    pub running: bool,
+    pub connecting: bool,
+    pub blocked: bool,
+    pub identity: String,
+    /// Extra receipt markers available only with selected-thread detail.
+    pub detail_identity: Option<String>,
+    pub tool: Option<String>,
+    /// False means activities were not observed, not that no tool completed.
+    pub tool_available: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueuedMessage {
@@ -39,8 +61,15 @@ struct ThreadQueue {
     /// A send was accepted but its turn has not been seen running, so an idle
     /// session still describes the turn before it.
     awaiting_turn: bool,
-    /// The last send was rejected; the head waits for the next completed turn.
-    held: bool,
+    baseline: String,
+    observed: String,
+    baseline_detail: Option<String>,
+    observed_detail: Option<String>,
+    observed_tool: Option<String>,
+    tools: HashMap<u64, Option<String>>,
+    consumed_tools: HashSet<String>,
+    /// Rejected messages require explicit retry or removal.
+    held: HashSet<u64>,
 }
 
 #[derive(Default)]
@@ -52,10 +81,24 @@ pub struct Queues {
 impl Queues {
     /// Appends `message`, or puts it ahead of everything not already on the
     /// wire when `front` is set. Returns its id.
-    pub fn push(&mut self, thread_id: &str, mut message: QueuedMessage, front: bool) -> u64 {
+    pub fn push(&mut self, thread_id: &str, message: QueuedMessage, front: bool) -> u64 {
+        self.push_at(thread_id, message, front, None)
+    }
+
+    pub fn push_at(
+        &mut self,
+        thread_id: &str,
+        mut message: QueuedMessage,
+        front: bool,
+        tool: Option<String>,
+    ) -> u64 {
         self.next_id += 1;
         message.id = self.next_id;
         let queue = self.threads.entry(thread_id.to_owned()).or_default();
+        if let Some(tool) = &tool {
+            queue.consumed_tools.insert(tool.clone());
+        }
+        queue.tools.insert(message.id, tool);
         if front {
             queue
                 .messages
@@ -73,7 +116,7 @@ impl Queues {
     }
 
     pub fn has_queued(&self, thread_id: &str) -> bool {
-        self.threads.contains_key(thread_id)
+        !self.messages(thread_id).is_empty()
     }
 
     /// True while the head's send awaits its receipt.
@@ -95,24 +138,107 @@ impl Queues {
             return None;
         }
         let message = queue.messages.remove(index);
+        queue.tools.remove(&id);
+        queue.held.remove(&id);
         self.forget_if_empty(thread_id);
         Some(message)
     }
 
-    /// Records the thread's session state. Returns the message to send now:
-    /// the head, once the turn before it has completed.
+    pub fn held(&self, thread_id: &str) -> bool {
+        self.threads.get(thread_id).is_some_and(|queue| {
+            queue
+                .messages
+                .first()
+                .is_some_and(|message| queue.held.contains(&message.id))
+        })
+    }
+
+    /// Compatibility observation for projections without identity or tool events.
     pub fn observe(&mut self, thread_id: &str, running: bool) -> Option<QueuedMessage> {
+        self.observe_state(
+            thread_id,
+            &Observation {
+                running,
+                ..Observation::default()
+            },
+        )
+    }
+
+    pub fn record(&mut self, thread_id: &str, state: &Observation) {
+        if let Some(queue) = self.threads.get_mut(thread_id) {
+            queue.observed = state.identity.clone();
+            if let Some(identity) = &state.detail_identity {
+                queue.observed_detail = Some(identity.clone());
+            }
+            if state.tool_available {
+                queue.observed_tool = state.tool.clone();
+            }
+        }
+    }
+
+    /// Fresh stream history is a baseline, not a tool or dispatch receipt.
+    pub fn baseline_detail(&mut self, thread_id: &str, state: &Observation) {
+        self.record(thread_id, state);
+        if let Some(queue) = self.threads.get_mut(thread_id) {
+            if queue.awaiting_turn || queue.dispatching {
+                queue.baseline_detail = state.detail_identity.clone();
+            }
+            for tool in queue.tools.values_mut() {
+                *tool = state.tool.clone();
+            }
+            if let Some(tool) = &state.tool {
+                queue.consumed_tools.insert(tool.clone());
+            }
+        }
+    }
+
+    pub fn observe_state(&mut self, thread_id: &str, state: &Observation) -> Option<QueuedMessage> {
+        self.record(thread_id, state);
         let queue = self.threads.get_mut(thread_id)?;
-        if running {
+        if queue.awaiting_turn
+            && (state.identity != queue.baseline
+                || state
+                    .detail_identity
+                    .as_ref()
+                    .zip(queue.baseline_detail.as_ref())
+                    .is_some_and(|(observed, baseline)| observed != baseline)
+                || (state.identity.is_empty() && state.running))
+        {
             queue.awaiting_turn = false;
-            queue.held = false;
+        }
+        if state.blocked
+            || state.connecting
+            || queue.dispatching
+            || queue.awaiting_turn
+            || queue
+                .messages
+                .first()
+                .is_some_and(|message| queue.held.contains(&message.id))
+        {
             return None;
         }
-        if queue.dispatching || queue.awaiting_turn || queue.held {
+        let message = queue.messages.first()?;
+        if state.running
+            && (!state.tool_available
+                || state.tool.is_none()
+                || state
+                    .tool
+                    .as_ref()
+                    .is_some_and(|tool| queue.consumed_tools.contains(tool))
+                || queue.tools.get(&message.id).unwrap_or(&None) == &state.tool)
+        {
             return None;
         }
+        for tool in queue.tools.values_mut() {
+            *tool = queue.observed_tool.clone();
+        }
+        if let Some(tool) = &state.tool {
+            queue.consumed_tools.insert(tool.clone());
+        }
+        queue.baseline = state.identity.clone();
+        queue.baseline_detail = queue.observed_detail.clone();
         queue.dispatching = true;
-        queue.messages.first().cloned()
+        Some(message.clone())
     }
 
     /// Sends `id` now, whatever the session state, unless another send is on
@@ -125,13 +251,18 @@ impl Queues {
         let index = queue.messages.iter().position(|message| message.id == id)?;
         let message = queue.messages.remove(index);
         queue.messages.insert(0, message.clone());
+        for tool in queue.tools.values_mut() {
+            *tool = queue.observed_tool.clone();
+        }
+        queue.baseline = queue.observed.clone();
+        queue.baseline_detail = queue.observed_detail.clone();
         queue.dispatching = true;
-        queue.held = false;
+        queue.held.remove(&id);
         Some(message)
     }
 
     /// The receipt for the head's send. Accepted drops it; rejected keeps it
-    /// at the head until the next completed turn.
+    /// at the head until explicit retry or removal.
     pub fn settle(&mut self, thread_id: &str, id: u64, accepted: bool) {
         let Some(queue) = self.threads.get_mut(thread_id) else {
             return;
@@ -139,9 +270,11 @@ impl Queues {
         queue.dispatching = false;
         if accepted {
             queue.messages.retain(|message| message.id != id);
-            queue.awaiting_turn = true;
+            queue.tools.remove(&id);
+            queue.awaiting_turn =
+                queue.observed == queue.baseline && queue.observed_detail == queue.baseline_detail;
         } else {
-            queue.held = true;
+            queue.held.insert(id);
         }
         self.forget_if_empty(thread_id);
     }
@@ -150,7 +283,7 @@ impl Queues {
         if self
             .threads
             .get(thread_id)
-            .is_some_and(|queue| queue.messages.is_empty())
+            .is_some_and(|queue| queue.messages.is_empty() && !queue.awaiting_turn)
         {
             self.threads.remove(thread_id);
         }
@@ -200,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_send_stays_at_the_head_until_the_next_completion() {
+    fn a_rejected_send_stays_at_the_head_until_explicit_retry() {
         let mut queues = Queues::default();
         let first = queues.push("t", message("first"), false);
         queues.push("t", message("second"), false);
@@ -209,7 +342,8 @@ mod tests {
         assert_eq!(texts(&queues, "t"), ["first", "second"]);
         assert_eq!(queues.observe("t", false), None);
         queues.observe("t", true);
-        assert_eq!(queues.observe("t", false).unwrap().id, first);
+        assert_eq!(queues.observe("t", false), None);
+        assert_eq!(queues.take("t", first).unwrap().id, first);
     }
 
     #[test]
@@ -235,6 +369,63 @@ mod tests {
         assert_eq!(queues.take("t", steer).unwrap().text, "steer");
         assert_eq!(queues.take("t", steer), None);
         assert_eq!(queues.observe("t", false), None);
+    }
+
+    #[test]
+    fn unavailable_or_empty_tools_never_invent_a_completion() {
+        let mut queues = Queues::default();
+        let id = queues.push_at("t", message("next"), false, Some("tool-1".into()));
+        let mut state = Observation {
+            running: true,
+            identity: "old".into(),
+            tool: Some("tool-1".into()),
+            tool_available: true,
+            ..Observation::default()
+        };
+        assert_eq!(queues.observe_state("t", &state), None);
+        state.tool = None;
+        state.tool_available = false;
+        assert_eq!(queues.observe_state("t", &state), None);
+        state.tool_available = true;
+        assert_eq!(queues.observe_state("t", &state), None);
+        state.tool = Some("tool-1".into());
+        assert_eq!(queues.observe_state("t", &state), None);
+        state.tool = Some("tool-2".into());
+        assert_eq!(queues.observe_state("t", &state).unwrap().id, id);
+    }
+
+    #[test]
+    fn receipt_markers_acknowledge_before_or_after_acceptance_without_detail_loss_ack() {
+        for before_receipt in [false, true] {
+            for detail_marker in [false, true] {
+                let mut queues = Queues::default();
+                let first = queues.push("t", message("first"), false);
+                let second = queues.push("t", message("second"), false);
+                let mut state = Observation {
+                    identity: "ready-session".into(),
+                    detail_identity: Some("old-turn-and-session".into()),
+                    ..Observation::default()
+                };
+                assert_eq!(queues.observe_state("t", &state).unwrap().id, first);
+                // Selection loss does not acknowledge the accepted send.
+                state.detail_identity = None;
+                queues.record("t", &state);
+                if !before_receipt {
+                    queues.settle("t", first, true);
+                    assert_eq!(queues.observe_state("t", &state), None);
+                }
+                if detail_marker {
+                    state.detail_identity = Some("new-start-failure-or-session-timestamp".into());
+                } else {
+                    state.identity = "failed-session".into();
+                }
+                if before_receipt {
+                    queues.record("t", &state);
+                    queues.settle("t", first, true);
+                }
+                assert_eq!(queues.observe_state("t", &state).unwrap().id, second);
+            }
+        }
     }
 
     #[test]

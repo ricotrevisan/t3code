@@ -27,6 +27,38 @@ pub enum Update {
     },
 }
 
+/// A cancellation fence, not an undo handle. Opening it makes delivery unknown
+/// until the authoritative RPC receipt arrives.
+#[derive(Clone, Default)]
+pub struct MutationGate(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl MutationGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel_before_send(&self) {
+        let _ = self.0.compare_exchange(
+            0,
+            1,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+    pub fn may_have_been_sent(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) == 2
+    }
+    fn open(&self) -> bool {
+        self.0
+            .compare_exchange(
+                0,
+                2,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+}
+
 pub enum Command {
     Subscribe {
         key: String,
@@ -38,6 +70,12 @@ pub enum Command {
     Call {
         tag: String,
         payload: Value,
+        reply: async_channel::Sender<Result<Value, String>>,
+    },
+    CallMutation {
+        tag: String,
+        payload: Value,
+        gate: MutationGate,
         reply: async_channel::Sender<Result<Value, String>>,
     },
     CallStream {
@@ -74,6 +112,29 @@ pub async fn call(
         .send(Command::Call {
             tag: tag.into(),
             payload,
+            reply,
+        })
+        .await
+        .map_err(|_| "Not connected")?;
+    receiver
+        .recv()
+        .await
+        .map_err(|_| "Connection lost before receipt; RPC outcome is unknown".to_owned())?
+}
+
+/// Keep awaiting the actual receipt after dispatch, even if the gate is canceled.
+pub async fn call_mutation(
+    commands: &async_channel::Sender<Command>,
+    tag: &str,
+    payload: Value,
+    gate: MutationGate,
+) -> Result<Value, String> {
+    let (reply, receiver) = async_channel::bounded(1);
+    commands
+        .send(Command::CallMutation {
+            tag: tag.into(),
+            payload,
+            gate,
             reply,
         })
         .await
@@ -295,7 +356,13 @@ async fn connect(options: &ConnectionOptions) -> Result<Socket, Failure> {
 
 type Subscriptions = HashMap<String, (String, Value)>;
 fn supported_subscription(tag: &str) -> bool {
-    matches!(tag, "subscribeProjectClones" | "subscribeWorktreeSetup")
+    matches!(
+        tag,
+        "subscribeProjectClones"
+            | "subscribeWorktreeSetup"
+            | "orchestration.subscribeThread"
+            | "terminal.attach"
+    )
 }
 async fn reject_disconnected(
     command: Command,
@@ -312,6 +379,14 @@ async fn reject_disconnected(
             subscriptions.remove(&key);
         }
         Command::SelectThread(id) => *selected = id,
+        Command::CallMutation { gate, reply, .. } => {
+            gate.cancel_before_send();
+            let _ = reply
+                .send(Err(
+                    "Disconnected; request was not sent. Retry after synchronization.".into(),
+                ))
+                .await;
+        }
         Command::Call { reply, .. } => {
             let _ = reply
                 .send(Err(
@@ -562,7 +637,6 @@ where
         tokio::select! {
             command = commands.recv(), if commands_open => {
                 let command = match command { Ok(command) => command, Err(_) => { commands_open = false; continue; } };
-                let id = RequestId::String(next_id.to_string());
                 match command {
                     Command::Subscribe { key,tag,payload } => {
                         if !supported_subscription(&tag) {
@@ -576,7 +650,7 @@ where
                         }
                         subscriptions.insert(key.clone(),(tag.clone(),payload.clone()));
                         send(&mut socket,protocol::request(next_id,&tag,payload)).await?;
-                        pending.insert(id,Pending::Subscription(key));next_id += 1;
+                        pending.insert(RequestId::String(next_id.to_string()),Pending::Subscription(key));next_id += 1;
                     }
                     Command::Unsubscribe(key) => {
                         subscriptions.remove(&key);
@@ -596,7 +670,7 @@ where
                         }
                         if let Some(thread_id) = thread_id {
                             send(&mut socket, protocol::request(next_id, "orchestration.subscribeThread", json!({"threadId":thread_id,"reasoningMessages":true,"requestCompletionMarker":true}))).await?;
-                            pending.insert(id, Pending::Thread(thread_id));
+                            pending.insert(RequestId::String(next_id.to_string()), Pending::Thread(thread_id));
                             next_id += 1;
                         }
                     }
@@ -609,7 +683,24 @@ where
                             continue;
                         }
                         send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
-                        pending.insert(id, Pending::Call(reply));
+                        pending.insert(RequestId::String(next_id.to_string()), Pending::Call(reply));
+                        next_id += 1;
+                    }
+                    Command::CallMutation { tag, payload, gate, reply } => {
+                        if reply.is_closed() { gate.cancel_before_send(); }
+                        if !synchronized {
+                            gate.cancel_before_send();
+                            let _=reply.send(Err("History is not synchronized; request was not sent".into())).await;
+                            continue;
+                        }
+                        // This CAS is the dispatch point. Do not allocate an ID or
+                        // write anything for a canceled or already-used gate.
+                        if !gate.open() {
+                            let _=reply.send(Err("Mutation canceled before send or gate already dispatched; request was not sent".into())).await;
+                            continue;
+                        }
+                        send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
+                        pending.insert(RequestId::String(next_id.to_string()), Pending::Call(reply));
                         next_id += 1;
                     }
                     Command::CallStream { tag, payload, reply } => {
@@ -619,7 +710,7 @@ where
                             continue;
                         }
                         send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
-                        pending.insert(id, Pending::CallStream(reply, Vec::new()));
+                        pending.insert(RequestId::String(next_id.to_string()), Pending::CallStream(reply, Vec::new()));
                         next_id += 1;
                     }
                     Command::Upload { url, content_type, bytes, reply } => {
@@ -1249,6 +1340,73 @@ mod subscription_tests {
         assert_eq!(sent["payload"]["cwd"], "/current/checkout");
         server.send(Message::Text(json!({"_tag":"Exit","requestId":sent["id"],"exit":{"_tag":"Success","value":{"refs":[]}}}).to_string().into())).await.unwrap();
         assert_eq!(accepted.recv().await.unwrap().unwrap(), json!({"refs":[]}));
+        server.close(None).await.unwrap();
+        assert_eq!(task.await.unwrap(), Err("Server disconnected"));
+    }
+
+    #[tokio::test]
+    async fn mutation_gate_skips_unsent_and_retains_dispatched_receipts() {
+        let (client, server) = tokio::io::duplex(16384);
+        let client =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let mut server =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let (updates, rx) = async_channel::bounded(16);
+        let (commands, requests) = async_channel::bounded(16);
+        let task = tokio::spawn(async move { run_session(client, &updates, &requests).await });
+        let shell = receive(&mut server).await;
+        server
+            .send(Message::Text(
+                json!({"_tag":"Chunk","requestId":shell["id"],"values":[{"kind":"synchronized"}]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(rx.recv().await.unwrap(), Update::Shell(_)));
+        assert_eq!(receive(&mut server).await["_tag"], "Ack");
+        let canceled = MutationGate::new();
+        canceled.cancel_before_send();
+        assert!(
+            call_mutation(&commands, "vcs.createRef", json!({}), canceled.clone())
+                .await
+                .unwrap_err()
+                .contains("not sent")
+        );
+        assert!(!canceled.may_have_been_sent());
+        let gate = MutationGate::new();
+        let request_gate = gate.clone();
+        let request_commands = commands.clone();
+        let receipt = tokio::spawn(async move {
+            call_mutation(&request_commands, "vcs.createRef", json!({}), request_gate).await
+        });
+        let sent = receive(&mut server).await;
+        assert_eq!(sent["id"], "2");
+        assert!(gate.may_have_been_sent());
+        gate.cancel_before_send();
+        assert!(gate.may_have_been_sent());
+        // Reusing a gate cannot duplicate a mutation or allocate another ID.
+        assert!(
+            call_mutation(&commands, "vcs.createRef", json!({}), gate)
+                .await
+                .is_err()
+        );
+        server.send(Message::Text(json!({"_tag":"Exit","requestId":sent["id"],"exit":{"_tag":"Success","value":{"refName":"feature"}}}).to_string().into())).await.unwrap();
+        assert_eq!(
+            receipt.await.unwrap().unwrap(),
+            json!({"refName":"feature"})
+        );
+        let (reply, final_receipt) = async_channel::bounded(1);
+        commands
+            .send(Command::Call {
+                tag: "vcs.listRefs".into(),
+                payload: json!({}),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut server).await["id"], "3");
+        drop(final_receipt);
         server.close(None).await.unwrap();
         assert_eq!(task.await.unwrap(), Err("Server disconnected"));
     }

@@ -144,7 +144,13 @@ fn timeline_changes_opens_same_panel_and_header_preserves_tab(cx: &mut TestAppCo
     assert_eq!(app.read_with(cx, |app, _| app.right_tab), RightTab::Changes);
     assert!(cx.debug_bounds("diff-patch").is_some());
     click_diff(cx, "copy-diff");
-    assert!(cx.read_from_clipboard().unwrap().text().unwrap().contains("-old\n+new\n"));
+    assert!(
+        cx.read_from_clipboard()
+            .unwrap()
+            .text()
+            .unwrap()
+            .contains("-old\n+new\n")
+    );
     assert!(requests.try_recv().is_err());
 }
 
@@ -155,18 +161,28 @@ fn checkout_selection_retires_pending_and_completed_patches(cx: &mut TestAppCont
     seed_checkpoints(&app, cx);
     click_diff(cx, "diff-checkpoint-1");
     let delayed = diff_request(&requests, 1);
-    cx.update(|window, cx| app.update(cx, |app, cx| {
-        app.select_thread("u", window, cx);
-        app.select_thread("t", window, cx);
-    }));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("u", window, cx);
+            app.select_thread("t", window, cx);
+        })
+    });
     cx.run_until_parked();
     while requests.try_recv().is_ok() {}
-    let _ = delayed.send_blocking(Ok(json!({"threadId":"t","fromTurnCount":0,"toTurnCount":1,"diff":"obsolete patch"})));
+    let _ = delayed.send_blocking(Ok(
+        json!({"threadId":"t","fromTurnCount":0,"toTurnCount":1,"diff":"obsolete patch"}),
+    ));
     cx.run_until_parked();
-    assert!(app.read_with(cx, |app, _| app.diffs.files.is_empty() && !app.diffs.loading && app.diffs.turn_count.is_none()));
+    assert!(app.read_with(cx, |app, _| app.diffs.files.is_empty()
+        && !app.diffs.loading
+        && app.diffs.turn_count.is_none()));
     seed_checkpoints(&app, cx);
     click_diff(cx, "diff-checkpoint-1");
-    diff_request(&requests, 1).send_blocking(Ok(json!({"threadId":"t","fromTurnCount":0,"toTurnCount":1,"diff":"current patch"}))).unwrap();
+    diff_request(&requests, 1)
+        .send_blocking(Ok(
+            json!({"threadId":"t","fromTurnCount":0,"toTurnCount":1,"diff":"current patch"}),
+        ))
+        .unwrap();
     cx.run_until_parked();
     assert!(cx.debug_bounds("diff-patch").is_some());
     cx.update(|_, cx| app.update(cx, |app, cx| app.invalidate_checkout_context(cx)));
@@ -187,7 +203,8 @@ fn checkpoint_reply_must_match_the_requested_thread_and_range(cx: &mut TestAppCo
         click_diff(cx, "diff-checkpoint-1");
         diff_request(&requests, 1).send_blocking(Ok(reply)).unwrap();
         cx.run_until_parked();
-        assert!(app.read_with(cx, |app, _| app.diffs.error.is_some() && app.diffs.files.is_empty()));
+        assert!(app.read_with(cx, |app, _| app.diffs.error.is_some()
+            && app.diffs.files.is_empty()));
         assert!(cx.debug_bounds("diff-retry").is_some());
     }
 }

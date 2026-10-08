@@ -53,6 +53,7 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_branch_workflow(cx);
         self.close_thread_menu();
         self.catalog_open = false;
         self.previous_focus = window.focused(cx);
@@ -66,6 +67,7 @@ impl NativeApp {
     }
 
     pub(crate) fn close_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_branch_workflow(cx);
         self.branch_picker = None;
         if let Some(focus) = self.previous_focus.take() {
             window.focus(&focus, cx);

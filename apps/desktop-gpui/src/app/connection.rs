@@ -9,7 +9,11 @@ use t3code_desktop_gpui::{
 
 impl NativeApp {
     pub(crate) fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.clear_checkout_stops();
+        self.clear_queue_subscriptions();
         self.diffs.invalidate();
+        self.action_runs_connection_lost();
+        self.clear_notifications(cx);
         self.connection_task = None;
         self.pairing_task = None;
         self.credential_task = None;
@@ -22,7 +26,9 @@ impl NativeApp {
         self.shell = shell::Shell::default();
         self.archived_shell = shell::Shell::default();
         self.detail = thread::ThreadDetail::default();
+        self.stash_attachment_draft();
         self.selected_thread = None;
+        self.restore_attachment_draft();
         self.pending_history_attached = false;
         self.selected_project = None;
         self.confirm_project_removal = None;
@@ -206,6 +212,7 @@ impl NativeApp {
                     );
                     let scope = options.origin();
                     if scope != self.environment_scope {
+                        self.queues = Default::default();
                         self.drafts.clear();
                         self.stash_memory.clear();
                         self.search_results.clear();
@@ -215,14 +222,21 @@ impl NativeApp {
                         .as_ref()
                         .map(|store| store.pending_threads(&scope))
                         .unwrap_or_default();
+                    self.stash_attachment_draft();
                     self.environment_scope = scope;
+                    self.restore_attachment_draft();
                     let session = connection::start_session(options);
                     self.commands = Some(session.commands);
+                    let generation = self.generation;
                     self.connection_task = Some(cx.spawn(async move |entity, cx| {
                         while let Ok(update) = session.updates.recv().await {
                             let keep_running = entity.update(cx, |app, cx| {
                                 let result = match update {
                                     connection::Update::Resynchronizing => {
+                                        app.action_runs_connection_lost();
+                                        app.clear_checkout_stops();
+                                        app.clear_queue_subscriptions();
+                                        app.clear_notifications(cx);
                                         app.shell = shell::Shell::default();
                                         app.archived_shell = shell::Shell::default();
                                         app.action_task = None;
@@ -253,6 +267,7 @@ impl NativeApp {
                                         app.attach_created_pending(cx);
                                         app.schedule_snooze_wake(cx);
                                         if app.shell.synchronized && !was_synchronized {
+                                            app.action_runs_synchronized(cx);
                                             app.perform("server.getConfig", json!({}), None, cx);
                                             if let Some(sender) = &app.commands {
                                                 let _ = sender.try_send(
@@ -282,7 +297,15 @@ impl NativeApp {
                                         result
                                     }
                                     connection::Update::Subscription { key, item } => {
-                                        if key == "server-config" {
+                                        if key.starts_with("checkout-stop-") {
+                                            app.apply_checkout_stop_subscription(&key, item);
+                                            Ok(())
+                                        } else if key.starts_with("queue-detail:") {
+                                            app.apply_queue_subscription(&key, item, cx)
+                                        } else if key.starts_with("action-") {
+                                            app.action_run_update(&key, item, cx);
+                                            Ok(())
+                                        } else if key == "server-config" {
                                             match item {
                                                 Ok(value) => {
                                                     if value["type"] == "snapshot" {
@@ -363,10 +386,14 @@ impl NativeApp {
                                     }
                                 };
                                 if let Err(error) = result {
+                                    app.clear_notifications(cx);
                                     app.set_status(
                                         format!("Projection failed — reconnect required: {error}"),
                                         cx,
                                     );
+                                    app.action_runs_connection_lost();
+                                    app.clear_checkout_stops();
+                                    app.clear_queue_subscriptions();
                                     app.commands = None;
                                     cx.notify();
                                     return false;
@@ -378,6 +405,16 @@ impl NativeApp {
                                 break;
                             }
                         }
+                        let _ = entity.update(cx, |app, cx| {
+                            if app.generation == generation {
+                                app.clear_checkout_stops();
+                                app.action_runs_connection_lost();
+                                app.clear_queue_subscriptions();
+                                app.clear_notifications(cx);
+                                app.commands = None;
+                                cx.notify();
+                            }
+                        });
                     }));
                 }
                 Err(message) => self.set_status(message, cx),
@@ -401,11 +438,29 @@ impl NativeApp {
         let generation = self.generation;
         let thread_id = self.selected_thread.clone();
         let tag = tag.to_owned();
+        let attachment_origin = self.environment_scope.clone();
+        let attachment_thread = payload["threadId"].as_str().map(str::to_owned);
+        let sent_attachments = if sent_prompt.is_some() {
+            payload["message"]["attachments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let reverting = payload["type"] == "thread.checkpoint.revert";
         self.pending_actions += 1;
         self.set_status("Waiting for server receipt…", cx);
         cx.spawn(async move |entity, cx| {
             let result = connection::call(&sender, &tag, payload).await;
+            if result.is_ok()
+                && let Some(id) = &attachment_thread
+            {
+                let _ = entity.update(cx, |app, cx| {
+                    app.consume_sent_attachments(&attachment_origin, id, &sent_attachments);
+                    cx.notify();
+                });
+            }
             if result.is_ok()
                 && let Some((text, handle)) = &sent_prompt
             {
@@ -417,7 +472,6 @@ impl NativeApp {
                         {
                             app.composer
                                 .update(cx, |input, cx| input.set_value("", window, cx));
-                            app.attachments.clear();
                         }
                     })
                 });

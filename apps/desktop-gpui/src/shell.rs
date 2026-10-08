@@ -60,6 +60,8 @@ pub struct Thread {
     #[serde(default)]
     pub latest_turn: Option<LatestTurn>,
     #[serde(default)]
+    pub background_liveness: Option<String>,
+    #[serde(default)]
     pub has_pending_approvals: bool,
     #[serde(default)]
     pub has_pending_user_input: bool,
