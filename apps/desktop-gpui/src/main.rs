@@ -4,7 +4,7 @@ use gpui_kit::component::{
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, KeyBinding, Pixels, Point, Subscription, Task,
+    App, Context, Entity, FocusHandle, Focusable as _, KeyBinding, Pixels, Point, Subscription, Task,
     Window, WindowOptions, div, prelude::*, px, size,
 };
 use serde_json::Value;
@@ -14,7 +14,7 @@ use t3code_desktop_gpui::{
 };
 // Used only by ui_tests through `use super::*`.
 #[cfg(test)]
-use gpui_kit::{Focusable as _, component::input::Position};
+use gpui_kit::component::input::Position;
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]
@@ -201,6 +201,10 @@ struct NativeApp {
     selected_thread: Option<String>,
     sidebar_view: sidebar::View,
     sidebar_state: sidebar::State,
+    /// Actions already handled for the current keystroke; see `once_per_keystroke`.
+    keystroke_actions: std::collections::HashSet<&'static str>,
+    /// Off in the headless harness, which has no native menu to double-dispatch.
+    keystroke_guard: bool,
     sidebar_rows: views::r13_b_sidebar_rows::Rows,
     server_config: server_config_projection::Projection,
     thread_undo: app::thread_undo::UndoState,
@@ -372,6 +376,36 @@ struct NativeApp {
 }
 
 impl NativeApp {
+    /// macOS delivers a menu item's key equivalent to the menu as well as to the
+    /// focused view while a text input has focus, so one keystroke can dispatch the
+    /// same menu-bound action twice. Toggles then cancel out and mutations repeat.
+    /// Returns false for the repeat. Both deliveries arrive within microseconds, so
+    /// the action is released after a short window rather than on the next frame,
+    /// which a hidden window may never draw.
+    fn once_per_keystroke(
+        &mut self,
+        action: &'static str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.keystroke_guard {
+            return true;
+        }
+        if !self.keystroke_actions.insert(action) {
+            return false;
+        }
+        cx.spawn(async move |app, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(80))
+                .await;
+            let _ = app.update(cx, |app, _| {
+                app.keystroke_actions.remove(action);
+            });
+        })
+        .detach();
+        true
+    }
+
     fn new(window: &mut Window, cx: &mut Context<Self>, auto_connect: bool) -> Self {
         theme::observe(window, cx);
         let composer = cx.new(|cx| {
@@ -556,6 +590,9 @@ impl NativeApp {
                 }
             }),
         );
+        subscriptions.push(cx.on_focus(&composer.read(cx).focus_handle(cx), window, |app, _, cx| {
+            app.browser_panel.update(cx, |panel, _| panel.release_native_focus());
+        }));
         subscriptions.push(cx.observe_window_activation(window, |app, window, cx| {
             app.window_active = window.is_window_active();
             if app.window_active {
@@ -602,6 +639,8 @@ impl NativeApp {
             selected_thread: None,
             sidebar_view: sidebar::View::Active,
             sidebar_state: sidebar::State::default(),
+            keystroke_actions: Default::default(),
+            keystroke_guard: !cfg!(test),
             sidebar_rows: views::r13_b_sidebar_rows::Rows::default(),
             server_config: server_config_projection::Projection::default(),
             thread_undo: app::thread_undo::UndoState::default(),
@@ -905,6 +944,9 @@ impl Render for NativeApp {
         div()
             .relative()
             .key_context("NativeApp")
+            .capture_any_mouse_down(cx.listener(|app, _, _, cx| {
+                app.browser_panel.update(cx, |panel, _| panel.release_native_focus());
+            }))
             .map(|root| platform_shell::window_actions(root, cx))
             .track_focus(&self.focus)
             .on_action(cx.listener(|app, _: &UndoThreadNavigation, _, cx| app.undo_thread_navigation(cx)))
@@ -924,34 +966,34 @@ impl Render for NativeApp {
                 cx.listener(|app, _: &ContentPrevious, _, cx| app.move_content_hit(false, cx)),
             )
             .on_action(cx.listener(|app, _: &OpenPreferredEditor, _, cx| app.open_in_editor(cx)))
-            .on_action(cx.listener(|app, _: &OpenPullRequests, window, cx| app.open_pull_requests(window, cx)))
-            .on_action(cx.listener(|app, _: &OpenFiles, window, cx| {
+            .on_action(cx.listener(|app, _: &OpenPullRequests, window, cx| { if !app.once_per_keystroke("OpenPullRequests", window, cx) { return; } app.open_pull_requests(window, cx); }))
+            .on_action(cx.listener(|app, _: &OpenFiles, window, cx| { if !app.once_per_keystroke("OpenFiles", window, cx) { return; }
                 app.execute_command(palette::Command::Files, window, cx)
             }))
-            .on_action(cx.listener(|app, _: &OpenContentSearch, window, cx| {
+            .on_action(cx.listener(|app, _: &OpenContentSearch, window, cx| { if !app.once_per_keystroke("OpenContentSearch", window, cx) { return; }
                 app.execute_command(palette::Command::ContentSearch, window, cx)
             }))
             .on_action(
-                cx.listener(|app, _: &TogglePalette, window, cx| app.toggle_palette(window, cx)),
+                cx.listener(|app, _: &TogglePalette, window, cx| { if !app.once_per_keystroke("TogglePalette", window, cx) { return; } app.toggle_palette(window, cx); }),
             )
             .on_action(
                 cx.listener(|app, _: &ClosePalette, window, cx| app.close_palette(window, cx)),
             )
             .on_action(cx.listener(|app, _: &PaletteNext, _, cx| app.move_palette(true, cx)))
             .on_action(cx.listener(|app, _: &PalettePrevious, _, cx| app.move_palette(false, cx)))
-            .on_action(cx.listener(|app, _: &NewThread, window, cx| {
+            .on_action(cx.listener(|app, _: &NewThread, window, cx| { if !app.once_per_keystroke("NewThread", window, cx) { return; }
                 app.execute_command(palette::Command::NewThread, window, cx)
             }))
-            .on_action(cx.listener(|app, _: &StashPrompt, window, cx| {
+            .on_action(cx.listener(|app, _: &StashPrompt, window, cx| { if !app.once_per_keystroke("StashPrompt", window, cx) { return; }
                 let restore = app.composer.read(cx).value().trim().is_empty()
                     && app.attachments.is_empty();
                 app.stash_prompt(restore, window, cx)
             }))
             .on_action(
-                cx.listener(|app, _: &ToggleSettle, _, cx| app.toggle_thread_property(false, cx)),
+                cx.listener(|app, _: &ToggleSettle, window, cx| { if !app.once_per_keystroke("ToggleSettle", window, cx) { return; } app.toggle_thread_property(false, cx); }),
             )
             .on_action(
-                cx.listener(|app, _: &TogglePin, _, cx| app.toggle_thread_property(true, cx)),
+                cx.listener(|app, _: &TogglePin, window, cx| { if !app.once_per_keystroke("TogglePin", window, cx) { return; } app.toggle_thread_property(true, cx); }),
             )
             // Inputs re-propagate Enter after emitting PressEnter; consume it here so an
             // unhandled keystroke can never fall through to text insertion after a send.
@@ -967,25 +1009,25 @@ impl Render for NativeApp {
                 }
             }))
             .on_action(
-                cx.listener(|app, _: &PreviousThread, window, cx| {
+                cx.listener(|app, _: &PreviousThread, window, cx| { if !app.once_per_keystroke("PreviousThread", window, cx) { return; }
                     app.step_thread(false, window, cx)
                 }),
             )
             .on_action(
-                cx.listener(|app, _: &NextThread, window, cx| app.step_thread(true, window, cx)),
+                cx.listener(|app, _: &NextThread, window, cx| { if !app.once_per_keystroke("NextThread", window, cx) { return; } app.step_thread(true, window, cx); }),
             )
-            .on_action(cx.listener(|app, _: &ZoomIn, window, cx| app.change_scale(Some(1), window, cx)))
-            .on_action(cx.listener(|app, _: &ZoomOut, window, cx| app.change_scale(Some(-1), window, cx)))
-            .on_action(cx.listener(|app, _: &ZoomReset, window, cx| app.change_scale(None, window, cx)))
-            .on_action(cx.listener(|app, _: &OpenSettings, window, cx| app.toggle_settings(window, cx)))
+            .on_action(cx.listener(|app, _: &ZoomIn, window, cx| { if !app.once_per_keystroke("ZoomIn", window, cx) { return; } app.change_scale(Some(1), window, cx); }))
+            .on_action(cx.listener(|app, _: &ZoomOut, window, cx| { if !app.once_per_keystroke("ZoomOut", window, cx) { return; } app.change_scale(Some(-1), window, cx); }))
+            .on_action(cx.listener(|app, _: &ZoomReset, window, cx| { if !app.once_per_keystroke("ZoomReset", window, cx) { return; } app.change_scale(None, window, cx); }))
+            .on_action(cx.listener(|app, _: &OpenSettings, window, cx| { if !app.once_per_keystroke("OpenSettings", window, cx) { return; } app.toggle_settings(window, cx); }))
             .on_action(cx.listener(|app, _: &SteerPrompt, window, cx| app.steer_prompt(window, cx)))
-            .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| {
+            .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| { if !app.once_per_keystroke("ToggleTerminal", window, cx) { return; }
                 if app.shell_terminal_available() { app.toggle_terminal(window, cx); }
             }))
-            .on_action(cx.listener(|app, _: &ToggleRightPanel, _, cx| {
+            .on_action(cx.listener(|app, _: &ToggleRightPanel, window, cx| { if !app.once_per_keystroke("ToggleRightPanel", window, cx) { return; }
                 app.set_inspector_open(!app.inspector_open, cx)
             }))
-            .on_action(cx.listener(|app, _: &ToggleSidebar, window, cx| {
+            .on_action(cx.listener(|app, _: &ToggleSidebar, window, cx| { if !app.once_per_keystroke("ToggleSidebar", window, cx) { return; }
                 app.execute_command(palette::Command::ToggleSidebar, window, cx)
             }))
             .flex()

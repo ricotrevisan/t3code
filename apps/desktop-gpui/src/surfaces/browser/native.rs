@@ -268,16 +268,22 @@ impl EmbeddedBrowser {
         ));
         self.clip.setHidden(false);
     }
-    pub fn hide(&self) {
+    /// GPUI focus handles do not change AppKit's first responder. Return it
+    /// only when this page (or its WebKit content descendant) currently owns it;
+    /// normal page clicks remain responsible for taking native focus again.
+    pub fn release_focus(&self) {
         if let Some(window) = self.parent.window()
             && let Some(responder) = window.firstResponder()
             && let Some(view) = responder.downcast_ref::<NSView>()
             && view.isDescendantOf(&self.clip)
         {
-            // A hidden page must not keep eating typing/shortcuts intended for
-            // the GPUI overlay, composer, or newly selected built-in surface.
+            // A GPUI input's focus ring alone cannot route insertText/IME or
+            // shortcuts away from the native WebKit child.
             window.makeFirstResponder(Some(&self.parent));
         }
+    }
+    pub fn hide(&self) {
+        self.release_focus();
         self.clip.setHidden(true);
     }
     pub fn navigate(&self, url: &url::Url) -> Result<(), String> {

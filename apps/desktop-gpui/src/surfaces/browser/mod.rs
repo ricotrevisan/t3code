@@ -4,10 +4,15 @@
 pub mod model;
 #[cfg(target_os = "macos")]
 mod native;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../../ui_tests/r14_k_browser.rs"]
+mod r14_k_browser;
 mod view;
 
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::{AppContext as _, Context, Entity, EventEmitter, Subscription, Window};
+use gpui_kit::{
+    AppContext as _, Context, Entity, EventEmitter, Focusable as _, Subscription, Window,
+};
 use model::{Navigation, Profile, Tabs};
 use std::collections::HashMap;
 
@@ -17,7 +22,7 @@ pub struct BrowserTab {
     pub pending_url: Option<url::Url>,
     #[cfg(target_os = "macos")]
     native: Option<native::EmbeddedBrowser>,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// The parent listens to this event to notify its built-in-body selection.
@@ -44,6 +49,10 @@ impl BrowserPanel {
                 panel.finish_rename(cx);
             }
         });
+        let focus = rename.read(cx).focus_handle(cx);
+        let focus_subscription = cx.on_focus(&focus, window, |panel, _, _| {
+            panel.release_native_focus();
+        });
         Self {
             tabs: Tabs::default(),
             browsers: HashMap::new(),
@@ -53,7 +62,7 @@ impl BrowserPanel {
             window_handle: window.window_handle(),
             rename,
             renaming: None,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, focus_subscription],
         }
     }
     pub fn browser_active(&self) -> bool {
@@ -84,6 +93,17 @@ impl BrowserPanel {
     pub fn sync_visibility(&mut self, panel_open: bool, overlay_covers_panel: bool) {
         self.visible = panel_open && !overlay_covers_panel;
         self.hide_inactive();
+    }
+    /// Call before GPUI mouse input, including outside the browser chrome.
+    /// This is not a paint-time focus reset: repainting must never steal focus
+    /// from a user typing into the embedded page.
+    pub fn release_native_focus(&self) {
+        #[cfg(target_os = "macos")]
+        for tab in self.browsers.values() {
+            if let Some(native) = &tab.native {
+                native.release_focus();
+            }
+        }
     }
     fn hide_all(&self) {
         #[cfg(target_os = "macos")]
@@ -132,6 +152,10 @@ impl BrowserPanel {
                     panel.navigate(id, cx);
                 }
             });
+            let focus = address.read(cx).focus_handle(cx);
+            let focus_subscription = cx.on_focus(&focus, window, |panel, _, _| {
+                panel.release_native_focus();
+            });
             self.browsers.insert(
                 id,
                 BrowserTab {
@@ -139,7 +163,7 @@ impl BrowserPanel {
                     navigation: Navigation::default(),
                     pending_url: None,
                     native: None,
-                    _subscription: subscription,
+                    _subscriptions: vec![subscription, focus_subscription],
                 },
             );
             self.error = None;

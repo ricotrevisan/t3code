@@ -6,7 +6,8 @@ use gpui_kit::component::{
     input::Input,
 };
 use gpui_kit::{
-    AnyElement, Context, Focusable as _, IntoElement, Render, Window, canvas, div, prelude::*,
+    AnyElement, Context, Focusable as _, IntoElement, Render, Window, assets::IconName, canvas,
+    div, prelude::*,
 };
 
 impl BrowserPanel {
@@ -100,7 +101,8 @@ impl BrowserPanel {
             .child(
                 Button::new("browser-back")
                     .debug_selector(|| "browser-back".into())
-                    .label("Back")
+                    .icon(IconName::ArrowLeft)
+                    .tooltip("Back")
                     .ghost()
                     .small()
                     .disabled(!navigation.can_go_back)
@@ -115,7 +117,8 @@ impl BrowserPanel {
             )
             .child(
                 Button::new("browser-forward")
-                    .label("Forward")
+                    .icon(IconName::ArrowRight)
+                    .tooltip("Forward")
                     .ghost()
                     .small()
                     .disabled(!navigation.can_go_forward)
@@ -130,7 +133,8 @@ impl BrowserPanel {
             )
             .child(
                 Button::new("browser-reload")
-                    .label("Reload")
+                    .icon(IconName::RotateCw)
+                    .tooltip("Reload")
                     .ghost()
                     .small()
                     .disabled(navigation.url.is_empty())
@@ -145,7 +149,7 @@ impl BrowserPanel {
             )
             .child(
                 Button::new("browser-external")
-                    .label("External")
+                    .icon(IconName::ExternalLink)
                     .tooltip("Open current page in the system browser")
                     .ghost()
                     .small()
@@ -164,7 +168,8 @@ impl BrowserPanel {
             .child(
                 Button::new("browser-rename")
                     .debug_selector(|| "browser-rename".into())
-                    .label("Rename…")
+                    .icon(IconName::Pencil)
+                    .tooltip("Rename tab")
                     .ghost()
                     .small()
                     .on_click(cx.listener(move |panel, _, window, cx| {
@@ -179,7 +184,7 @@ impl BrowserPanel {
             .child(
                 Button::new("browser-move-left")
                     .debug_selector(|| "browser-move-left".into())
-                    .label("←")
+                    .icon(IconName::ArrowLeft)
                     .tooltip("Move tab left")
                     .ghost()
                     .small()
@@ -192,7 +197,7 @@ impl BrowserPanel {
             .child(
                 Button::new("browser-move-right")
                     .debug_selector(|| "browser-move-right".into())
-                    .label("→")
+                    .icon(IconName::ArrowRight)
                     .tooltip("Move tab right")
                     .ghost()
                     .small()
@@ -219,12 +224,22 @@ impl BrowserPanel {
             .min_h_0()
             .min_w_0()
             .gap_1()
-            .child(controls)
+            .capture_any_mouse_down(cx.listener(|panel, _, _, _| {
+                panel.release_native_focus();
+            }))
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_1()
-                    .child(div().min_w_0().flex_1().child(Input::new(&address).small()))
+                    .child(controls)
+                    .child(
+                        div()
+                            .debug_selector(|| "browser-address".into())
+                            .min_w_0()
+                            .flex_1()
+                            .child(Input::new(&address).small()),
+                    )
                     .child(
                         Button::new("browser-go")
                             .debug_selector(|| "browser-go".into())
