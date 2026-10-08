@@ -7,7 +7,12 @@ use t3code_desktop_gpui::commands;
 
 impl NativeApp {
     pub(crate) fn open_model_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.catalog_open = !self.catalog_open;
+        if self.catalog_open {
+            self.close_model_catalog(window, cx);
+            return;
+        }
+        self.prepare_search_overlay(window, cx);
+        self.catalog_open = true;
         if self.catalog_open {
             self.composer_state.catalog_provider = None;
             self.composer_state.catalog_anchor = Some(gpui_kit::ScrollAnchor::for_handle(
@@ -33,9 +38,14 @@ impl NativeApp {
                 input.set_value("", window, cx);
                 input.focus(window, cx);
             });
-        } else {
-            self.composer
-                .update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn close_model_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.catalog_open = false;
+        if let Some(focus) = self.previous_focus.take() {
+            window.focus(&focus, cx);
         }
         cx.notify();
     }
@@ -271,9 +281,7 @@ impl NativeApp {
         self.model.update(cx, |input, cx| {
             input.set_value(model.to_owned(), window, cx)
         });
-        self.catalog_open = false;
-        self.composer
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.close_model_catalog(window, cx);
         if self.command_trigger(cx).is_some() {
             self.refresh_composer_catalog(false, cx);
         }

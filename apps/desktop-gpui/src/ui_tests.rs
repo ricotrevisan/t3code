@@ -36,6 +36,7 @@ mod fixa_feedback;
 mod fixa_agents_clock;
 mod fixt_stash;
 mod statusbar_polb;
+mod polx;
 
 use super::*;
 use gpui_kit::component::Root;

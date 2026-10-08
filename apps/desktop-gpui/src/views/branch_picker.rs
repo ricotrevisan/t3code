@@ -1,4 +1,5 @@
 use gpui_kit::assets::IconName;
+use gpui_kit::base::FocusTrapElement;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable, Icon, Selectable, Sizable, input::Input, separator::Separator,
     tooltip::Tooltip,
@@ -150,6 +151,7 @@ impl NativeApp {
                                 else { app.run_branch_workflow(true, window, cx); }
                             }))))
                 )
+                .focus_trap("branch-picker", &self.settings_shortcut_focus)
                 .into_any_element();
         }
         let current = self.selected_thread_branch();
@@ -299,6 +301,7 @@ impl NativeApp {
                     }),
                 ),
             )
+            .focus_trap("branch-picker", &self.settings_shortcut_focus)
             .into_any_element()
     }
 }

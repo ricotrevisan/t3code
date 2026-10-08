@@ -9,7 +9,23 @@ use t3code_desktop_gpui::notifications::{self, ToastKind};
 use crate::NativeApp;
 
 impl NativeApp {
-    /// The toast stack, bottom-right of the conversation column just above the
+    /// Keep the toast layer inside the conversation viewport, never over its
+    /// header, composer or terminal. Its position follows layout at any scale.
+    pub(crate) fn render_conversation_with_toasts(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(self.render_conversation(cx))
+            .children(self.render_toasts(cx))
+    }
+
+    /// The toast stack, bottom-right of the conversation viewport, clear of the
     /// status bar. Only the cards take pointer input.
     pub(crate) fn render_toasts(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         if self.toasts.is_empty() {
@@ -97,11 +113,14 @@ impl NativeApp {
         Some(
             div()
                 .id("toast-stack")
+                .debug_selector(|| "toast-stack".into())
                 .occlude()
                 .max_h(px(320.))
                 .absolute()
                 .right_3()
-                .bottom(px(40.))
+                .bottom_3()
+                .max_h_full()
+                .max_w_full()
                 .w(px(360.))
                 .flex()
                 .flex_col()

@@ -1006,7 +1006,7 @@ impl NativeApp {
         let (id, message) = match self.composer_message(cx) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.report_error(error, cx);
+                self.report_composer_validation(error, cx);
                 cx.notify();
                 return;
             }
@@ -1070,7 +1070,7 @@ impl NativeApp {
         let (thread_id, message) = match self.composer_message(cx) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.report_error(error, cx);
+                self.report_composer_validation(error, cx);
                 cx.notify();
                 return;
             }
@@ -1837,7 +1837,7 @@ impl NativeApp {
     /// on status, pending work, text or attachment context.
     pub(crate) fn attach_files(&mut self, cx: &mut Context<Self>) {
         if self.selected_thread.is_none() {
-            self.report_error("Select a thread first", cx);
+            self.report_thread_required(cx);
             cx.notify();
             return;
         }

@@ -33,9 +33,9 @@ impl NativeApp {
         if self.thread_menu_open {
             self.close_thread_menu();
         } else if self.catalog_open {
-            self.catalog_open = false;
+            self.open_model_catalog(window, cx);
         } else if self.settings_open {
-            self.settings_open = false;
+            self.close_settings(window, cx);
         } else {
             return false;
         }
@@ -43,12 +43,60 @@ impl NativeApp {
         true
     }
 
+    /// Search overlays are exclusive and keep the original background focus even
+    /// when one overlay opens another (e.g. palette → Settings).
+    pub(crate) fn prepare_search_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !(self.settings_open
+            || self.palette_open
+            || self.branch_picker.is_some()
+            || self.catalog_open)
+        {
+            self.previous_focus = window.focused(cx);
+        }
+        self.settings_open = false;
+        self.palette_open = false;
+        self.branch_picker = None;
+        self.catalog_open = false;
+    }
+
+    pub(crate) fn open_settings(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prepare_search_overlay(window, cx);
+        self.settings_open = true;
+        self.settings_query.update(cx, |input, cx| {
+            input.set_value(query, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        if let Some(focus) = self.previous_focus.take() {
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.close_settings(window, cx);
+        } else {
+            self.open_settings("", window, cx);
+            self.refresh_settings_providers(false, cx);
+        }
+    }
+
     pub(crate) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette_open {
             self.close_palette(window, cx);
             return;
         }
-        self.previous_focus = window.focused(cx);
+        self.prepare_search_overlay(window, cx);
         self.palette_open = true;
         self.palette_index = 0;
         self.palette_query.update(cx, |input, cx| {
@@ -68,8 +116,7 @@ impl NativeApp {
     ) {
         self.cancel_branch_workflow(cx);
         self.close_thread_menu();
-        self.catalog_open = false;
-        self.previous_focus = window.focused(cx);
+        self.prepare_search_overlay(window, cx);
         self.branch_picker = Some(trigger);
         self.branch_query.update(cx, |input, cx| {
             input.set_value("", window, cx);
@@ -148,11 +195,8 @@ impl NativeApp {
             Command::Connect => self.connect(cx),
             Command::Disconnect => self.disconnect(cx),
             Command::Settings => {
-                self.settings_query
-                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.open_settings("", window, cx);
                 self.refresh_settings_providers(false, cx);
-                self.settings_open = true;
-                cx.notify();
             }
             Command::ToggleSidebar => self.set_sidebar_open(!self.sidebar_open, window, cx),
             Command::Rename => {

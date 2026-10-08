@@ -209,11 +209,8 @@ impl NativeApp {
                 self.set_appearance(mode, window, cx);
             }
             Target::Settings(category) => {
-                self.settings_query
-                    .update(cx, |input, cx| input.set_value(category, window, cx));
-                self.settings_open = true;
+                self.open_settings(category, window, cx);
                 self.refresh_settings_providers(false, cx);
-                cx.notify();
             }
         }
     }

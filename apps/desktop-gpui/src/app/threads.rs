@@ -207,6 +207,7 @@ impl NativeApp {
             }
         }
         if self.selected_thread.as_deref() == Some(id) {
+            self.clear_thread_required(cx);
             self.reveal_sidebar_selection();
             self.sidebar_state.scroll_selected(window, cx);
             cx.notify();
@@ -222,6 +223,7 @@ impl NativeApp {
         self.model_override = None;
         self.stash_attachment_draft();
         self.selected_thread = Some(id.into());
+        self.clear_thread_required(cx);
         self.reveal_sidebar_selection();
         self.sidebar_state.scroll_selected(window, cx);
         self.restore_attachment_draft();

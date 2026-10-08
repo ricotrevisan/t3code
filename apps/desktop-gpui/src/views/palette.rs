@@ -1,4 +1,5 @@
 use gpui_kit::component::{ActiveTheme as _, input::Input};
+use gpui_kit::base::FocusTrapElement;
 use gpui_kit::{Context, div, prelude::*, rems, uniform_list};
 
 use super::list_row;
@@ -71,6 +72,7 @@ impl NativeApp {
                     .h(rems(30.))
                     .track_scroll(&self.palette_scroll),
                 )
+                .focus_trap("palette-focus-trap", &self.settings_shortcut_focus)
         })
     }
 }

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::list_row;
 use crate::NativeApp;
+use gpui_kit::base::FocusTrapElement;
 
 impl NativeApp {
     pub(crate) fn render_catalog(
@@ -59,7 +60,6 @@ impl NativeApp {
                             .cloned()
                         {
                             app.pick_model(&instance, &model, window, cx);
-                            app.composer.update(cx, |input, cx| input.focus(window, cx));
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -86,13 +86,11 @@ impl NativeApp {
                                     .cloned()
                                 {
                                     app.pick_model(&instance, &model, window, cx);
-                                    app.composer.update(cx, |input, cx| input.focus(window, cx));
                                 }
                                 cx.stop_propagation();
                             }
                             "escape" => {
-                                app.catalog_open = false;
-                                app.composer.update(cx, |input, cx| input.focus(window, cx));
+                                app.close_model_catalog(window, cx);
                                 cx.stop_propagation();
                                 cx.notify();
                             }
@@ -334,6 +332,7 @@ impl NativeApp {
                             )
                         }),
                 )
+                .focus_trap("catalog-focus-trap", &self.settings_shortcut_focus)
         })
     }
 }

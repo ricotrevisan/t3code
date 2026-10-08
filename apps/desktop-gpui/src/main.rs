@@ -341,6 +341,7 @@ struct NativeApp {
     notification_badge: std::collections::HashSet<String>,
     notification_platform: t3code_desktop_gpui::notification_platform::Platform,
     toast_id: u64,
+    thread_required_toast: Option<u64>,
     /// Whether the window has OS focus; a focused window still notifies for other threads.
     window_active: bool,
     _subscriptions: Vec<Subscription>,
@@ -736,6 +737,7 @@ impl NativeApp {
                 !auto_connect,
             ),
             toast_id: 0,
+            thread_required_toast: None,
             window_active: window.is_window_active(),
             _subscriptions: subscriptions,
         };
@@ -840,11 +842,10 @@ impl Render for NativeApp {
                                 .h_full()
                                 .relative()
                                 .child(self.render_thread_header(cx))
-                                .child(self.render_conversation(cx))
+                                .child(self.render_conversation_with_toasts(cx))
                                 .child(self.render_composer(cx))
                                 .children(self.render_terminal(cx))
-                                .child(self.render_status_bar(cx))
-                                .children(self.render_toasts(cx))
+                                .child(self.render_status_bar(_window, cx))
                                 .into_any_element(),
                         ),
                     )
@@ -935,11 +936,7 @@ impl Render for NativeApp {
             .on_action(cx.listener(|app, _: &ZoomIn, window, cx| app.change_scale(Some(1), window, cx)))
             .on_action(cx.listener(|app, _: &ZoomOut, window, cx| app.change_scale(Some(-1), window, cx)))
             .on_action(cx.listener(|app, _: &ZoomReset, window, cx| app.change_scale(None, window, cx)))
-            .on_action(cx.listener(|app, _: &OpenSettings, _, cx| {
-                app.settings_open = !app.settings_open;
-                if app.settings_open { app.refresh_settings_providers(false, cx); }
-                cx.notify();
-            }))
+            .on_action(cx.listener(|app, _: &OpenSettings, window, cx| app.toggle_settings(window, cx)))
             .on_action(cx.listener(|app, _: &SteerPrompt, window, cx| app.steer_prompt(window, cx)))
             .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| app.toggle_terminal(window, cx)))
             .on_action(cx.listener(|app, _: &ToggleRightPanel, _, cx| {

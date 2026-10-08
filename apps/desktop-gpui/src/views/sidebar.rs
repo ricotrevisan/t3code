@@ -911,18 +911,15 @@ impl NativeApp {
                             }))
                     })
                     .child(
-                        Button::new(SharedString::from(format!("priority-{key}")))
-                            .debug_selector({
-                                let key = key.to_owned();
-                                move || format!("priority-{key}")
-                            })
-                            .label(format!(
-                                "{} {label} ({})",
-                                if collapsed { "▸" } else { "▾" },
-                                rows.len()
-                            ))
-                            .ghost()
-                            .small()
+                        super::list_row(
+                            format!("priority-{key}"),
+                            Some(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }),
+                            format!("{} ({})", label.to_uppercase(), rows.len()),
+                            false,
+                        )
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(muted_foreground)
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 if app.collapsed_groups.contains(&collapse_key) {
                                     app.collapsed_groups.retain(|key| key != &collapse_key);
@@ -1497,10 +1494,7 @@ impl NativeApp {
                             .label("Settings")
                             .ghost()
                             .small()
-                            .on_click(cx.listener(|app, _, _, cx| {
-                                app.settings_open = true;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|app, _, window, cx| app.open_settings("", window, cx))),
                     ),
             )
     }

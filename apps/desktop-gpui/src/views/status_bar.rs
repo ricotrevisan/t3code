@@ -10,7 +10,11 @@ use t3code_desktop_gpui::{connection::Phase, notifications};
 use crate::NativeApp;
 
 impl NativeApp {
-    pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_status_bar(
+        &self,
+        window: &gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let muted_foreground = cx.theme().muted_foreground;
         let border = cx.theme().border;
         let warning = cx.theme().warning;
@@ -30,6 +34,25 @@ impl NativeApp {
                 .unwrap_or(&environment_host),
             self.connection_state_text()
         );
+        // Size only the identity's contents, not a proportion of the whole bar.
+        // The text system caches this shape; extra space is kit xs icon/padding.
+        let environment_width = window
+            .text_system()
+            .shape_line(
+                environment_label.clone().into(),
+                window.rem_size() * 0.75,
+                &[gpui_kit::TextRun {
+                    len: environment_label.len(),
+                    font: gpui_kit::font(cx.theme().font_family.clone()),
+                    color: muted_foreground,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width
+            + window.rem_size() * 1.75;
         let worktree_path = self.selected_thread_worktree();
         let status_worktree = worktree_path
             .as_deref()
@@ -46,7 +69,7 @@ impl NativeApp {
             .debug_selector(|| "status-bar".into())
             .flex()
             .items_center()
-            .justify_between()
+            .justify_start()
             .gap_3()
             .flex_shrink_0()
             .px_3()
@@ -59,10 +82,9 @@ impl NativeApp {
                 div()
                     .flex()
                     .items_center()
-                    // Intrinsic chip widths must not steal the message's lane.
+                    // Pack identity chips at the left; the message owns all spare width.
                     .gap_1()
-                    .flex_1()
-                    .flex_grow(3.)
+                    .flex_shrink_1()
                     .min_w_0()
                     .child(
                         div()
@@ -95,26 +117,27 @@ impl NativeApp {
                             }),
                     )
                     .child(
-                        // Host identity takes priority over optional branch/model labels.
-                        // Keep zero-basis lanes so very long hosts still shrink on resize.
-                        div().flex_1().flex_grow(6.).min_w_0().child(
-                            Button::new("environment-chip")
-                                .debug_selector(|| "environment-chip".into())
-                                .icon(gpui_kit::assets::IconName::Settings)
-                                .label(environment_label)
-                                .ghost()
-                                .xsmall()
-                                .w_full()
-                                .tooltip(format!(
-                                    "Open connection settings · {} · {}",
-                                    self.connection_state_text(),
-                                    self.environment_scope
-                                ))
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.settings_open = true;
-                                    cx.notify();
-                                })),
-                        ),
+                        div()
+                            .w(environment_width.min(window.rem_size() * 20.))
+                            .min_w(px(24.))
+                            .flex_shrink_1()
+                            .child(
+                                Button::new("environment-chip")
+                                    .debug_selector(|| "environment-chip".into())
+                                    .icon(gpui_kit::assets::IconName::Settings)
+                                    .w_full()
+                                    .label(environment_label)
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip(format!(
+                                        "Open connection settings · {} · {}",
+                                        self.connection_state_text(),
+                                        self.environment_scope
+                                    ))
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.open_settings("", window, cx)
+                                    })),
+                            ),
                     )
                     .when_some(status_worktree, |view, name| {
                         view.child(
@@ -146,7 +169,14 @@ impl NativeApp {
                         )
                     })
                     .when(!active_model.is_empty(), |view| {
-                        view.child(div().flex_1().min_w_0().truncate().child(active_model))
+                        view.child(
+                            div()
+                                .max_w(gpui_kit::rems(5.))
+                                .min_w_0()
+                                .flex_shrink_1()
+                                .truncate()
+                                .child(active_model),
+                        )
                     }),
             )
             .child(
@@ -155,8 +185,7 @@ impl NativeApp {
                     .items_center()
                     .gap_2()
                     .flex_1()
-                    .flex_grow(1.25)
-                    .min_w_48()
+                    .min_w(px(if busy { 166. } else { 96. }))
                     .when(
                         matches!(self.connection_phase, Phase::Reconnecting { .. }),
                         |view| {
@@ -180,7 +209,7 @@ impl NativeApp {
                             .id("status-message")
                             .debug_selector(|| "status-message".into())
                             .flex_1()
-                            .min_w(gpui_kit::rems(7.))
+                            .min_w(px(96.))
                             .truncate()
                             .text_color(if status_is_error {
                                 danger
@@ -219,8 +248,9 @@ impl NativeApp {
         div()
             .flex()
             .flex_col()
-            .flex_1()
-            .min_w_8()
+            .w(gpui_kit::rems(5.))
+            .min_w(px(24.))
+            .flex_shrink_1()
             .when(open, |view| {
                 view.child(deferred(
                     anchored()

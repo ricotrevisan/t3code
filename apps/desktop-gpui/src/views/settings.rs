@@ -5,6 +5,7 @@ use gpui_kit::component::{
     radio::{Radio, RadioGroup},
     switch::Switch,
 };
+use gpui_kit::base::FocusTrapElement;
 use gpui_kit::{Context, FontWeight, div, prelude::*, rems};
 use t3code_desktop_gpui::{credentials, notification_platform, notifications};
 
@@ -50,7 +51,7 @@ impl NativeApp {
                 .border_1()
                 .border_color(border)
                 .shadow_lg()
-                .child(Input::new(&self.settings_query))
+                .child(div().debug_selector(|| "settings-search".into()).child(Input::new(&self.settings_query)))
                 .child(
                     div()
                         .flex()
@@ -68,10 +69,7 @@ impl NativeApp {
                                 .label("Close")
                                 .ghost()
                                 .small()
-                                .on_click(cx.listener(|app, _, _, cx| {
-                                    app.settings_open = false;
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(|app, _, window, cx| app.close_settings(window, cx))),
                         ),
                 )
                 .when(matches("connection pairing credentials follow up queue general send key confirmations archive delete unpin timestamp"), |view| view.child(
@@ -392,6 +390,7 @@ impl NativeApp {
                             "Experimental native slice; feature parity is still being evaluated.",
                         )),
                 ))
+                .focus_trap("settings", &self.settings_shortcut_focus)
         })
     }
 }

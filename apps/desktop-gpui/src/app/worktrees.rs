@@ -577,7 +577,7 @@ impl NativeApp {
     ) {
         let action = action.to_owned();
         let Some(id) = self.selected_thread.clone() else {
-            self.report_error("Select a thread first", cx);
+            self.report_thread_required(cx);
             cx.notify();
             return;
         };

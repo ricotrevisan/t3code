@@ -14,6 +14,52 @@ impl NativeApp {
         self.report_outcome(notifications::Outcome::Error, status, cx);
     }
 
+    /// Local missing-target validation is owned by its condition, not by the
+    /// wording of an arbitrary server error.
+    pub(crate) fn has_validation_thread(&self) -> bool {
+        self.selected_thread.as_ref().is_some_and(|id| {
+            self.shell
+                .threads
+                .iter()
+                .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                .any(|thread| &thread.id == id)
+        })
+    }
+
+    pub(crate) fn report_composer_validation(&mut self, error: &str, cx: &mut Context<Self>) {
+        if self.has_validation_thread() {
+            self.report_error(error, cx);
+        } else {
+            self.report_thread_required(cx);
+        }
+    }
+
+    pub(crate) fn report_thread_required(&mut self, cx: &mut Context<Self>) {
+        self.report_error("Select a thread first", cx);
+        self.thread_required_toast = self
+            .toasts
+            .iter()
+            .find(|toast| {
+                toast.id != 0
+                    && toast.kind == notifications::ToastKind::Error
+                    && toast.thread.is_none()
+                    && toast.message == "Select a thread first"
+            })
+            .map(|toast| toast.id);
+    }
+
+    pub(crate) fn clear_thread_required(&mut self, cx: &mut Context<Self>) {
+        if !self.has_validation_thread() {
+            return;
+        }
+        if let Some(id) = self.thread_required_toast.take() {
+            self.dismiss_toast(id, cx);
+            if self.status == "Select a thread first" {
+                self.set_status("Thread selected", cx);
+            }
+        }
+    }
+
     pub(crate) fn report_progress(&mut self, status: impl Into<String>, cx: &mut Context<Self>) {
         self.report_outcome(notifications::Outcome::Progress, status, cx);
     }
