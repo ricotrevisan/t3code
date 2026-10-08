@@ -1049,6 +1049,31 @@ fn item_family(item: Option<&ActivityItem>) -> ToolFamily {
     }
 }
 
+#[cfg(test)]
+mod r14_d_labels {
+    use super::*;
+
+    #[test]
+    fn r14_d_work_labels_pluralize_each_tool_family_and_mixed_steps() {
+        let tool = |name: &str| {
+            ActivityItem::Tool(ToolCall::new(vec![serde_json::json!({
+                "id":"tool", "kind":"tool.completed", "payload":{"title":name}
+            })]))
+        };
+        for (name, one, many) in [
+            ("shell", "Ran 1 command", "Ran 2 commands"),
+            ("search", "Ran 1 search", "Ran 2 searches"),
+            ("edit", "Made 1 edit", "Made 2 edits"),
+        ] {
+            assert_eq!(work_label(&[tool(name)]), one);
+            assert_eq!(work_label(&[tool(name), tool(name)]), many);
+        }
+        assert_eq!(step_count(0), "0 steps");
+        assert_eq!(step_count(1), "1 step");
+        assert_eq!(work_label(&[tool("shell"), tool("edit")]), "2 steps");
+    }
+}
+
 fn work_label(items: &[ActivityItem]) -> String {
     let mut commands = 0;
     let mut searches = 0;
@@ -1064,11 +1089,17 @@ fn work_label(items: &[ActivityItem]) -> String {
         }
     }
     if commands == items.len() {
-        format!("Ran {commands} commands")
+        format!(
+            "Ran {commands} command{}",
+            if commands == 1 { "" } else { "s" }
+        )
     } else if searches == items.len() {
-        format!("Ran {searches} searches")
+        format!(
+            "Ran {searches} search{}",
+            if searches == 1 { "" } else { "es" }
+        )
     } else if edits == items.len() {
-        format!("Made {edits} edits")
+        format!("Made {edits} edit{}", if edits == 1 { "" } else { "s" })
     } else {
         step_count(items.len())
     }

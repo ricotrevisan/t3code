@@ -152,6 +152,7 @@ impl NativeApp {
         }
         self.file_path
             .update(cx, |input, cx| input.set_value(path, window, cx));
+        self.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
         self.right_tab = crate::RightTab::Inspector;
         self.set_inspector_open(true, cx);
         self.file_operation_at(

@@ -291,6 +291,10 @@ impl NativeApp {
                     self.connection_task = Some(cx.spawn(async move |entity, cx| {
                         while let Ok(update) = session.updates.recv().await {
                             let keep_running = entity.update(cx, |app, cx| {
+                                // A queued update must not mutate a newly selected connection.
+                                if app.generation != generation {
+                                    return false;
+                                }
                                 let result = match update {
                                     connection::Update::Phase(phase) => {
                                         app.apply_connection_phase(phase, cx);

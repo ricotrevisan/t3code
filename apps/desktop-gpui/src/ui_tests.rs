@@ -5,7 +5,9 @@ use r13_int_requests::Requests;
 mod attachment_ownership;
 mod r13_d_timeline;
 mod r13_d2_timeline;
+mod r14_d_timeline;
 mod r13_g_usage;
+mod r14_p_pull_requests;
 mod r13_g_environments;
 mod r13_a_shell;
 mod composer_parity;
@@ -14,6 +16,8 @@ mod r13_c_models;
 mod r13_c_commands;
 mod r13_c_context;
 mod r13_c_transfers;
+mod r14_c_upload;
+mod r14_c_search;
 mod r13_c_recovery;
 mod composer_fixd;
 mod branch_workflows;
@@ -33,12 +37,14 @@ mod header_parity_checkout;
 mod header_parity_controls;
 mod header_pol;
 mod r13_e_header;
+mod r14_e_header;
 mod notification_preferences;
 mod connection_health;
 mod outcomes;
 mod project_actions_run;
 mod settings_parity;
 mod r13_f_settings;
+mod r14_f_settings;
 mod r13_f_auth;
 mod settings_polc;
 mod workspace_context;
@@ -47,8 +53,19 @@ mod r13_b_sidebar;
 mod sidebar_fixb;
 mod sidebar_pols;
 mod surfaces_agents;
+mod r14_w_browser;
+mod r14_int_glue;
+
+fn click_connection_settings(cx: &mut VisualTestContext) {
+    let settings = cx.debug_bounds("environment-connection-settings").expect("connection settings menu entry");
+    cx.simulate_click(settings.center(), Default::default());
+    cx.run_until_parked();
+}
 mod surfaces_terminal;
 mod r13_h_terminal;
+mod r14_t_terminal;
+mod r14_t_backpressure;
+mod r14_t_links;
 #[path = "ui_tests/surfaces_terminal_polT.rs"]
 mod surfaces_terminal_pol_t;
 mod fixa_feedback;
@@ -254,6 +271,7 @@ fn statusbar_long_values_resize_without_overlap_and_keep_entry_points(cx: &mut T
     let environment_chip = cx.debug_bounds("environment-chip").unwrap();
     cx.simulate_click(environment_chip.center(), Default::default());
     cx.run_until_parked();
+    click_connection_settings(cx);
     assert!(app.read_with(cx, |app, _| app.settings_open));
     assert!(
         cx.debug_bounds("pairing-input").is_some(),
@@ -605,6 +623,7 @@ fn header_diff_chip_hides_when_the_checkpoint_changed_nothing(cx: &mut TestAppCo
         })
     });
     cx.run_until_parked();
+    r14_e_header::ensure_overflow(cx);
     assert!(cx.debug_bounds("header-diff").is_none());
     cx.update(|_, cx| {
         app.update(cx, |app, cx| {
@@ -667,11 +686,13 @@ fn header_thread_toolbar_needs_a_selected_thread(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("toggle-inspector").is_some());
     cx.update(|window, cx| app.update(cx, |app, cx| app.select_thread("t", window, cx)));
     cx.run_until_parked();
+    r14_e_header::ensure_overflow(cx);
     for id in toolbar {
         assert!(cx.debug_bounds(id).is_some(), "{id} with a thread");
     }
     cx.update(|window, cx| app.update(cx, |app, cx| app.new_thread(window, cx)));
     cx.run_until_parked();
+    r14_e_header::ensure_control(cx, "push-pr");
     assert!(cx.debug_bounds("push-pr").is_some());
     assert!(
         cx.debug_bounds("branch-selector").is_none(),
@@ -692,6 +713,7 @@ fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) 
         })
     });
     cx.run_until_parked();
+    r14_e_header::ensure_control(cx, "open-editor");
     let bounds = cx
         .debug_bounds("open-editor")
         .expect("open button is visible");
@@ -968,6 +990,7 @@ fn push_and_create_pr_streams_the_stacked_action(cx: &mut TestAppContext) {
         })
     });
     cx.run_until_parked();
+    r14_e_header::ensure_control(cx, "push-pr");
     let bounds = cx
         .debug_bounds("push-pr")
         .expect("push-pr button is visible");
@@ -1266,6 +1289,7 @@ fn running_turn_swaps_send_for_stop(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn escape_closes_the_topmost_overlay_and_thread_menu_tracks_state(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
+    r14_e_header::ensure_control(cx, "thread-menu");
     let trigger = cx.debug_bounds("thread-menu").unwrap();
     cx.simulate_click(trigger.center(), Default::default());
     cx.run_until_parked();
@@ -1278,7 +1302,7 @@ fn escape_closes_the_topmost_overlay_and_thread_menu_tracks_state(cx: &mut TestA
     assert!(pin.left() >= trigger.left() - px(1.));
     // Settings covers the window with a backdrop, so it opens after the menu.
     cx.simulate_keystrokes("cmd-,");
-    assert!(app.read_with(cx, |app, _| app.settings_open && app.thread_menu_open));
+    assert!(app.read_with(cx, |app, _| app.settings_open && app.thread_menu_open), "{:?}", app.read_with(cx, |app, _| (app.settings_open, app.thread_menu_open, app.header_rename.overflow_open)));
     cx.simulate_keystrokes("escape");
     assert!(app.read_with(cx, |app, _| !app.thread_menu_open && app.settings_open));
     cx.simulate_keystrokes("escape");
@@ -1749,6 +1773,7 @@ fn editing_while_send_is_pending_does_not_get_erased(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn delete_requires_confirmation_before_any_request(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
+    r14_e_header::ensure_control(cx, "thread-menu");
     let menu = cx.debug_bounds("thread-menu").unwrap();
     cx.simulate_click(menu.center(), Default::default());
     cx.run_until_parked();
@@ -3093,6 +3118,7 @@ fn catalog_and_thread_menu_close_on_an_outside_click(cx: &mut TestAppContext) {
     cx.simulate_click(chip.center(), Default::default());
     assert!(!app.read_with(cx, |app, _| app.catalog_open));
 
+    r14_e_header::ensure_control(cx, "thread-menu");
     let trigger = cx.debug_bounds("thread-menu").unwrap();
     cx.simulate_click(trigger.center(), Default::default());
     cx.run_until_parked();
@@ -3183,6 +3209,7 @@ fn open_branch_picker_at(
     trigger: &'static str,
     cwd: &str,
 ) -> async_channel::Sender<Result<Value, String>> {
+    r14_e_header::ensure_control(cx, trigger);
     let chip = cx.debug_bounds(trigger).expect("branch picker trigger");
     cx.simulate_click(chip.center(), Default::default());
     cx.run_until_parked();
@@ -3219,6 +3246,7 @@ fn branch_chip_picker_lists_refs_and_switches_the_thread_checkout(cx: &mut TestA
         })
     });
     cx.run_until_parked();
+    r14_e_header::ensure_control(cx, "branch-selector");
     let chip = cx.debug_bounds("branch-selector").expect("branch chip");
     let reply = open_branch_picker(cx, &requests, "branch-selector");
     let picker = cx.debug_bounds("branch-picker").expect("picker is open");
@@ -4076,14 +4104,14 @@ fn palette_marks_the_highlighted_row_with_selection_not_a_prefix(cx: &mut TestAp
     let row = |cx: &mut VisualTestContext, id: &'static str| cx.update(|window, _| window.find(id));
     let first = row(cx, "palette-0");
     assert_eq!(first.selected(), Some(true));
-    assert!(!first.label().unwrap().contains('›'));
+    assert!(!first.label().unwrap().starts_with('›'));
     assert_eq!(row(cx, "palette-1").selected(), Some(false));
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
     assert_eq!(row(cx, "palette-0").selected(), Some(false));
     let second = row(cx, "palette-1");
     assert_eq!(second.selected(), Some(true));
-    assert!(!second.label().unwrap().contains('›'));
+    assert!(!second.label().unwrap().starts_with('›'));
 }
 
 #[gpui_kit::test]
@@ -4103,6 +4131,7 @@ fn menu_and_palette_labels_start_at_the_same_inset(cx: &mut TestAppContext) {
         "labels of different widths share one left edge"
     );
     cx.simulate_keystrokes("escape");
+    r14_e_header::ensure_control(cx, "thread-menu");
     let trigger = cx.debug_bounds("thread-menu").unwrap();
     cx.simulate_click(trigger.center(), Default::default());
     cx.run_until_parked();

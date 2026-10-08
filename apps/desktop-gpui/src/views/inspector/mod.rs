@@ -96,6 +96,7 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         self.set_inspector_open(true, cx);
+        self.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
         self.right_tab = RightTab::Inspector;
         // An already open section reloads what opening it would have loaded.
         let already_open = self.inspector_section == Some(section);
@@ -140,6 +141,7 @@ impl NativeApp {
                         ("right-tab-inspector", "Inspector", RightTab::Inspector),
                         ("right-tab-changes", "Changes", RightTab::Changes),
                         ("right-tab-agents", "Agents", RightTab::Agents),
+                        ("right-tab-pull-requests", "PRs", RightTab::PullRequests),
                     ]
                     .into_iter()
                     .map(|(id, label, tab)| {
@@ -148,24 +150,33 @@ impl NativeApp {
                             .label(label)
                             .ghost()
                             .small()
-                            .selected(self.right_tab == tab)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.right_tab = tab;
-                                cx.notify();
+                            .selected(self.right_tab == tab && !self.browser_panel.read(cx).browser_active())
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
+                                if tab == RightTab::PullRequests {
+                                    app.open_pull_requests(window, cx);
+                                } else {
+                                    app.right_tab = tab;
+                                    cx.notify();
+                                }
                             }))
                     }),
                 ),
             )
+            .child(self.browser_panel.clone())
             // Only the active tab's body is in the tree: a hidden body would still
             // take its flex_1 space and push the other panels below the fold.
-            .when(self.right_tab == RightTab::Inspector, |view| {
+            .when(self.right_tab == RightTab::Inspector && !self.browser_panel.read(cx).browser_active(), |view| {
                 view.child(self.render_inspector_body(cx))
             })
-            .when(self.right_tab == RightTab::Changes, |view| {
+            .when(self.right_tab == RightTab::Changes && !self.browser_panel.read(cx).browser_active(), |view| {
                 view.child(self.render_changes_panel(cx))
             })
-            .when(self.right_tab == RightTab::Agents, |view| {
+            .when(self.right_tab == RightTab::Agents && !self.browser_panel.read(cx).browser_active(), |view| {
                 view.child(self.render_agents_panel(cx))
+            })
+            .when(self.right_tab == RightTab::PullRequests && !self.browser_panel.read(cx).browser_active(), |view| {
+                view.child(self.render_pull_requests_panel(cx))
             })
     }
 

@@ -2,11 +2,7 @@ use super::*;
 
 fn attachment_harness(
     cx: &mut TestAppContext,
-) -> (
-    Entity<NativeApp>,
-    &mut VisualTestContext,
-    Requests,
-) {
+) -> (Entity<NativeApp>, &mut VisualTestContext, Requests) {
     let (app, cx, requests) = harness(cx);
     cx.update(|_, cx| {
         app.update(cx, |app, _| {
@@ -508,5 +504,16 @@ fn bounded_read_rejects_empty_directory_and_oversize_without_loading_body() {
     file.set_len(50 * 1024 * 1024 + 1).unwrap();
     assert!(read_attachment(&path, false).is_err());
     file.set_len(10 * 1024 * 1024 + 1).unwrap();
+    let source = read_attachment(&path, true).unwrap();
+    assert_eq!(source.len(), 10 * 1024 * 1024 + 1);
+    assert!(
+        t3code_desktop_gpui::composer_image::prepare(
+            "oversize.png".into(),
+            "image/png".into(),
+            source
+        )
+        .is_err()
+    );
+    file.set_len(50 * 1024 * 1024 + 1).unwrap();
     assert!(read_attachment(&path, true).is_err());
 }

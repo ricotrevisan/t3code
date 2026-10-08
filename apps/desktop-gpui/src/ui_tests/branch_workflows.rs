@@ -2,10 +2,7 @@
 use super::*;
 use crate::app::branch_workflows::BranchWorkflow;
 
-fn call(
-    requests: &Requests,
-    tag: &str,
-) -> (Value, async_channel::Sender<Result<Value, String>>) {
+fn call(requests: &Requests, tag: &str) -> (Value, async_channel::Sender<Result<Value, String>>) {
     let (actual, payload, reply) = loop {
         match requests.try_recv().expect("expected RPC") {
             connection::Command::Call {
@@ -78,10 +75,7 @@ pub(super) fn finish_owned_stop(
     complete_stop(app, cx, &key, &payload["commandId"]);
 }
 
-pub(super) fn refresh_refs(
-    cx: &mut VisualTestContext,
-    requests: &Requests,
-) {
+pub(super) fn refresh_refs(cx: &mut VisualTestContext, requests: &Requests) {
     let (payload, reply) = call(requests, "vcs.listRefs");
     assert_eq!(payload["refresh"], true);
     reply
@@ -364,6 +358,7 @@ fn branchless_threads_and_drafts_can_reach_checkout_workflows(cx: &mut TestAppCo
             cx.debug_bounds("branch-selector").is_none(),
             "no invented branch label"
         );
+        super::r14_e_header::ensure_control(cx, "checkout-selector");
         let checkout = cx
             .debug_bounds("checkout-selector")
             .expect("branchless checkout entry point");

@@ -1,6 +1,6 @@
 //! Checkpoint patches use the same single-turn range as the web DiffPanel.
 use crate::{NativeApp, RightTab};
-use gpui_kit::{Context, Task};
+use gpui_kit::{AppContext as _, Context, Task};
 use serde::Deserialize;
 use serde_json::json;
 use t3code_desktop_gpui::connection;
@@ -24,7 +24,8 @@ pub(crate) struct DiffState {
     pub base_ref: Option<String>,
     pub source_base: Option<String>,
     pub source_head: Option<String>,
-    pub full_file: Option<(usize, String, String)>,
+    pub full_file: Option<(usize, gpui_kit::SharedString, gpui_kit::SharedString)>,
+    pub full_file_view: Option<gpui_kit::Entity<crate::views::r14_e_diff::FullFileView>>,
     pub full_file_loading: bool,
     pub full_file_error: Option<String>,
     epoch: u64,
@@ -45,6 +46,7 @@ impl DiffState {
 pub(crate) struct PatchFile {
     pub path: String,
     pub patch: String,
+    pub view: std::cell::OnceCell<gpui_kit::Entity<crate::views::r14_e_diff::PatchView>>,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +138,7 @@ fn split_patch(patch: String) -> Vec<PatchFile> {
             files.push(PatchFile {
                 path,
                 patch: String::new(),
+                view: std::cell::OnceCell::new(),
             });
         }
         let file = files.last_mut().unwrap();
@@ -155,6 +158,7 @@ fn split_patch(patch: String) -> Vec<PatchFile> {
 impl NativeApp {
     pub(crate) fn view_git_diff(&mut self, scope: &str, cx: &mut Context<Self>) {
         self.inspector_open = true;
+        self.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
         self.right_tab = RightTab::Changes;
         let (Some(thread_id), Some(cwd), Some(sender)) = (
             self.selected_thread.clone(),
@@ -172,6 +176,7 @@ impl NativeApp {
         self.diffs.thread_id = Some(thread_id);
         self.diffs.turn_count = None;
         self.diffs.git_scope = Some(scope.clone());
+        self.diffs.full_file_view = None;
         self.diffs.full_file = None;
         self.diffs.full_file_error = None;
         self.diffs.full_file_loading = false;
@@ -228,6 +233,7 @@ impl NativeApp {
     pub(crate) fn select_diff_file(&mut self, index: usize, cx: &mut Context<Self>) {
         self.diffs.epoch = self.diffs.epoch.wrapping_add(1);
         self.diffs.selected_file = index;
+        self.diffs.full_file_view = None;
         self.diffs.full_file = None;
         self.diffs.full_file_error = None;
         self.diffs.full_file_loading = false;
@@ -290,6 +296,7 @@ impl NativeApp {
         let generation = self.generation;
         let context = self.checkout_context();
         self.diffs.full_file_loading = true;
+        self.diffs.full_file_view = None;
         self.diffs.full_file = None;
         self.diffs.full_file_error = None;
         cx.spawn(async move |entity, cx| {
@@ -306,7 +313,15 @@ impl NativeApp {
                     Ok(value) => {
                         match (value["oldContents"].as_str(), value["newContents"].as_str()) {
                             (Some(old), Some(new)) => {
-                                app.diffs.full_file = Some((index, old.into(), new.into()))
+                                let old = gpui_kit::SharedString::from(old.to_owned());
+                                let new = gpui_kit::SharedString::from(new.to_owned());
+                                app.diffs.full_file_view = Some(cx.new(|_| {
+                                    crate::views::r14_e_diff::FullFileView::new(
+                                        old.clone(),
+                                        new.clone(),
+                                    )
+                                }));
+                                app.diffs.full_file = Some((index, old, new));
                             }
                             _ => {
                                 app.diffs.full_file_error =
@@ -325,6 +340,7 @@ impl NativeApp {
 
     pub(crate) fn view_checkpoint_diff(&mut self, turn_count: u64, cx: &mut Context<Self>) {
         self.inspector_open = true;
+        self.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
         self.right_tab = RightTab::Changes;
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
@@ -336,6 +352,7 @@ impl NativeApp {
         self.diffs.thread_id = Some(thread_id.clone());
         self.diffs.turn_count = Some(turn_count);
         self.diffs.git_scope = None;
+        self.diffs.full_file_view = None;
         self.diffs.full_file = None;
         self.diffs.full_file_error = None;
         self.diffs.full_file_loading = false;

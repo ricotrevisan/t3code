@@ -106,11 +106,56 @@ impl NativeApp {
         }
         self.remember_header_action(id, cx);
         self.inspector_open = true;
+        self.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
         self.right_tab = RightTab::Inspector;
         self.inspector_section = Some(InspectorSection::ProjectActions);
         self.run_project_action(id, cx);
     }
-    pub(crate) fn render_header_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_preferred_header_action(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let primary = self.primary_header_script(&self.header_scripts());
+        let target = ActionTarget {
+            generation: self.generation,
+            environment: self.environment_scope.clone(),
+            checkout: self.checkout_context(),
+        };
+        div().when_some(primary, |view, script| {
+            let id = script["id"].as_str().unwrap_or_default().to_owned();
+            let busy = self.action_runs.iter().any(|run| {
+                run.busy
+                    && run.generation == self.generation
+                    && run.scope == self.environment_scope
+                    && Some(&run.thread) == self.selected_thread.as_ref()
+                    && Some(&run.cwd) == self.selected_workspace().as_ref()
+                    && run.script["id"] == id
+            });
+            view.child(
+                Button::new("header-run-action")
+                    .debug_selector(|| "header-run-action".into())
+                    .ghost()
+                    .small()
+                    .icon(gpui_kit::assets::IconName::Play)
+                    .accessibility_label("Run preferred project action")
+                    .tooltip(
+                        script["name"]
+                            .as_str()
+                            .unwrap_or("Run preferred action")
+                            .to_owned(),
+                    )
+                    .disabled(!self.connection_ready() || busy)
+                    .on_click(
+                        cx.listener(move |app, _, _, cx| app.run_header_script(&id, &target, cx)),
+                    ),
+            )
+        })
+    }
+    pub(crate) fn render_header_actions(
+        &self,
+        include_primary: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let scripts = self.header_scripts();
         let primary = self.primary_header_script(&scripts);
         let cwd = self.selected_workspace();
@@ -144,8 +189,9 @@ impl NativeApp {
         let primary_target = target.clone();
         div()
             .flex()
+            .flex_wrap()
             .gap_1()
-            .when_some(primary, |view, script| {
+            .when_some(primary.filter(|_| include_primary), |view, script| {
                 let id = script["id"].as_str().unwrap_or_default().to_owned();
                 view.child(
                     Button::new("header-run-action")

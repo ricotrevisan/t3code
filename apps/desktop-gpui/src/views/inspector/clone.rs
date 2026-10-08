@@ -15,7 +15,12 @@ impl NativeApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(field("Repository URL", Input::new(&self.clone_remote), cx))
+            .child(self.render_repository_chooser(cx))
+            .child(field(
+                "Repository URL / owner/repository",
+                Input::new(&self.clone_remote),
+                cx,
+            ))
             .child(field("Project title", Input::new(&self.title), cx))
             .child(field(
                 "Destination directory",
@@ -23,7 +28,14 @@ impl NativeApp {
                 cx,
             ))
             .child(
-                Button::new("clone-start").disabled(!self.connection_ready())
+                Button::new("clone-start")
+                    .disabled(
+                        !self.connection_ready()
+                            || self.repository_chooser.provider.is_some()
+                            || (self.repository_chooser.busy
+                                && self.repository_chooser.generation == self.generation
+                                && self.repository_chooser.environment == self.environment_scope),
+                    )
                     .debug_selector(|| "clone-start".into())
                     .label("Start clone to project directory")
                     .primary()

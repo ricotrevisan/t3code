@@ -34,6 +34,7 @@ gpui_kit::actions!(
         OpenFiles,
         OpenContentSearch,
         OpenPreferredEditor,
+        OpenPullRequests,
         TogglePalette,
         ClosePalette,
         PaletteNext,
@@ -110,6 +111,7 @@ enum RightTab {
     Inspector,
     Changes,
     Agents,
+    PullRequests,
 }
 
 /// The one open accordion section of the Inspector tab.
@@ -131,6 +133,8 @@ mod server_config_projection;
 mod runtime_agents;
 #[path = "surfaces/usage/view.rs"]
 mod runtime_usage;
+#[path = "surfaces/pull_requests/mod.rs"]
+mod runtime_pull_requests;
 #[path = "surfaces/terminal/mod.rs"]
 mod runtime_terminal;
 mod conversation_presentation;
@@ -142,6 +146,8 @@ mod settings_theme_library;
 mod settings_fonts;
 mod settings_preferences;
 mod settings_keybindings;
+mod settings_scopes;
+mod settings_clone;
 mod settings_environments;
 mod settings_provider;
 mod settings_provider_interaction;
@@ -178,11 +184,13 @@ struct NativeApp {
     mention_epoch: u64,
     mention_task: Option<Task<()>>,
     previous_focus: Option<FocusHandle>,
+    environment_return_focus: std::rc::Rc<std::cell::RefCell<Option<FocusHandle>>>,
     shell: shell::Shell,
     archived_shell: shell::Shell,
     detail: thread::ThreadDetail,
     diffs: app::diffs::DiffState,
     agents_surface: runtime_agents::SurfaceState,
+    pull_requests: runtime_pull_requests::State,
     terminal_drawer: runtime_terminal::Drawer,
     status: String,
     status_kind: notifications::Outcome,
@@ -232,6 +240,8 @@ struct NativeApp {
     settings_provider_task: Option<Task<()>>,
     subscription_enqueues: std::collections::HashMap<String, Task<()>>,
     settings_provider_busy: Option<u64>,
+    scoped_pages: settings_scopes::ScopedPages,
+    repository_chooser: settings_clone::RepositoryChooser,
     directory_browser: settings_projects::DirectoryBrowser,
     action_extras: settings_project_actions::ActionExtras,
     /// Activity disclosures the user toggled, keyed by turn.
@@ -271,6 +281,7 @@ struct NativeApp {
     auth_state: Option<Value>,
     auth_callback: Entity<InputState>,
     right_tab: RightTab,
+    browser_panel: Entity<t3code_desktop_gpui::surfaces::browser::BrowserPanel>,
     available_editors: Vec<String>,
     /// The persisted window state; None when the app runs without persistence.
     saved_window: Option<window_state::WindowState>,
@@ -574,11 +585,13 @@ impl NativeApp {
             mention_epoch: 0,
             mention_task: None,
             previous_focus: None,
+            environment_return_focus: Default::default(),
             shell: shell::Shell::default(),
             archived_shell: shell::Shell::default(),
             detail: thread::ThreadDetail::default(),
             diffs: app::diffs::DiffState::default(),
             agents_surface: runtime_agents::SurfaceState::default(),
+            pull_requests: runtime_pull_requests::State::default(),
             terminal_drawer: runtime_terminal::Drawer::new(window, cx),
             status: "Not connected".into(),
             status_kind: notifications::Outcome::Info,
@@ -625,6 +638,8 @@ impl NativeApp {
             settings_provider_task: None,
             subscription_enqueues: Default::default(),
             settings_provider_busy: None,
+            scoped_pages: settings_scopes::ScopedPages::default(),
+            repository_chooser: settings_clone::RepositoryChooser::default(),
             directory_browser: settings_projects::DirectoryBrowser::default(),
             action_extras: settings_project_actions::ActionExtras::default(),
             catalog_open: false,
@@ -658,6 +673,11 @@ impl NativeApp {
                 single_line_input(window, cx).placeholder("Paste the authorization callback URL")
             }),
             right_tab: RightTab::Inspector,
+            browser_panel: {
+                let panel = cx.new(|cx| t3code_desktop_gpui::surfaces::browser::BrowserPanel::new(window, cx));
+                cx.observe(&panel, |_, _, cx| cx.notify()).detach();
+                panel
+            },
             available_editors: Vec::new(),
             git_header: Default::default(),
             git_live: Default::default(),
@@ -823,6 +843,7 @@ impl Render for NativeApp {
         self.clamp_terminal_height(_window);
         self.terminal_synchronize(cx);
         self.sync_git_status(cx);
+        self.sync_browser_panel(cx);
         let background = cx.theme().background;
         let foreground = cx.theme().foreground;
         // Workspace: the conversation is primary; controls live in the inspector.
@@ -876,7 +897,7 @@ impl Render for NativeApp {
                                     ..px(window_state::RIGHT_PANEL_WIDTH.2),
                             )
                             .flex_none()
-                            .child(self.render_inspector(cx).into_any_element()),
+                            .child(self.render_inspector(cx)),
                     ),
             )
             .into_any_element();
@@ -903,6 +924,7 @@ impl Render for NativeApp {
                 cx.listener(|app, _: &ContentPrevious, _, cx| app.move_content_hit(false, cx)),
             )
             .on_action(cx.listener(|app, _: &OpenPreferredEditor, _, cx| app.open_in_editor(cx)))
+            .on_action(cx.listener(|app, _: &OpenPullRequests, window, cx| app.open_pull_requests(window, cx)))
             .on_action(cx.listener(|app, _: &OpenFiles, window, cx| {
                 app.execute_command(palette::Command::Files, window, cx)
             }))
@@ -1134,6 +1156,7 @@ fn main() {
                         gpui_kit::MenuItem::action("Toggle sidebar", ToggleSidebar),
                         gpui_kit::MenuItem::action("Toggle terminal", ToggleTerminal),
                         gpui_kit::MenuItem::action("Toggle right panel", ToggleRightPanel),
+                        gpui_kit::MenuItem::action("Pull requests", OpenPullRequests),
                         gpui_kit::MenuItem::action("Workspace files", OpenFiles),
                         gpui_kit::MenuItem::action("Search contents", OpenContentSearch),
                         gpui_kit::MenuItem::separator(),

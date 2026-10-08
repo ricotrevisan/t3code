@@ -202,6 +202,85 @@ impl Screen {
             text.replace("\r\n", "\n").replace('\n', "\r")
         }
     }
+    /// Resolve explicit OSC-8 links or a URL token under the pointer. Never open
+    /// shell/file/javascript schemes delivered by untrusted terminal output.
+    pub fn link_at(&self, row: usize, col: usize) -> Option<String> {
+        if row >= self.size.rows || col >= self.size.cols {
+            return None;
+        }
+        let line = Line(row as i32 - self.term.grid().display_offset() as i32);
+        let cells = &self.term.grid()[line];
+        let candidate = if let Some(link) = cells[Column(col)].hyperlink() {
+            link.uri().to_owned()
+        } else {
+            let delimiter = |ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '\"' | '\'');
+            if delimiter(cells[Column(col)].c) {
+                return None;
+            }
+            // A logical terminal line can span multiple visually wrapped rows.
+            // Bound scanning even for adversarial output without any whitespace.
+            let grid = self.term.grid();
+            let wrapped = |line| {
+                grid[Line(line)][Column(self.size.cols - 1)]
+                    .flags
+                    .contains(alacritty_terminal::term::cell::Flags::WRAPLINE)
+            };
+            let mut first = line.0;
+            let mut last = line.0;
+            while first > -(grid.history_size() as i32) && wrapped(first - 1) {
+                first -= 1;
+                if line.0 - first > 128 {
+                    return None;
+                }
+            }
+            while last < self.size.rows as i32 - 1 && wrapped(last) {
+                last += 1;
+                if last - first > 128 {
+                    return None;
+                }
+            }
+            let mut text = Vec::new();
+            let mut anchor = 0;
+            for row in first..=last {
+                for column in 0..self.size.cols {
+                    let cell = &grid[Line(row)][Column(column)];
+                    if row == line.0 && column == col {
+                        anchor = text.len();
+                    }
+                    if !cell
+                        .flags
+                        .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+                    {
+                        text.push(cell.c);
+                    }
+                }
+            }
+            let mut start = anchor;
+            let mut end = anchor + 1;
+            while start > 0 && !delimiter(text[start - 1]) {
+                start -= 1;
+            }
+            while end < text.len() && !delimiter(text[end]) {
+                end += 1;
+            }
+            let mut candidate = text[start..end]
+                .iter()
+                .collect::<String>()
+                .trim_end_matches(['.', ',', ';', '!', '?'])
+                .trim_start_matches(['(', '[', '{'])
+                .to_owned();
+            for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+                while candidate.ends_with(close)
+                    && candidate.matches(close).count() > candidate.matches(open).count()
+                {
+                    candidate.pop();
+                }
+            }
+            candidate
+        };
+        let url = url::Url::parse(&candidate).ok()?;
+        (matches!(url.scheme(), "http" | "https") && url.host_str().is_some()).then_some(url.into())
+    }
     pub fn cells(&self) -> Vec<Cell> {
         let content = self.term.renderable_content();
         let cursor = content.cursor.point;
@@ -260,6 +339,36 @@ impl Screen {
 mod tests {
     use super::*;
     use alacritty_terminal::vte::ansi::NamedColor;
+    #[test]
+    fn r14_t_links_resolve_pointer_urls_and_osc8_but_reject_unsafe_schemes() {
+        let mut screen = Screen::new(Size::new(80, 3));
+        screen.feed("see (https://example.com/docs).\r\n\x1b]8;;https://example.org\x1b\\label\x1b]8;;\x1b\\\r\n\x1b]8;;javascript:alert(1)\x1b\\unsafe\x1b]8;;\x1b\\");
+        assert_eq!(
+            screen.link_at(0, 10).as_deref(),
+            Some("https://example.com/docs")
+        );
+        assert_eq!(
+            screen.link_at(1, 1).as_deref(),
+            Some("https://example.org/")
+        );
+        assert_eq!(screen.link_at(0, 3), None);
+        assert_eq!(screen.link_at(2, 1), None);
+        screen.feed("\r\nmore");
+        screen.scroll(1);
+        assert_eq!(
+            screen.link_at(1, 1).as_deref(),
+            Some("https://example.org/")
+        );
+    }
+    #[test]
+    fn r14_t_wrapped_urls_preserve_balanced_parentheses() {
+        let mut wrapped = Screen::new(Size::new(20, 3));
+        wrapped.feed("https://example.org/wiki/A_(B).");
+        assert_eq!(
+            wrapped.link_at(1, 2).as_deref(),
+            Some("https://example.org/wiki/A_(B)")
+        );
+    }
     #[test]
     fn terminal_search_wraps_both_directions_and_selects_unicode_scrollback() {
         let mut screen = Screen::new(Size::new(20, 2));

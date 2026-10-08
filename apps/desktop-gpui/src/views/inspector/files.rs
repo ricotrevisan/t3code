@@ -4,6 +4,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
     input::{Input, Textarea},
+    menu::{ContextMenuExt, PopupMenuItem},
 };
 use gpui_kit::{Context, div, prelude::*, rems};
 
@@ -158,24 +159,105 @@ impl NativeApp {
                     .children(self.file_entries.iter().enumerate().map(|(index, entry)| {
                         let path = entry.path.clone();
                         let directory = entry.kind == "directory";
-                        Button::new(gpui_kit::SharedString::from(format!("file-entry-{index}")))
-                            .debug_selector(move || format!("file-entry-{index}"))
-                            .ghost()
-                            .label(format!(
-                                "{}{}",
-                                entry.path,
-                                if directory { "/" } else { "" }
-                            ))
-                            .on_click(cx.listener(move |app, _, window, cx| {
-                                app.file_path.update(cx, |input, cx| {
-                                    input.set_value(path.clone(), window, cx)
-                                });
-                                if directory {
-                                    app.list_files(false, cx);
-                                } else {
-                                    app.file_operation(false, window, cx);
-                                }
-                            }))
+                        let menu_path = path.clone();
+                        let entity = cx.entity().downgrade();
+                        let owner = self.checkout_context();
+                        let generation = self.generation;
+                        let can_add = self.selected_thread.is_some();
+                        div()
+                            .id(gpui_kit::SharedString::from(format!(
+                                "file-entry-menu-{index}"
+                            )))
+                            .context_menu(move |menu, _, _| {
+                                let open_path = menu_path.clone();
+                                let add_path = menu_path.clone();
+                                let copy_path = menu_path.clone();
+                                let open_entity = entity.clone();
+                                let add_entity = entity.clone();
+                                let open_owner = owner.clone();
+                                let add_owner = owner.clone();
+                                menu.item(
+                                    PopupMenuItem::new(if directory {
+                                        "Open directory"
+                                    } else {
+                                        "Open file"
+                                    })
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            let _ = open_entity.update(cx, |app, cx| {
+                                                if app.generation != generation
+                                                    || app.checkout_context() != open_owner
+                                                {
+                                                    return;
+                                                }
+                                                app.file_path.update(cx, |input, cx| {
+                                                    input.set_value(open_path.clone(), window, cx)
+                                                });
+                                                if directory {
+                                                    app.list_files(false, cx);
+                                                } else {
+                                                    app.file_operation(false, window, cx);
+                                                }
+                                            });
+                                        },
+                                    ),
+                                )
+                                .item(PopupMenuItem::new("Copy mention").on_click(
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            t3code_desktop_gpui::mentions::file_link(&copy_path),
+                                        ))
+                                    },
+                                ))
+                                .item(
+                                    PopupMenuItem::new("Add to composer")
+                                        .disabled(!can_add)
+                                        .on_click(move |_, window, cx| {
+                                            let _ = add_entity.update(cx, |app, cx| {
+                                                if app.generation != generation
+                                                    || app.checkout_context() != add_owner
+                                                    || app.selected_thread.is_none()
+                                                {
+                                                    return;
+                                                }
+                                                let source =
+                                                    t3code_desktop_gpui::mentions::file_link(
+                                                        &add_path,
+                                                    );
+                                                app.composer.update(cx, |input, cx| {
+                                                    input.replace(format!("{source} "), window, cx);
+                                                    input.focus(window, cx);
+                                                });
+                                                app.remember_composer_draft(cx);
+                                                cx.notify();
+                                            });
+                                        }),
+                                )
+                            })
+                            .child(
+                                Button::new(gpui_kit::SharedString::from(format!(
+                                    "file-entry-{index}"
+                                )))
+                                .debug_selector(move || format!("file-entry-{index}"))
+                                .ghost()
+                                .label(format!(
+                                    "{}{}",
+                                    entry.path,
+                                    if directory { "/" } else { "" }
+                                ))
+                                .on_click(cx.listener(
+                                    move |app, _, window, cx| {
+                                        app.file_path.update(cx, |input, cx| {
+                                            input.set_value(path.clone(), window, cx)
+                                        });
+                                        if directory {
+                                            app.list_files(false, cx);
+                                        } else {
+                                            app.file_operation(false, window, cx);
+                                        }
+                                    },
+                                )),
+                            )
                     })),
             )
             .child(

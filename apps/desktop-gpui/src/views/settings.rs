@@ -1,3 +1,4 @@
+use gpui_kit::base::FocusTrapElement;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable, Sizable,
     button::{Button, ButtonVariants as _},
@@ -5,7 +6,6 @@ use gpui_kit::component::{
     radio::{Radio, RadioGroup},
     switch::Switch,
 };
-use gpui_kit::base::FocusTrapElement;
 use gpui_kit::{Context, FontWeight, div, prelude::*, rems};
 use t3code_desktop_gpui::{credentials, notification_platform, notifications};
 
@@ -381,13 +381,21 @@ impl NativeApp {
                                 .child(div().text_xs().text_color(muted_foreground).child(context))
                         }))
                 ))
+                .when(matches("project defaults storage scopes environment preferences"), |view| view.child(self.render_scoped_pages(false, cx)))
+                .when(matches("diagnostics processes traces logs"), |view| view.child(self.render_scoped_pages(true, cx)))
+                .when(matches("licenses"), |view| view.child(div().flex().flex_col().gap_1()
+                    .child(section("LICENSES"))
+                    .child(div().text_sm().child(include_str!("../../../../LICENSE")))
+                    .child("Third-party notices are not bundled in this experimental client.")))
                 .when(matches("about version"), |view| view.child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
                         .child(section("ABOUT"))
-                        .child(div().text_sm().child("T3 Code — desktop GPUI client"))
+                        .child(div().text_sm().child(concat!("T3 Code — desktop GPUI client ", env!("CARGO_PKG_VERSION"))))
+                        .child(div().text_xs().child(format!("Platform: {} / {}", std::env::consts::OS, std::env::consts::ARCH)))
+                        .when_some(self.server_config.config(self.generation), |view, config| view.child(format!("Environment: {} · server {}", config["environment"]["label"], config["environment"]["serverVersion"])))
                         .child(div().text_xs().text_color(muted_foreground).child(
                             "Experimental native slice; feature parity is still being evaluated.",
                         )),

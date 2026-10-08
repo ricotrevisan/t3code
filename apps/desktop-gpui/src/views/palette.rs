@@ -1,5 +1,9 @@
-use gpui_kit::component::{ActiveTheme as _, input::Input};
 use gpui_kit::base::FocusTrapElement;
+use gpui_kit::component::{
+    ActiveTheme as _, Sizable,
+    button::{Button, ButtonVariants},
+    input::Input,
+};
 use gpui_kit::{Context, div, prelude::*, rems, uniform_list};
 
 use super::list_row;
@@ -32,6 +36,26 @@ impl NativeApp {
                 .border_1()
                 .border_color(border)
                 .shadow_lg()
+                .when(
+                    self.palette_query.read(cx).value().contains(" › "),
+                    |view| {
+                        view.child(
+                            Button::new("palette-up")
+                                .debug_selector(|| "palette-up".into())
+                                .label("All categories")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    app.palette_query.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                        input.focus(window, cx);
+                                    });
+                                    app.palette_index = 0;
+                                    cx.notify();
+                                })),
+                        )
+                    },
+                )
                 .child(Input::new(&self.palette_query))
                 .when(entries.is_empty(), |view| {
                     view.child(
@@ -54,7 +78,7 @@ impl NativeApp {
                                     list_row(
                                         format!("palette-{index}"),
                                         None,
-                                        entry.label.clone(),
+                                        format!("{} › {}", entry.category(), entry.label),
                                         index == selected,
                                     )
                                     .h(rems(2.5))

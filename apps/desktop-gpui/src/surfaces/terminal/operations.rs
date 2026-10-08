@@ -16,6 +16,196 @@ pub(crate) struct TerminalCapture {
     pub text: String,
 }
 impl NativeApp {
+    pub(super) fn terminal_visible_ids(&self) -> Vec<String> {
+        let Some(tab) = self.terminal_active() else {
+            return Vec::new();
+        };
+        self.terminal_drawer
+            .split
+            .as_ref()
+            .filter(|(scope, thread, ids)| {
+                scope == &tab.scope && thread == &tab.thread && ids.contains(&tab.id)
+            })
+            .map(|(_, _, ids)| ids.clone())
+            .unwrap_or_else(|| vec![tab.id.clone()])
+    }
+    fn terminal_discovered_title(&self, thread: &str, id: &str) -> String {
+        let normalized = id.to_ascii_lowercase();
+        if let Some(suffix) = normalized
+            .strip_prefix("term-")
+            .or_else(|| normalized.strip_prefix("terminal-"))
+            && !suffix.is_empty()
+            && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return format!("Terminal {suffix}");
+        }
+        self.terminal_default_title(thread)
+    }
+    pub(super) fn terminal_default_title(&self, thread: &str) -> String {
+        (1..=17)
+            .map(|n| format!("Terminal {n}"))
+            .find(|title| {
+                !self.terminal_drawer.tabs.iter().any(|tab| {
+                    tab.scope == self.environment_scope
+                        && tab.thread == thread
+                        && &tab.title == title
+                })
+            })
+            .unwrap()
+    }
+    pub(super) fn terminal_make_room(&mut self) -> bool {
+        if self.terminal_drawer.tabs.len() < 16 {
+            return true;
+        }
+        if let Some(index) = self.terminal_drawer.tabs.iter().position(|tab| {
+            !tab.busy
+                && tab.attached.is_none()
+                && (tab.scope != self.environment_scope
+                    || Some(&tab.thread) != self.selected_thread.as_ref())
+        }) {
+            self.terminal_drawer.tabs.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+    /// Retired keys keep their original command channel until cancellation is queued.
+    /// At most 16 recent screens are retained; only the visible thread receives output.
+    pub(super) fn terminal_retire(&mut self, _cx: &mut Context<Self>) {
+        if self.terminal_drawer.confirm.as_ref().is_some_and(|owner| {
+            self.terminal_active().is_none_or(|tab| {
+                owner
+                    != &(
+                        tab.scope.clone(),
+                        tab.thread.clone(),
+                        tab.id.clone(),
+                        self.generation,
+                        tab.epoch,
+                    )
+            })
+        }) {
+            self.terminal_drawer.confirm = None;
+        }
+        if self
+            .terminal_drawer
+            .restart_confirm
+            .as_ref()
+            .is_some_and(|owner| {
+                self.terminal_active().is_none_or(|tab| {
+                    owner
+                        != &(
+                            tab.scope.clone(),
+                            tab.thread.clone(),
+                            tab.id.clone(),
+                            self.generation,
+                            tab.epoch,
+                        )
+                })
+            })
+        {
+            self.terminal_drawer.restart_confirm = None;
+        }
+        if self
+            .terminal_drawer
+            .metadata
+            .as_ref()
+            .is_some_and(|(_, scope, generation)| {
+                scope != &self.environment_scope
+                    || generation != &self.generation
+                    || !self.terminal_drawer.open
+            })
+            && let Some((key, _, _)) = self.terminal_drawer.metadata.take()
+            && let Some(sender) = self.terminal_drawer.metadata_sender.take()
+        {
+            self.terminal_drawer.retired.push((sender, key));
+        }
+        let visible_ids = self.terminal_visible_ids();
+        let mut retained = Vec::new();
+        for mut tab in self.terminal_drawer.tabs.drain(..) {
+            let visible = self.terminal_drawer.open
+                && tab.scope == self.environment_scope
+                && Some(&tab.thread) == self.selected_thread.as_ref()
+                && visible_ids.contains(&tab.id);
+            let keep = (tab.exists || tab.busy) && retained.len() < 16;
+            if (!visible
+                || !keep
+                || tab
+                    .attached
+                    .is_some_and(|generation| generation != self.generation))
+                && tab.attached.take().is_some()
+                && let Some(sender) = &tab.subscription_sender
+            {
+                self.terminal_drawer
+                    .retired
+                    .push((sender.clone(), tab.stream.clone()));
+                tab.stream_ready = false;
+            }
+            if keep {
+                retained.push(tab);
+            }
+        }
+        self.terminal_drawer.tabs = retained;
+        if let Some((scope, thread, ids)) = &mut self.terminal_drawer.split {
+            ids.retain(|id| {
+                self.terminal_drawer
+                    .tabs
+                    .iter()
+                    .any(|tab| &tab.scope == scope && &tab.thread == thread && &tab.id == id)
+            });
+            if ids.len() < 2 {
+                self.terminal_drawer.split = None;
+            }
+        }
+        self.terminal_drawer.retired.retain(|(sender, key)| {
+            matches!(
+                sender.try_send(connection::Command::Unsubscribe(key.clone())),
+                Err(async_channel::TrySendError::Full(_))
+            )
+        });
+    }
+    pub(super) fn terminal_split(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.terminal_active() else {
+            return;
+        };
+        let scope = tab.scope.clone();
+        let thread = tab.thread.clone();
+        let mut ids = self
+            .terminal_drawer
+            .split
+            .as_ref()
+            .filter(|(s, t, ids)| s == &scope && t == &thread && ids.contains(&tab.id))
+            .map(|(_, _, ids)| ids.clone())
+            .unwrap_or_else(|| vec![tab.id.clone()]);
+        ids.retain(|id| {
+            self.terminal_drawer
+                .tabs
+                .iter()
+                .any(|tab| tab.scope == scope && tab.thread == thread && &tab.id == id)
+        });
+        if ids.len() >= 4 {
+            return;
+        }
+        let previous = self.terminal_drawer.active.clone();
+        self.new_terminal(cx);
+        if self.terminal_drawer.active != previous
+            && let Some(id) = &self.terminal_drawer.active
+        {
+            ids.push(id.clone());
+            self.terminal_drawer.split = Some((scope, thread, ids));
+        }
+        cx.notify();
+    }
+    pub(super) fn terminal_pane_current(&self, owner: &(String, String, String, u64, u64)) -> bool {
+        owner.0 == self.environment_scope
+            && Some(&owner.1) == self.selected_thread.as_ref()
+            && owner.3 == self.generation
+            && self.terminal_drawer.tabs.iter().any(|tab| {
+                tab.scope == owner.0
+                    && tab.thread == owner.1
+                    && tab.id == owner.2
+                    && tab.epoch == owner.4
+            })
+    }
     pub(super) fn terminal_menu_owner(&self) -> Option<(String, String, String, u64)> {
         let tab = self.terminal_active()?;
         Some((
@@ -172,8 +362,25 @@ impl NativeApp {
         let Some(tab) = self.terminal_active().filter(|tab| tab.id == id) else {
             return;
         };
+        if tab.launch.is_null() {
+            self.terminal_drawer.local_error = Some("Restart unavailable: original launch environment/provider configuration is unknown for this restored session.".into());
+            cx.notify();
+            return;
+        }
+        let owner = (
+            tab.scope.clone(),
+            tab.thread.clone(),
+            tab.id.clone(),
+            self.generation,
+            tab.epoch,
+        );
+        if confirmed && self.terminal_drawer.restart_confirm.as_ref() != Some(&owner) {
+            self.terminal_drawer.restart_confirm = None;
+            cx.notify();
+            return;
+        }
         if !confirmed && tab.running != Some(false) {
-            self.terminal_drawer.restart_confirm = Some(id.into());
+            self.terminal_drawer.restart_confirm = Some(owner);
             cx.notify();
             return;
         }
@@ -186,6 +393,14 @@ impl NativeApp {
     /// Explicit discovery never creates or restarts a server PTY. Its global metadata
     /// stream is filtered before materializing tabs, then terminal_synchronize attaches.
     pub(super) fn terminal_discover(&mut self, cx: &mut Context<Self>) {
+        self.terminal_retire(cx);
+        if !self.terminal_drawer.retired.is_empty() {
+            self.terminal_drawer.local_error = Some(
+                "Waiting to unsubscribe retired terminal streams; retry session discovery.".into(),
+            );
+            cx.notify();
+            return;
+        }
         if !self.shell.synchronized || !self.connection_phase.ready() {
             self.terminal_drawer.pending_open = None;
             return;
@@ -194,10 +409,14 @@ impl NativeApp {
             self.terminal_drawer.pending_open = None;
             return;
         };
-        if let Some((key, _, _)) = self.terminal_drawer.metadata.take() {
-            let _ = sender.try_send(connection::Command::Unsubscribe(key));
-        }
-        let key = format!("drawer-metadata-{}", uuid::Uuid::new_v4());
+        // Transport replacement with the same key interrupts its previous stream.
+        // A full channel leaves the existing owner intact, so retry cannot orphan it.
+        let key = self
+            .terminal_drawer
+            .metadata
+            .as_ref()
+            .map(|(key, _, _)| key.clone())
+            .unwrap_or_else(|| format!("drawer-metadata-{}", uuid::Uuid::new_v4()));
         let command = connection::Command::Subscribe {
             key: key.clone(),
             tag: "subscribeTerminalMetadata".into(),
@@ -207,6 +426,7 @@ impl NativeApp {
             Ok(()) => {
                 self.terminal_drawer.metadata =
                     Some((key, self.environment_scope.clone(), self.generation));
+                self.terminal_drawer.metadata_sender = Some(sender.clone());
                 self.terminal_drawer.local_error = None;
             }
             Err(error) => {
@@ -254,6 +474,7 @@ impl NativeApp {
                                 tab.status = "closed".into();
                             }
                         }
+                        self.terminal_retire(cx);
                         self.terminal_drawer.local_error = None;
                         for summary in terminals {
                             self.terminal_discover_summary(summary);
@@ -307,6 +528,7 @@ impl NativeApp {
         } else if item.is_err() {
             self.terminal_drawer.pending_open = None;
         }
+        self.terminal_retire(cx);
         cx.notify();
         true
     }
@@ -327,24 +549,30 @@ impl NativeApp {
             .terminal_drawer
             .names
             .get(&self.environment_scope, thread, id)
-            .unwrap_or_else(|| {
+            .map(str::to_owned)
+            .or_else(|| {
                 summary["label"]
                     .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("Terminal")
+                    .filter(|s| !s.is_empty() && *s != id)
+                    .map(str::to_owned)
             })
-            .to_owned();
+            .unwrap_or_else(|| self.terminal_discovered_title(thread, id));
         if let Some(tab) =
             self.terminal_drawer.tabs.iter_mut().find(|tab| {
                 tab.scope == self.environment_scope && tab.thread == thread && tab.id == id
             })
         {
-            tab.title = title;
+            if tab.custom_title
+                || summary["label"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty() && s != id)
+            {
+                tab.title = title;
+            }
             tab.running = summary["hasRunningSubprocess"].as_bool();
             tab.status = status.into();
             tab.cwd = cwd.into();
-            tab.launch["cwd"] = cwd.into();
-            tab.launch["worktreePath"] = summary["worktreePath"].clone();
+            // Keep an existing authoritative launch record unchanged.
             if !tab.exists {
                 tab.exists = true;
                 tab.attached = None;
@@ -353,14 +581,14 @@ impl NativeApp {
             }
             return;
         }
-        let env = self
-            .shell
-            .threads
-            .iter()
-            .find(|t| t.id == thread)
-            .and_then(|t| self.shell.projects.iter().find(|p| p.id == t.project_id))
-            .map(|p| json!({"T3CODE_PROJECT_ROOT":p.workspace_root}))
-            .unwrap_or_else(|| json!({}));
+        // Total screen retention is bounded, including discovery (not just New).
+        if !self.terminal_make_room() {
+            self.terminal_drawer.local_error = Some("Showing at most 16 terminal sessions. Close one, then restore sessions to see more.".into());
+            return;
+        }
+        if !self.terminal_drawer.retired.is_empty() {
+            return;
+        }
         self.terminal_drawer.tabs.push(Tab {
             id: id.into(),
             thread: thread.into(),
@@ -373,8 +601,9 @@ impl NativeApp {
                 .names
                 .get(&self.environment_scope, thread, id)
                 .is_some(),
-            launch: json!({"cwd":cwd,"worktreePath":summary["worktreePath"],"env":env}),
+            launch: Value::Null,
             screen: Screen::new(Size::new(80, 12)),
+            bounds: None,
             exists: true,
             busy: false,
             running: summary["hasRunningSubprocess"].as_bool(),
@@ -382,6 +611,7 @@ impl NativeApp {
             error: None,
             generation: self.generation,
             attached: None,
+            subscription_sender: self.commands.clone(),
             stream_ready: false,
             sequence: None,
             epoch: 0,

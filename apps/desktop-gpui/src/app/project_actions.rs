@@ -205,6 +205,7 @@ impl NativeApp {
             self.report_error("Not connected", cx);
             return;
         };
+        let preview_origin = self.server.read(cx).value().to_string();
         let key = run.key.clone();
         let generation = run.generation;
         let epoch = run.control_epoch;
@@ -253,7 +254,19 @@ impl NativeApp {
                 if let Some(row) = app.action_runs.iter_mut().find(|row| row.key == key && row.control_epoch == epoch) {
                     row.busy = false;
                     match result {
-                        Ok(()) => { if row.status == "Starting" || row.status == "running" { row.status = "Command sent".into(); } },
+                        Ok(()) => {
+                            if row.status == "Starting" || row.status == "running" { row.status = "Command sent".into(); }
+                            if run.script["autoOpenPreview"] == true
+                                && app.selected_thread.as_deref() == Some(run.thread.as_str())
+                                && app.selected_project.as_deref() == Some(run.project.as_str())
+                                && let Some(url) = run.script["previewUrl"].as_str()
+                            {
+                                app.inspector_open = true;
+                                t3code_desktop_gpui::surfaces::browser::BrowserPanel::queue_preview(
+                                    &app.browser_panel, &run.scope, url, &preview_origin, cx,
+                                );
+                            }
+                        },
                         Err(error) => { row.status = "Startup failed".into(); row.error = Some(error); },
                     }
                 }

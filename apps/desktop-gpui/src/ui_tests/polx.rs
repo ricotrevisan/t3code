@@ -31,6 +31,9 @@ fn polx_settings_entry_points_capture_typing_trap_and_restore_focus(cx: &mut Tes
             cx.simulate_click(bounds.center(), Default::default());
         }
         cx.run_until_parked();
+        if entry == "environment-chip" {
+            click_connection_settings(cx);
+        }
         cx.update(|window, cx| {
             app.read_with(cx, |app, cx| {
                 assert!(
@@ -66,7 +69,7 @@ fn polx_settings_entry_points_capture_typing_trap_and_restore_focus(cx: &mut Tes
         assert!(cx.debug_bounds("settings").is_none());
         cx.update(|window, cx| {
             app.read_with(cx, |app, cx| {
-                assert!(app.composer.read(cx).focus_handle(cx).is_focused(window));
+                assert!(app.composer.read(cx).focus_handle(cx).is_focused(window), "{entry}: {:?}", window.focused(cx));
             })
         });
     }
@@ -122,6 +125,7 @@ fn polx_palette_and_branch_picker_trap_search_focus(cx: &mut TestAppContext) {
     }
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
+    r14_e_header::ensure_control(cx, "checkout-selector");
     let trigger = cx.debug_bounds("checkout-selector").unwrap();
     cx.simulate_click(trigger.center(), Default::default());
     cx.run_until_parked();

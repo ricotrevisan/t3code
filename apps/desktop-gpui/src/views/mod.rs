@@ -14,6 +14,7 @@ mod conversation;
 pub(crate) mod message_media;
 mod message_paths;
 mod diff_lines;
+pub(crate) mod r14_e_diff;
 mod inspector;
 mod overlay;
 mod palette;
@@ -21,7 +22,7 @@ mod settings;
 mod sidebar;
 pub(crate) mod r13_b_sidebar_rows;
 mod status_bar;
-mod thread_header;
+pub(crate) mod thread_header;
 mod title_bar;
 mod toasts;
 

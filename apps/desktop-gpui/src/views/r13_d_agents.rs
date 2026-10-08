@@ -105,6 +105,7 @@ impl NativeApp {
                                 .on_click(cx.listener(
                                     |app, _, _, cx| {
                                         app.inspector_open = true;
+                                        app.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
                                         app.right_tab = crate::RightTab::Agents;
                                         cx.notify();
                                     },

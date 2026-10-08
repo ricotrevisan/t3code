@@ -12,6 +12,9 @@ pub(crate) enum Target {
     Appearance(Appearance),
     ToggleTheme,
     UsageLimits,
+    PullRequests,
+    Environment(String),
+    Category(&'static str),
     Settings(&'static str),
 }
 #[derive(Clone)]
@@ -19,22 +22,44 @@ pub(crate) struct Item {
     pub label: String,
     pub target: Target,
 }
+impl Item {
+    pub(crate) fn category(&self) -> &'static str {
+        match self.target {
+            Target::Thread(_) => "Recent threads",
+            Target::Project(_) | Target::NewThread(_) => "Projects",
+            Target::Environment(_) => "Environments",
+            Target::Settings(_) => "Settings",
+            Target::Appearance(_) | Target::ToggleTheme => "Appearance",
+            Target::UsageLimits => "Usage",
+            Target::PullRequests => "Pull requests",
+            Target::Command(_) => "Commands",
+            Target::Category(_) => "Browse",
+        }
+    }
+}
 enum Destination {
     Thread(usize, Option<usize>),
     Project(usize),
     NewThread(usize),
 }
+type QueryKey = (String, bool, Vec<(String, String, bool)>);
 #[derive(Default)]
 pub(crate) struct Cache {
     key: Option<(String, u64)>,
     destinations: Vec<(String, Destination)>,
-    query_key: Option<(String, bool)>,
+    query_key: Option<QueryKey>,
     matches: std::rc::Rc<Vec<Item>>,
 }
 
 impl NativeApp {
     pub(crate) fn palette_items(&self, cx: &Context<Self>) -> std::rc::Rc<Vec<Item>> {
-        let query = self.palette_query.read(cx).value().trim().to_lowercase();
+        let raw_query = self.palette_query.read(cx).value().to_lowercase();
+        let (category, query) = raw_query
+            .split_once(" › ")
+            .map_or((None, raw_query.trim()), |(category, query)| {
+                (Some(category), query.trim())
+            });
+        let query = query.to_owned();
         let mut items = Vec::new();
         let key = (self.environment_scope.clone(), self.shell.revision);
         let mut cache = self.palette_cache.borrow_mut();
@@ -90,7 +115,12 @@ impl NativeApp {
             cache.key = Some(key);
             cache.query_key = None;
         }
-        let query_key = (query.clone(), self.selected_thread.is_some());
+        let environments = self.environment_choices(cx);
+        let query_key = (
+            raw_query.clone(),
+            self.selected_thread.is_some(),
+            environments.clone(),
+        );
         if cache.query_key.as_ref() == Some(&query_key) {
             return cache.matches.clone();
         }
@@ -135,7 +165,22 @@ impl NativeApp {
                     target: Target::Command(entry.command),
                 }),
         );
-        items.push(Item { label: "Open usage limits".into(), target: Target::UsageLimits });
+        for (origin, label, enabled) in environments {
+            if enabled {
+                items.push(Item {
+                    label: format!("Environment: {label}"),
+                    target: Target::Environment(origin),
+                });
+            }
+        }
+        items.push(Item {
+            label: "Open pull requests".into(),
+            target: Target::PullRequests,
+        });
+        items.push(Item {
+            label: "Open usage limits".into(),
+            target: Target::UsageLimits,
+        });
         items.push(Item {
             label: "Toggle theme".into(),
             target: Target::ToggleTheme,
@@ -162,13 +207,40 @@ impl NativeApp {
             "Notifications",
             "Keybindings",
             "About",
+            "Project defaults",
+            "Storage",
+            "Diagnostics",
+            "Licenses",
         ] {
             items.push(Item {
                 label: format!("Settings: {category}"),
                 target: Target::Settings(category),
             });
         }
-        items.retain(|item| item.label.to_lowercase().contains(&query));
+        items.retain(|item| {
+            item.label.to_lowercase().contains(&query)
+                && category.is_none_or(|category| item.category().to_lowercase() == category)
+        });
+        if category.is_none() && query.is_empty() {
+            let mut groups = [
+                "Environments",
+                "Pull requests",
+                "Recent threads",
+                "Projects",
+                "Commands",
+                "Appearance",
+                "Settings",
+                "Usage",
+            ]
+            .into_iter()
+            .map(|category| Item {
+                label: format!("Browse {category}"),
+                target: Target::Category(category),
+            })
+            .collect::<Vec<_>>();
+            groups.append(&mut items);
+            items = groups;
+        }
         cache.query_key = Some(query_key);
         cache.matches = std::rc::Rc::new(items);
         cache.matches.clone()
@@ -179,8 +251,17 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Target::Category(category) = target {
+            self.palette_query.update(cx, |input, cx| {
+                input.set_value(format!("{category} › "), window, cx)
+            });
+            self.palette_index = 0;
+            cx.notify();
+            return;
+        }
         self.close_palette(window, cx);
         match target {
+            Target::Category(_) => unreachable!(),
             Target::Command(command) => self.execute_command(command, window, cx),
             Target::Thread(id) => self.select_thread(&id, window, cx),
             Target::Project(id) => {
@@ -211,6 +292,8 @@ impl NativeApp {
                 self.set_appearance(mode, window, cx);
             }
             Target::UsageLimits => self.toggle_usage_limits(cx),
+            Target::PullRequests => self.open_pull_requests(window, cx),
+            Target::Environment(origin) => self.switch_environment(&origin, window, cx),
             Target::Settings(category) => {
                 self.open_settings(category, window, cx);
                 self.refresh_settings_providers(false, cx);

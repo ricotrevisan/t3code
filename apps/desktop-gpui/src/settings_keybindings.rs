@@ -15,6 +15,8 @@ struct State {
     defaults: Vec<KeyBinding>,
     overrides: Overrides,
     recording: Option<String>,
+    strokes: Vec<String>,
+    chord: bool,
     interceptor: Option<gpui_kit::Subscription>,
 }
 impl Global for State {}
@@ -40,6 +42,21 @@ impl Overrides {
         .map_err(|e| e.to_string())?;
         std::fs::rename(temporary, path).map_err(|e| e.to_string())
     }
+}
+fn validate_chord(shortcut: &str) -> Result<(), String> {
+    let strokes = shortcut.split_whitespace().collect::<Vec<_>>();
+    if strokes.is_empty() || strokes.len() > 4 {
+        return Err("Use one to four shortcut strokes".into());
+    }
+    for stroke in strokes {
+        gpui_kit::Keystroke::parse(stroke).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+fn chord_conflicts(a: &str, b: &str) -> bool {
+    let a = a.split_whitespace().collect::<Vec<_>>();
+    let b = b.split_whitespace().collect::<Vec<_>>();
+    a.starts_with(&b) || b.starts_with(&a)
 }
 fn native(binding: &KeyBinding) -> bool {
     binding
@@ -70,6 +87,8 @@ pub(crate) fn init(cx: &mut App) {
             Overrides::load(&path())
         },
         recording: None,
+        strokes: Vec::new(),
+        chord: false,
         interceptor: None,
     });
     apply(cx);
@@ -120,7 +139,7 @@ impl NativeApp {
             return Err("Unknown shortcut action".into());
         }
         let requested = if let Some(shortcut) = &shortcut {
-            gpui_kit::Keystroke::parse(shortcut).map_err(|e| e.to_string())?;
+            validate_chord(shortcut)?;
             vec![shortcut.clone()]
         } else {
             state
@@ -134,7 +153,10 @@ impl NativeApp {
             .key_bindings()
             .borrow()
             .bindings()
-            .find(|b| requested.contains(&keys(b)) && b.action().name() != name)
+            .find(|b| {
+                requested.iter().any(|key| chord_conflicts(key, &keys(b)))
+                    && b.action().name() != name
+            })
             .map(|b| b.action().name().to_owned());
         if let Some(conflict) = conflict {
             return Err(format!(
@@ -160,7 +182,7 @@ impl NativeApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(name) = cx.global::<State>().recording.clone() else {
+        let Some(_) = cx.global::<State>().recording.clone() else {
             return;
         };
         if !self.settings_open {
@@ -177,16 +199,34 @@ impl NativeApp {
         let shortcut = event.keystroke.unparse();
         if shortcut == "escape" {
             cx.global_mut::<State>().recording = None;
-        } else if let Err(error) = self.save_shortcut(&name, Some(shortcut), cx) {
-            self.report_error(error, cx);
-        } else {
-            cx.global_mut::<State>().recording = None;
-            self.report_success("Shortcut saved on this device", cx);
+        } else if !cx.global::<State>().chord {
+            cx.global_mut::<State>().strokes = vec![shortcut];
+            self.finish_shortcut(cx);
+        } else if shortcut == "enter" {
+            self.finish_shortcut(cx);
+        } else if shortcut == "backspace" {
+            cx.global_mut::<State>().strokes.pop();
+        } else if cx.global::<State>().strokes.len() < 4 {
+            cx.global_mut::<State>().strokes.push(shortcut);
         }
         if cx.global::<State>().recording.is_none() {
             cx.global_mut::<State>().interceptor = None;
         }
         cx.notify();
+    }
+    fn finish_shortcut(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = cx.global::<State>().recording.clone() else {
+            return;
+        };
+        let shortcut = cx.global::<State>().strokes.join(" ");
+        match self.save_shortcut(&name, Some(shortcut), cx) {
+            Ok(()) => {
+                cx.global_mut::<State>().recording = None;
+                cx.global_mut::<State>().interceptor = None;
+                self.report_success("Shortcut saved on this device", cx);
+            }
+            Err(error) => self.report_error(error, cx),
+        }
     }
     pub(crate) fn render_keybinding_preferences(
         &self,
@@ -219,7 +259,9 @@ impl NativeApp {
                 view.child(
                     div()
                         .text_sm()
-                        .child(format!("Press a shortcut for {name}…")),
+                        .child(format!("{name}: {} · Enter saves, Backspace removes, Escape cancels (up to four strokes)", state.strokes.join(" ")))
+                        .child(Button::new("shortcut-save-chord").label("Save chord").ghost().small()
+                            .on_click(cx.listener(|app, _, _, cx| { app.finish_shortcut(cx); cx.notify(); }))),
                 )
             })
             .children(
@@ -227,13 +269,14 @@ impl NativeApp {
                     .enumerate()
                     .map(|(index, (name, shortcut))| {
                         let reset = name.clone();
+                        let chord_name = name.clone();
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
                             .gap_2()
                             .text_sm()
-                            .child(div().flex().flex_col().child(name.clone()).child(shortcut))
+                            .child(div().flex().flex_col().child(name.clone()).child(shortcut).child("When: NativeApp"))
                             .child(
                                 div()
                                     .flex()
@@ -249,6 +292,8 @@ impl NativeApp {
                                             .on_click(cx.listener(move |app, _, window, cx| {
                                                 cx.global_mut::<State>().recording =
                                                     Some(name.clone());
+                                                cx.global_mut::<State>().strokes.clear();
+                                                cx.global_mut::<State>().chord = false;
                                                 let entity = cx.entity().downgrade();
                                                 let interceptor = cx.intercept_keystrokes(
                                                     move |event, window, cx| {
@@ -259,6 +304,22 @@ impl NativeApp {
                                                 );
                                                 cx.global_mut::<State>().interceptor =
                                                     Some(interceptor);
+                                                app.settings_shortcut_focus.focus(window, cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("shortcut-chord", index)).debug_selector(move || format!("shortcut-chord-{index}"))
+                                            .label("Chord").ghost().small()
+                                            .on_click(cx.listener(move |app, _, window, cx| {
+                                                cx.global_mut::<State>().recording = Some(chord_name.clone());
+                                                cx.global_mut::<State>().strokes.clear();
+                                                cx.global_mut::<State>().chord = true;
+                                                let entity = cx.entity().downgrade();
+                                                let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+                                                    let _ = entity.update(cx, |app, cx| app.record_shortcut(event, window, cx));
+                                                });
+                                                cx.global_mut::<State>().interceptor = Some(interceptor);
                                                 app.settings_shortcut_focus.focus(window, cx);
                                                 cx.notify();
                                             })),
@@ -290,6 +351,16 @@ impl NativeApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r14_f_chord_prefix_conflicts_and_validation() {
+        assert!(chord_conflicts("ctrl-k", "ctrl-k ctrl-c"));
+        assert!(chord_conflicts("ctrl-k ctrl-c", "ctrl-k"));
+        assert!(!chord_conflicts("ctrl-k ctrl-c", "ctrl-k ctrl-u"));
+        assert!(!chord_conflicts("ctrl-k", "ctrl-j"));
+        assert!(validate_chord("ctrl-k ctrl-c").is_ok());
+        assert!(validate_chord("").is_err());
+        assert!(validate_chord("a b c d e").is_err());
+    }
     #[test]
     fn settings_fixc_shortcuts_restart_without_environment_settings() {
         let directory = tempfile::tempdir().unwrap();

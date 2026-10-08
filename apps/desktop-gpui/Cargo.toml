@@ -34,11 +34,15 @@ p256 = { version = "=0.13.2", features = ["ecdsa"] }
 objc2 = "0.6"
 block2 = "0.6"
 objc2-user-notifications = "0.3"
+objc2-web-kit = "0.3.2"
+raw-window-handle = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "NSApplication",
   "NSDockTile",
   "NSSound",
+  "NSView",
+  "NSWindow",
 ] }
 
 [dev-dependencies]

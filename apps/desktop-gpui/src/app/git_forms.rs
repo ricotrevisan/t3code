@@ -259,8 +259,8 @@ impl NativeApp {
                     if let Some(form) = app.git_header.form.as_mut() { form.excluded.retain(|p| p != &path); if !checked { form.excluded.push(path.clone()); } } cx.notify();
                 }))
             })))
-            .child(Button::new("git-form-submit").debug_selector(|| "git-form-submit".into()).small().primary().label(match form.action.as_str() { "publish" => "Create repository & publish", "commit_push" => "Commit & push selected files", "commit_push_pr" => "Commit, push & create PR", _ => "Commit selected files" }).disabled(busy || !valid || !self.connection_ready()).on_click(cx.listener(|app, _, _, cx| app.submit_git_form(cx))))
-            .child(Button::new("git-form-cancel").small().ghost().label("Cancel").disabled(busy).on_click(cx.listener(|app, _, _, cx| { app.git_header.form = None; cx.notify(); })))
+            .child(Button::new("git-form-submit").debug_selector(|| "git-form-submit".into()).small().primary().label(match form.action.as_str() { "publish" => "Create repository & publish", "commit_push" => "Commit & push selected files", "commit_push_pr" => "Commit, push & create PR", _ => "Commit selected files" }).disabled(busy || !valid || !self.connection_ready()).on_click(cx.listener(|app, _, window, cx| { app.submit_git_form(cx); if app.git_header.form.is_none() { app.focus.focus(window,cx); } })))
+            .child(Button::new("git-form-cancel").small().ghost().label("Cancel").disabled(busy).on_click(cx.listener(|app, _, window, cx| { app.git_header.form = None; app.focus.focus(window,cx); cx.notify(); })))
     }
 }
 fn valid_repository(value: &str) -> bool {

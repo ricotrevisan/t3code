@@ -865,7 +865,11 @@ where
                     Command::Upload { url, content_type, bytes, reply } => {
                         // Uploads do not use the socket; run on the runtime and reply when done.
                         tokio::spawn(async move {
-                            let result = upload_body(&url, &content_type, bytes).await;
+                            let result = tokio::select! {
+                                biased;
+                                _ = reply.closed() => return,
+                                result = upload_body(&url, &content_type, bytes) => result,
+                            };
                             let _ = reply.send(result).await;
                         });
                     }
@@ -1010,8 +1014,14 @@ fn safe_error_detail(detail: &str) -> String {
 #[path = "reconnect_tests.rs"]
 mod reconnect_tests;
 #[cfg(test)]
+#[path = "connection_r14_a_tests.rs"]
+mod r14_a_tests;
+#[cfg(test)]
 #[path = "connection_intw.rs"]
 mod intw_tests;
+#[cfg(test)]
+#[path = "connection_r14_int_tests.rs"]
+mod r14_int_tests;
 #[cfg(test)]
 #[path = "connection_intw_auth.rs"]
 mod intw_auth_tests;

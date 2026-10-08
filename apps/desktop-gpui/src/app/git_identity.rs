@@ -4,6 +4,12 @@ use gpui_kit::{AppContext as _, Context, Entity, Subscription, Window};
 #[derive(Default)]
 pub(crate) struct HeaderRename {
     pub input: Option<Entity<InputState>>,
+    pub view: std::cell::OnceCell<Entity<crate::views::thread_header::HeaderView>>,
+    pub overflow_open: bool,
+    pub overflow_previous_focus: Option<gpui_kit::FocusHandle>,
+    pub menu_position: Option<gpui_kit::Point<gpui_kit::Pixels>>,
+    pub overflow_focus: std::cell::OnceCell<gpui_kit::FocusHandle>,
+    pub overflow_bounds: std::rc::Rc<std::cell::Cell<Option<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
     target: Option<(String, String, String)>,
     subscription: Option<Subscription>,
 }
@@ -50,6 +56,12 @@ impl NativeApp {
             input: Some(input.clone()),
             target: Some((self.environment_scope.clone(), id, original)),
             subscription: Some(subscription),
+            view: self.header_rename.view.clone(),
+            overflow_open: self.header_rename.overflow_open,
+            overflow_previous_focus: self.header_rename.overflow_previous_focus.clone(),
+            menu_position: self.header_rename.menu_position,
+            overflow_focus: self.header_rename.overflow_focus.clone(),
+            overflow_bounds: self.header_rename.overflow_bounds.clone(),
         };
         input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();

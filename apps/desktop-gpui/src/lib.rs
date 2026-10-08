@@ -1,12 +1,15 @@
 pub mod auth;
 pub mod commands;
 pub mod connection;
+pub mod connection_sessions;
 pub mod conversation;
 pub mod credentials;
 pub mod dpop;
 pub mod drafts;
 pub mod draft_context;
 pub mod composer_edit;
+pub mod composer_search;
+pub mod composer_image;
 pub mod files;
 pub mod mentions;
 pub mod notification_platform;

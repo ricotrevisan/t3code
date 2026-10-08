@@ -51,7 +51,7 @@ impl NativeApp {
             || self.branch_picker.is_some()
             || self.catalog_open)
         {
-            self.previous_focus = window.focused(cx);
+            self.previous_focus = self.header_rename.overflow_previous_focus.clone().or_else(|| window.focused(cx));
         }
         self.settings_open = false;
         self.palette_open = false;

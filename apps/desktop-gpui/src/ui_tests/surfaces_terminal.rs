@@ -65,10 +65,7 @@ pub(super) fn open(
     drain_sizes(cx, requests);
     (id, key)
 }
-pub(super) fn drain_sizes(
-    cx: &mut VisualTestContext,
-    requests: &Requests,
-) {
+pub(super) fn drain_sizes(cx: &mut VisualTestContext, requests: &Requests) {
     cx.run_until_parked();
     while !requests.is_empty() {
         let (size, reply) = call(requests, "terminal.resize");
@@ -81,7 +78,7 @@ pub(super) fn drain_sizes(
 #[gpui_kit::test]
 fn terminal_toggle_checkout_keyboard_and_clipboard_payloads(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
-    let (id, _) = open(&app, cx, &requests);
+    let (id, original_stream) = open(&app, cx, &requests);
     cx.update(|window, cx| {
         app.read_with(cx, |app, _| {
             assert!(
@@ -136,9 +133,24 @@ fn terminal_toggle_checkout_keyboard_and_clipboard_payloads(cx: &mut TestAppCont
     cx.simulate_keystrokes("cmd-j");
     cx.run_until_parked();
     assert!(cx.debug_bounds("terminal-drawer").is_none());
+    let mut retired = Vec::new();
+    while let Ok(command) = requests.try_recv() {
+        let connection::Command::Unsubscribe(key) = command else {
+            panic!("hidden terminals must unsubscribe")
+        };
+        retired.push(key);
+    }
+    assert!(retired.contains(&original_stream));
     cx.simulate_keystrokes("cmd-j");
     cx.run_until_parked();
     assert!(cx.debug_bounds("terminal-grid").is_some());
+    let connection::Command::Subscribe { key, tag, payload } = requests.try_recv().unwrap() else {
+        panic!("reattach visible terminal")
+    };
+    assert_eq!(tag, "terminal.attach");
+    assert_eq!(payload["restartIfNotRunning"], false);
+    cx.update(|_, cx| app.update(cx, |app, cx| app.terminal_update(&key, Ok(json!({"type":"snapshot","snapshot":{"threadId":"t","terminalId":id,"history":"prompt> ","status":"running"}})), cx)));
+    drain_sizes(cx, &requests);
     assert!(requests.is_empty());
 }
 #[gpui_kit::test]
@@ -216,9 +228,15 @@ fn terminal_reconnect_reattaches_without_reopening_and_rejects_stale_output(
         })
     });
     cx.run_until_parked();
-    let connection::Command::Subscribe { key, tag, payload } = requests.try_recv().unwrap() else {
-        panic!("reattach, never open")
+    let mut retired = Vec::new();
+    let (key, tag, payload) = loop {
+        match requests.try_recv().unwrap() {
+            connection::Command::Unsubscribe(key) => retired.push(key),
+            connection::Command::Subscribe { key, tag, payload } => break (key, tag, payload),
+            _ => panic!("reattach, never open"),
+        }
     };
+    assert!(retired.contains(&old_stream));
     assert_eq!(tag, "terminal.attach");
     assert_eq!(
         payload,
@@ -239,7 +257,7 @@ fn terminal_reconnect_reattaches_without_reopening_and_rejects_stale_output(
 #[gpui_kit::test]
 fn terminal_tabs_rename_and_old_environment_open_receipt_is_fenced(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
-    let (_, _) = open(&app, cx, &requests);
+    let (_, original_stream) = open(&app, cx, &requests);
     let bounds = cx.debug_bounds("terminal-rename").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
@@ -261,6 +279,9 @@ fn terminal_tabs_rename_and_old_environment_open_receipt_is_fenced(cx: &mut Test
     let bounds = cx.debug_bounds("terminal-new").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(key) if key == original_stream)
+    );
     let (payload, reply) = call(&requests, "terminal.open");
     cx.update(|_, cx| {
         app.update(cx, |app, cx| {
@@ -271,7 +292,12 @@ fn terminal_tabs_rename_and_old_environment_open_receipt_is_fenced(cx: &mut Test
     });
     reply.send_blocking(Ok(json!({"threadId":"t","terminalId":payload["terminalId"],"history":"old server","status":"running"}))).unwrap();
     cx.run_until_parked();
-    assert!(requests.is_empty());
+    while let Ok(command) = requests.try_recv() {
+        assert!(
+            matches!(command, connection::Command::Unsubscribe(_)),
+            "old environment must only retire subscriptions"
+        );
+    }
     app.read_with(cx, |app, _| {
         assert!(app.terminal_drawer.tabs[1].exists);
         assert!(app.terminal_drawer.tabs[1].error.is_some());

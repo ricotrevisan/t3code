@@ -8,6 +8,7 @@ fn open_git(
     requests: &Requests,
     value: Value,
 ) {
+    super::r14_e_header::ensure_control(cx, "push-pr");
     let bounds = cx.debug_bounds("push-pr").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
@@ -36,6 +37,7 @@ fn header_pol_git_is_anchored_and_dismisses_escape_and_outside(cx: &mut TestAppC
         "menu must not push header down"
     );
     assert!(cx.debug_bounds("git-menu-popover").is_some());
+    super::r14_e_header::ensure_control(cx, "push-pr");
     let trigger = cx.debug_bounds("push-pr").unwrap();
     assert!(
         cx.debug_bounds("git-menu-popover").unwrap().origin.y >= trigger.bottom(),

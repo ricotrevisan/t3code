@@ -16,6 +16,9 @@ fn r13_h_terminal_restart_failure_retry_and_clear_preserve_receipt_ownership(
 ) {
     let (app, cx, requests) = harness(cx);
     let (id, stream) = open(&app, cx, &requests);
+    // Attach metadata can describe a changed display cwd, but cannot rewrite
+    // the authoritative environment/worktree captured by this client's open.
+    cx.update(|_, cx| app.update(cx, |app, cx| app.terminal_update(&stream, Ok(json!({"type":"snapshot","snapshot":{"threadId":"t","terminalId":id,"history":"prompt> ","status":"running","cwd":"/tmp/display-only","worktreePath":null,"sequence":1}})), cx)));
     click(cx, "terminal-restart");
     drain_sizes(cx, &requests);
     assert!(cx.debug_bounds("terminal-confirm-restart").is_some());
@@ -27,6 +30,10 @@ fn r13_h_terminal_restart_failure_retry_and_clear_preserve_receipt_ownership(
     assert_eq!(payload["cwd"], "/tmp/selected-checkout");
     assert_eq!(payload["worktreePath"], "/tmp/selected-checkout");
     assert_eq!(payload["env"]["T3CODE_PROJECT_ROOT"], "/tmp/fixture");
+    assert_eq!(
+        payload["env"]["T3CODE_WORKTREE_PATH"],
+        "/tmp/selected-checkout"
+    );
     assert!(payload["cols"].as_u64().unwrap() > 2);
     cx.simulate_input("must not send during restart");
     assert!(requests.is_empty());
@@ -79,10 +86,6 @@ fn r13_h_terminal_discovery_attaches_without_open_or_restart_and_rejects_stale_m
     let (app, cx, requests) = harness(cx);
     let (_, _) = open(&app, cx, &requests);
     click(cx, "terminal-discover");
-    assert!(matches!(
-        requests.try_recv().unwrap(),
-        connection::Command::Unsubscribe(_)
-    ));
     let connection::Command::Subscribe { key, tag, payload } = requests.try_recv().unwrap() else {
         panic!("metadata subscription")
     };
@@ -93,6 +96,13 @@ fn r13_h_terminal_discovery_attaches_without_open_or_restart_and_rejects_stale_m
         {"threadId":"other","terminalId":"term-3","cwd":"/tmp/other","status":"running"}
     ]})), cx)));
     cx.run_until_parked();
+    assert!(
+        matches!(
+            requests.try_recv().unwrap(),
+            connection::Command::Unsubscribe(_)
+        ),
+        "removed snapshot sessions must retire output"
+    );
     let connection::Command::Subscribe {
         key: attach,
         tag,
@@ -107,9 +117,9 @@ fn r13_h_terminal_discovery_attaches_without_open_or_restart_and_rejects_stale_m
         json!({"threadId":"t","terminalId":"term-2","restartIfNotRunning":false})
     );
     app.read_with(cx, |app, _| {
-        assert_eq!(app.terminal_drawer.tabs.len(), 2);
-        assert_eq!(app.terminal_drawer.tabs[1].title, "Build");
-        assert!(!app.terminal_drawer.tabs[1].stream_ready);
+        assert_eq!(app.terminal_drawer.tabs.len(), 1);
+        assert_eq!(app.terminal_drawer.tabs[0].title, "Build");
+        assert!(!app.terminal_drawer.tabs[0].stream_ready);
     });
     cx.update(|_, cx| app.update(cx, |app, cx| {
         app.terminal_update(&attach, Ok(json!({"type":"snapshot","snapshot":{"threadId":"t","terminalId":"term-2","history":"saved","status":"exited","sequence":8}})), cx);
@@ -117,7 +127,7 @@ fn r13_h_terminal_discovery_attaches_without_open_or_restart_and_rejects_stale_m
         app.terminal_update(&key, Ok(json!({"type":"upsert","terminal":{"threadId":"t","terminalId":"stale","cwd":"/tmp","status":"running"}})), cx);
         app.connection_phase = connection::Phase::Offline;
     }));
-    app.read_with(cx, |app, _| assert_eq!(app.terminal_drawer.tabs.len(), 2));
+    app.read_with(cx, |app, _| assert_eq!(app.terminal_drawer.tabs.len(), 1));
 }
 
 #[gpui_kit::test]
@@ -251,23 +261,8 @@ fn r13_h_terminal_search_focus_and_scoped_shell_run_do_not_replay(cx: &mut TestA
 #[gpui_kit::test]
 fn r13_h_terminal_same_id_in_two_threads_keeps_receipts_and_close_scoped(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
-    let (_, _) = open(&app, cx, &requests);
-    // Two real metadata discoveries may legitimately return term-1 in different threads.
-    cx.update(|_, cx| {
-        app.update(cx, |app, cx| {
-            let mut other = app.shell.threads[0].clone();
-            other.id = "u".into();
-            app.shell.threads.push(other);
-            app.terminal_drawer.tabs.clear();
-            app.terminal_drawer.active = None;
-            cx.notify();
-        })
-    });
+    let (_, original) = open(&app, cx, &requests);
     click(cx, "terminal-discover");
-    assert!(matches!(
-        requests.try_recv().unwrap(),
-        connection::Command::Unsubscribe(_)
-    ));
     let connection::Command::Subscribe { key, .. } = requests.try_recv().unwrap() else {
         panic!("metadata")
     };
@@ -282,19 +277,31 @@ fn r13_h_terminal_same_id_in_two_threads_keeps_receipts_and_close_scoped(cx: &mu
         })
     });
     cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(stream) if stream == original)
+    );
     let connection::Command::Subscribe {
         key: first_stream, ..
     } = requests.try_recv().unwrap()
     else {
         panic!("attach t")
     };
+    cx.update(|_, cx| app.update(cx, |app, cx| app.terminal_update(&first_stream, Ok(json!({"type":"snapshot","snapshot":{"threadId":"t","terminalId":"term-1","history":"thread-t","status":"running"}})), cx)));
     drain_sizes(cx, &requests);
-    cx.update(|_, cx| app.update(cx, |app, cx| {
-        app.terminal_update(&first_stream, Ok(json!({"type":"snapshot","snapshot":{"threadId":"t","terminalId":"term-1","history":"thread-t","status":"running"}})), cx);
-        app.selected_thread = Some("u".into());
-        app.terminal_update(&key, Ok(json!({"type":"upsert","terminal":summary("u")})), cx);
-    }));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.selected_thread = Some("u".into());
+            app.terminal_update(
+                &key,
+                Ok(json!({"type":"upsert","terminal":summary("u")})),
+                cx,
+            );
+        })
+    });
     cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(stream) if stream == first_stream)
+    );
     let connection::Command::Subscribe {
         key: second_stream, ..
     } = requests.try_recv().unwrap()
@@ -308,12 +315,24 @@ fn r13_h_terminal_same_id_in_two_threads_keeps_receipts_and_close_scoped(cx: &mu
             let scope = app.environment_scope.clone();
             assert!(app.terminal_run_scoped(&scope, "u", "echo u", cx).is_ok());
             app.selected_thread = Some("t".into());
+            cx.notify();
         })
     });
     let (payload, reply) = call(&requests, "terminal.write");
     assert_eq!(payload["threadId"], "u");
     reply.send_blocking(Err("u-only-failure".into())).unwrap();
     cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(stream) if stream == second_stream)
+    );
+    let connection::Command::Subscribe {
+        key: restored_t, ..
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("reattach t")
+    };
+    cx.update(|_, cx| app.update(cx, |app, cx| app.terminal_update(&restored_t, Ok(json!({"type":"snapshot","snapshot":{"threadId":"t","terminalId":"term-1","history":"thread-t","status":"running"}})), cx)));
+    drain_sizes(cx, &requests);
     app.read_with(cx, |app, _| {
         assert!(
             app.terminal_drawer
@@ -335,12 +354,16 @@ fn r13_h_terminal_same_id_in_two_threads_keeps_receipts_and_close_scoped(cx: &mu
             Some("u-only-failure")
         );
     });
+    click(cx, "terminal-close");
     drain_sizes(cx, &requests);
-    cx.update(|_, cx| app.update(cx, |app, cx| app.terminal_close("term-1", true, cx)));
+    click(cx, "terminal-confirm-close");
     let (payload, reply) = call(&requests, "terminal.close");
     assert_eq!(payload["threadId"], "t");
     reply.send_blocking(Ok(Value::Null)).unwrap();
     cx.run_until_parked();
+    assert!(
+        matches!(requests.try_recv().unwrap(), connection::Command::Unsubscribe(stream) if stream == restored_t)
+    );
     app.read_with(cx, |app, _| {
         assert_eq!(app.terminal_drawer.tabs.len(), 1);
         assert_eq!(app.terminal_drawer.tabs[0].thread, "u");

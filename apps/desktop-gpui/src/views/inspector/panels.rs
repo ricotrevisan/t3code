@@ -295,13 +295,15 @@ impl NativeApp {
                                             })),
                                         )
                                         .when(!self.diffs.collapsed.contains(&index), |view| {
-                                            view.child(self.render_patch_lines(&file.patch, cx))
+                                            view.child(self.render_patch_lines(file, cx))
                                         })
                                 }),
                         ),
                 )
             })
     }
+
+    pub(crate) fn render_pull_requests_panel(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement { self.render_pull_requests(cx) }
 
     pub(super) fn render_agents_panel(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         self.render_runtime_agents(cx)

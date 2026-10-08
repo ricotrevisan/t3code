@@ -1,7 +1,15 @@
+#[path = "r14_d_artifacts.rs"]
+mod artifacts;
 #[path = "r13_d_citations.rs"]
 mod citations;
+#[path = "r14_d_errors.rs"]
+mod errors;
+#[path = "r14_d_minimap.rs"]
+mod minimap;
 #[path = "r13_d_navigator.rs"]
 pub(crate) mod navigator;
+#[path = "r14_d_plan_recovery.rs"]
+mod plan_recovery;
 #[path = "r13_d_context.rs"]
 mod received_context;
 #[path = "r13_d_shell.rs"]
@@ -181,6 +189,7 @@ impl NativeApp {
             });
         let conversation = div()
             .id("conversation")
+            .debug_selector(|| "conversation".into())
             .relative()
             .min_h(px(140.))
             .flex_shrink_0()
@@ -188,6 +197,7 @@ impl NativeApp {
             .flex_col()
             .flex_1()
             .children(provider_banner)
+            .child(self.render_plan_draft_recovery(cx))
             .children(self.render_timeline_setup(cx));
         let search_target = self
             .sidebar_state
@@ -299,7 +309,21 @@ impl NativeApp {
                 if !sealed_message_update {
                     self.conversation_presentation.message_tail =
                         conversation::message_tail_template(detail, &rows);
-                    self.conversation_presentation.navigation = Rc::new(navigator::items(detail));
+                    let row_indices = rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, row)| match &row.entry {
+                            TimelineEntry::Message { message, .. } if message["role"] == "user" => {
+                                Some((message["id"].as_str().unwrap_or(""), index))
+                            }
+                            _ => None,
+                        })
+                        .collect::<std::collections::HashMap<_, _>>();
+                    let mut anchors = navigator::items(detail);
+                    for item in &mut anchors {
+                        item.row = row_indices.get(item.message.as_str()).copied().unwrap_or(0);
+                    }
+                    self.conversation_presentation.navigation = Rc::new(anchors);
                     self.conversation_presentation.agents =
                         t3code_desktop_gpui::surfaces::agents::fold(detail);
                 }
@@ -338,18 +362,25 @@ impl NativeApp {
                 .py_2()
                 .child(self.render_timeline_navigator(cx))
                 .child(
-                    list(
-                        self.conversation_scroll.clone(),
-                        move |index, window, cx| {
-                            let Some(row) = rows.get(index) else {
-                                return div().into_any_element();
-                            };
-                            app.update(cx, |app, cx| app.render_row(row, window, cx))
-                                .unwrap_or_else(|_| div().into_any_element())
-                        },
-                    )
-                    .flex_1()
-                    .min_h_0(),
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_timeline_minimap(cx))
+                        .child(
+                            list(
+                                self.conversation_scroll.clone(),
+                                move |index, window, cx| {
+                                    let Some(row) = rows.get(index) else {
+                                        return div().into_any_element();
+                                    };
+                                    app.update(cx, |app, cx| app.render_row(row, window, cx))
+                                        .unwrap_or_else(|_| div().into_any_element())
+                                },
+                            )
+                            .flex_1()
+                            .min_h_0(),
+                        ),
                 )
                 .when(reading_history, |view| {
                     view.child(
@@ -509,16 +540,18 @@ impl NativeApp {
                         let folded = self.activity_expanded.get(&key) == Some(&true);
                         let selector = format!("fold-turn-{turn}");
                         view.child(
-                            Button::new(gpui_kit::SharedString::from(selector.clone()))
-                                .debug_selector(move || selector.clone())
-                                .ghost()
-                                .xsmall()
-                                .label(if folded { "Expand turn" } else { "Fold turn" })
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.conversation_scroll.pause_following_tail();
-                                    app.activity_expanded.insert(key.clone(), !folded);
-                                    cx.notify();
-                                })),
+                            div().flex().items_start().child(
+                                Button::new(gpui_kit::SharedString::from(selector.clone()))
+                                    .debug_selector(move || selector.clone())
+                                    .ghost()
+                                    .xsmall()
+                                    .label(if folded { "Expand turn" } else { "Fold turn" })
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.conversation_scroll.pause_following_tail();
+                                        app.activity_expanded.insert(key.clone(), !folded);
+                                        cx.notify();
+                                    })),
+                            ),
                         )
                     })
                     .child(content)
@@ -554,16 +587,47 @@ impl NativeApp {
                 };
                 let expanded = *expanded;
                 let key = row.key.clone();
+                let icon = match items.first() {
+                    Some(ActivityItem::Tool(call)) => match conversation::tool_family(&call.name) {
+                        conversation::ToolFamily::Command => IconName::SquareTerminal,
+                        conversation::ToolFamily::Search => IconName::Search,
+                        conversation::ToolFamily::Edit => IconName::File,
+                        conversation::ToolFamily::Agent => IconName::User,
+                        conversation::ToolFamily::Other => IconName::Wrench,
+                    },
+                    _ => IconName::List,
+                };
+                let icon = if items.iter().any(|item| match (items.first(), item) {
+                    (Some(ActivityItem::Tool(first)), ActivityItem::Tool(call)) => {
+                        conversation::tool_family(&first.name)
+                            != conversation::tool_family(&call.name)
+                    }
+                    _ => true,
+                }) {
+                    IconName::List
+                } else {
+                    icon
+                };
                 div()
                     .flex()
                     .flex_col()
+                    .items_start()
                     .gap_1()
                     .child(
                         Button::new(gpui_kit::SharedString::from(selector.clone()))
                             .debug_selector(move || selector.clone())
                             .ghost()
-                            .small()
+                            .xsmall()
+                            .icon(icon)
                             .label(label.clone())
+                            .child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall(),
+                            )
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 // The disclosure grows in place; do not snap to the tail.
                                 app.conversation_scroll.pause_following_tail();
@@ -596,39 +660,7 @@ impl NativeApp {
             TimelineEntry::UserInput(request) => self
                 .render_user_input(request, window, cx)
                 .into_any_element(),
-            TimelineEntry::Error(error) => div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_2()
-                .border_1()
-                .border_color(danger)
-                .text_xs()
-                .text_color(danger)
-                .child(error.clone())
-                .child(
-                    Button::new("thread-error-settings")
-                        .ghost()
-                        .small()
-                        .label("Provider / connection settings…")
-                        .on_click(cx.listener(|app, _, window, cx| {
-                            app.execute_command(
-                                t3code_desktop_gpui::palette::Command::Settings,
-                                window,
-                                cx,
-                            );
-                        })),
-                )
-                .when(!self.connection_ready(), |view| {
-                    view.child(
-                        Button::new("thread-error-reconnect")
-                            .ghost()
-                            .small()
-                            .label("Retry connection")
-                            .on_click(cx.listener(|app, _, _, cx| app.retry_connection_now(cx))),
-                    )
-                })
-                .into_any_element(),
+            TimelineEntry::Error(error) => self.render_thread_error(error, cx).into_any_element(),
         };
         div()
             .id(gpui_kit::SharedString::from(row.key.clone()))
@@ -854,7 +886,11 @@ impl NativeApp {
         let id = gpui_kit::SharedString::from(format!("message-{message_id}"));
         let copy_id = format!("copy-{message_id}");
         let text = message["text"].as_str().unwrap_or("").to_owned();
-        let copy_text = text.clone();
+        let copy_text = if message["role"] == "assistant" && message["streaming"] != true {
+            artifacts::copy_text(&text)
+        } else {
+            text.clone()
+        };
         let role = message["role"].as_str().unwrap_or("message");
         let label = conversation::role_label(role);
         let created = message["createdAt"]
@@ -957,22 +993,20 @@ impl NativeApp {
             || displayed.clone(),
             |cwd| super::message_paths::link_inline_workspace_paths(&displayed, &cwd),
         );
+        let (displayed, artifact_templates) = if role == "assistant"
+            && message["streaming"] != true
+            && displayed.trim_start().starts_with("::artifact-template{")
+        {
+            artifacts::extract(&displayed)
+        } else {
+            (displayed, Vec::new())
+        };
+        let artifact_cards = self.render_artifact_templates(artifact_templates, cx);
         let workspace_media = self.render_workspace_media(workspace_images, cx);
         let context = message["context"]["records"]
             .as_array()
             .map_or(&[][..], Vec::as_slice);
         let body = div()
-            .when(
-                role == "assistant" && message["streaming"] != true,
-                |view| {
-                    view.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_foreground)
-                            .child("Select text · ⌘⇧L to add quote to chat"),
-                    )
-                },
-            )
             .flex()
             .flex_col()
             .gap_1()
@@ -989,34 +1023,43 @@ impl NativeApp {
             })
             .when(expandable, |view| {
                 view.child(
-                    Button::new(gpui_kit::SharedString::from(format!("expand-{message_id}")))
-                        .debug_selector({
-                            let id = format!("expand-{message_id}");
-                            move || id.clone()
-                        })
-                        .ghost()
-                        .xsmall()
-                        .label(if reasoning {
-                            if expanded {
-                                "Hide reasoning"
+                    div().flex().items_start().child(
+                        Button::new(gpui_kit::SharedString::from(format!("expand-{message_id}")))
+                            .debug_selector({
+                                let id = format!("expand-{message_id}");
+                                move || id.clone()
+                            })
+                            .ghost()
+                            .xsmall()
+                            .icon(if reasoning {
+                                IconName::Brain
+                            } else if expanded {
+                                IconName::ChevronDown
                             } else {
-                                "Show reasoning"
-                            }
-                        } else if expanded {
-                            "Show less"
-                        } else {
-                            "Show more"
-                        })
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.conversation_scroll.pause_following_tail();
-                            app.activity_expanded
-                                .insert(disclosure_key.clone(), !expanded);
-                            cx.notify();
-                        })),
+                                IconName::ChevronRight
+                            })
+                            .label(if reasoning {
+                                if expanded {
+                                    "Hide reasoning"
+                                } else {
+                                    "Show reasoning"
+                                }
+                            } else if expanded {
+                                "Show less"
+                            } else {
+                                "Show more"
+                            })
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.conversation_scroll.pause_following_tail();
+                                app.activity_expanded
+                                    .insert(disclosure_key.clone(), !expanded);
+                                cx.notify();
+                            })),
+                    ),
                 )
             })
             .when(!reasoning || expanded, |view| {
-                let view = view.child(workspace_media);
+                let view = view.child(workspace_media).child(artifact_cards);
                 let app = cx.weak_entity();
                 let link_app = app.clone();
                 let table_app = app.clone();
@@ -1043,14 +1086,72 @@ impl NativeApp {
                 style.code_block.overflow.x = Some(gpui_kit::Overflow::Scroll);
                 let source = self.citation_source_view(message_id, &displayed, cx);
                 let capture_source = source.clone();
+                let quote_source = source.clone();
+                let quote_message = message_id.to_owned();
+                let quote_scope = self.environment_scope.clone();
+                let quote_thread = self.selected_thread.clone().unwrap_or_default();
+                let quote_generation = self.generation;
+                let quote_snapshot = if role == "assistant" && !run_streaming {
+                    let state = source.read(cx);
+                    let rendered = state.rendered_text();
+                    state
+                        .selected_source_range()
+                        .and_then(|range| rendered.range_for_source(range))
+                        .and_then(|range| citations::selector(rendered.as_str(), range).ok())
+                        .map(|citation| (rendered.as_str().to_owned(), citation))
+                } else {
+                    None
+                };
+                let quote_selected = quote_snapshot.is_some();
                 let capture_message = message_id.to_owned();
                 let capture_scope = self.environment_scope.clone();
                 let capture_thread = self.selected_thread.clone().unwrap_or_default();
                 let capture_generation = self.generation;
                 let assistant = role == "assistant" && !run_streaming;
-                view.font_family(crate::settings_fonts::family(1, cx.theme().font_family.clone(), cx))
-                    .text_size(self.prose_font_size(cx))
-                    .child(
+                let view = view.when(quote_selected, |view| {
+                    view.child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Left,
+                                cx.listener(move |app, _, window, cx| {
+                                    // Capture on press: mouse-up can follow a selection-clearing layout pass.
+                                    window.prevent_default();
+                                    app.cite_assistant_selection(
+                                        &quote_message,
+                                        &quote_source,
+                                        (&quote_scope, &quote_thread, quote_generation),
+                                        quote_snapshot.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(
+                                Button::new(gpui_kit::SharedString::from(format!(
+                                    "quote-selection-{message_id}"
+                                )))
+                                .debug_selector({
+                                    let selector = format!("quote-selection-{message_id}");
+                                    move || selector.clone()
+                                })
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Plus)
+                                .label("Add selection to chat")
+                                .tooltip("Add selection to chat · ⌘⇧L"),
+                            ),
+                    )
+                });
+                view.font_family(crate::settings_fonts::family(
+                    1,
+                    cx.theme().font_family.clone(),
+                    cx,
+                ))
+                .text_size(self.prose_font_size(cx))
+                .child(
                     div()
                         .id(id)
                         .debug_selector({
@@ -1071,6 +1172,7 @@ impl NativeApp {
                                         &capture_message,
                                         &capture_source,
                                         (&capture_scope, &capture_thread, capture_generation),
+                                        None,
                                         window,
                                         cx,
                                     );
@@ -1367,6 +1469,7 @@ impl NativeApp {
                                     .label("Agents")
                                     .on_click(cx.listener(|app, _, _, cx| {
                                         app.inspector_open = true;
+                                        app.browser_panel.update(cx, |panel, cx| panel.deactivate(cx));
                                         app.right_tab = crate::RightTab::Agents;
                                         cx.notify();
                                     })),
@@ -1499,6 +1602,18 @@ impl NativeApp {
                             }))
             })
         else {
+            if let Some(detail) = self.detail.thread.as_ref() {
+                match plan_recovery::recover(detail, text) {
+                    Ok(Some(_)) => {
+                        return Err(
+                            "Confirm the restored plan follow-up mode and source before sending"
+                                .into(),
+                        );
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(None) => {}
+                }
+            }
             return Ok(None);
         };
         match record.accepted {
@@ -1535,7 +1650,11 @@ impl NativeApp {
             self.report_error("Plan follow-up requires an available provider with interaction modes and a reconciled checkout", cx);
             return;
         }
-        if !self.composer.read(cx).value().trim().is_empty() || !self.attachments.is_empty() {
+        let prompt = plan_recovery::prompt(&markdown, implement);
+        let current = self.composer.read(cx).value();
+        if (!current.trim().is_empty() && current.as_str() != prompt)
+            || !self.attachments.is_empty()
+        {
             self.report_error("Stash or clear the current prompt before using a plan", cx);
             return;
         }
@@ -1552,14 +1671,6 @@ impl NativeApp {
         let mode = if implement { "default" } else { "plan" };
         let generation = self.generation;
         let environment = self.environment_scope.clone();
-        let prompt = format!(
-            "{}\n\n{markdown}",
-            if implement {
-                "Implement the following plan:"
-            } else {
-                "Refine the following plan:"
-            }
-        );
         self.conversation_presentation.plan_followup =
             Some(crate::conversation_presentation::PlanFollowup {
                 generation,
@@ -1826,12 +1937,27 @@ impl NativeApp {
                         view.child(div().px_2().rounded_sm().bg(muted).child("implemented"))
                     }),
             )
-            .child(div().font_family(crate::settings_fonts::family(1, cx.theme().font_family.clone(), cx)).text_size(self.prose_font_size(cx)).child(TextView::markdown(id, displayed).style(self.conversation_typography_style(cx)).on_link_click({
-                let app = cx.weak_entity();
-                move |href, _, window, cx| {
-                    let _ = app.update(cx, |app, cx| app.open_message_link(href, window, cx));
-                }
-            })))
+            .child(
+                div()
+                    .font_family(crate::settings_fonts::family(
+                        1,
+                        cx.theme().font_family.clone(),
+                        cx,
+                    ))
+                    .text_size(self.prose_font_size(cx))
+                    .child(
+                        TextView::markdown(id, displayed)
+                            .style(self.conversation_typography_style(cx))
+                            .on_link_click({
+                                let app = cx.weak_entity();
+                                move |href, _, window, cx| {
+                                    let _ = app.update(cx, |app, cx| {
+                                        app.open_message_link(href, window, cx)
+                                    });
+                                }
+                            }),
+                    ),
+            )
             .child(
                 div()
                     .flex()

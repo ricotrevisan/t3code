@@ -267,6 +267,7 @@ fn run_entrypoint(cx: &mut TestAppContext, entry: &str) {
             cx.simulate_click(bounds.center(), Default::default());
         }
         _ => {
+            super::r14_e_header::ensure_control(cx, "project-actions-header");
             let bounds = cx.debug_bounds("project-actions-header").unwrap();
             cx.simulate_click(bounds.center(), Default::default());
         }
@@ -306,11 +307,7 @@ fn palette_actions_reveals_runnable_saved_actions(cx: &mut TestAppContext) {
     run_entrypoint(cx, "palette");
 }
 
-fn live_run(
-    app: &Entity<NativeApp>,
-    cx: &mut VisualTestContext,
-    requests: &Requests,
-) -> String {
+fn live_run(app: &Entity<NativeApp>, cx: &mut VisualTestContext, requests: &Requests) -> String {
     saved(app, cx);
     let (open, receipt) = call(requests, "terminal.open");
     let key = open["terminalId"].as_str().unwrap().to_owned();
@@ -326,11 +323,7 @@ fn live_run(
     key
 }
 
-fn fresh_sync(
-    app: &Entity<NativeApp>,
-    cx: &mut VisualTestContext,
-    scope: &str,
-) -> Requests {
+fn fresh_sync(app: &Entity<NativeApp>, cx: &mut VisualTestContext, scope: &str) -> Requests {
     let (sender, requests) = async_channel::bounded(16);
     cx.update(|_, cx| app.update(cx, |app, cx| {
         app.environment_scope = scope.into();

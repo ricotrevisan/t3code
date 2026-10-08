@@ -14,6 +14,9 @@ fn seed_checkpoints(app: &Entity<NativeApp>, cx: &mut VisualTestContext) {
 }
 
 fn click_diff(cx: &mut VisualTestContext, selector: &'static str) {
+    if matches!(selector, "toggle-inspector" | "header-diff") {
+        super::r14_e_header::ensure_control(cx, selector);
+    }
     let bounds = cx
         .debug_bounds(selector)
         .unwrap_or_else(|| panic!("missing {selector}"));
@@ -21,10 +24,7 @@ fn click_diff(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-fn diff_request(
-    requests: &Requests,
-    turn: u64,
-) -> async_channel::Sender<Result<Value, String>> {
+fn diff_request(requests: &Requests, turn: u64) -> async_channel::Sender<Result<Value, String>> {
     let connection::Command::Call {
         tag,
         payload,

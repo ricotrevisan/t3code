@@ -1,7 +1,7 @@
 //! Unified patch rows retain patch metadata and use independent old/new counters.
 use crate::NativeApp;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::{Context, div, prelude::*};
+use gpui_kit::{Context, prelude::*};
 #[derive(Debug, PartialEq)]
 pub(crate) struct DiffLine<'a> {
     pub text: &'a str,
@@ -103,98 +103,38 @@ pub(crate) fn split_rows<'a>(
 impl NativeApp {
     pub(crate) fn render_patch_lines(
         &self,
-        patch: &str,
+        file: &crate::app::diffs::PatchFile,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let foreground = cx.theme().foreground;
-        let muted = cx.theme().muted_foreground;
-        let green = cx.theme().green;
-        let danger = cx.theme().danger;
-        if self.diffs.split {
-            let rows = lines(patch);
-            return div()
-                .flex()
-                .flex_col()
-                .children(split_rows(&rows).into_iter().map(|(old, new)| {
-                    div()
-                        .flex()
-                        .min_w_0()
-                        .children(
-                            [(old, true), (new, false)]
-                                .into_iter()
-                                .map(|(line, before)| {
-                                    let number = line
-                                        .and_then(|line| if before { line.old } else { line.new });
-                                    let text =
-                                        line.map(|line| line.text.to_owned()).unwrap_or_default();
-                                    let color = match line.map(|line| line.kind) {
-                                        Some('-') => danger,
-                                        Some('+') => green,
-                                        Some('@') => muted,
-                                        _ => foreground,
-                                    };
-                                    div()
-                                        .flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .gap_1()
-                                        .border_r_1()
-                                        .border_color(cx.theme().border)
-                                        .child(div().w_8().flex_shrink_0().text_color(muted).child(
-                                            number.map(|n| n.to_string()).unwrap_or_default(),
-                                        ))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .when(self.diffs.wrap, |view| {
-                                                    view.whitespace_normal()
-                                                })
-                                                .when(!self.diffs.wrap, |view| {
-                                                    view.whitespace_nowrap()
-                                                })
-                                                .text_color(color)
-                                                .child(text),
-                                        )
-                                }),
-                        )
-                }))
-                .into_any_element();
-        }
-        div()
-            .flex()
-            .flex_col()
-            .children(lines(patch).into_iter().map(|line| {
-                div()
-                    .flex()
-                    .min_w_0()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w_16()
-                            .flex_shrink_0()
-                            .text_color(muted)
-                            .child(format!(
-                                "{:>5} {:>5}",
-                                line.old.map(|n| n.to_string()).unwrap_or_default(),
-                                line.new.map(|n| n.to_string()).unwrap_or_default()
-                            )),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .when(self.diffs.wrap, |view| view.flex_1().whitespace_normal())
-                            .when(!self.diffs.wrap, |view| view.whitespace_nowrap())
-                            .text_color(match line.kind {
-                                '+' => green,
-                                '-' => danger,
-                                '@' => muted,
-                                _ => foreground,
-                            })
-                            .child(line.text.to_owned()),
-                    )
-            }))
-            .into_any_element()
+        let split = self.diffs.split;
+        // Reflow only on explicit wrap/layout changes, not composer or streaming updates.
+        let columns = self.diffs.wrap.then(|| {
+            let rem = crate::settings_appearance::current(cx).effective_size();
+            let font = cx
+                .text_system()
+                .resolve_font(&gpui_kit::font(cx.theme().mono_font_family.clone()));
+            let cell = cx
+                .text_system()
+                .advance(font, gpui_kit::px(rem * 0.75), 'W')
+                .map_or(rem * 0.75, |size| f32::from(size.width));
+            // The inspector width is a persisted physical split boundary; subtract
+            // rem-based panel padding and the same gutters the row renderer uses.
+            let available = (self.inspector_width - rem * 3.) / if split { 2. } else { 1. };
+            ((available - rem * if split { 3. } else { 5.5 }) / cell).max(1.) as usize
+        });
+        let options = super::r14_e_diff::Options { split, columns };
+        let entity = file
+            .view
+            .get_or_init(|| {
+                cx.new(|_| super::r14_e_diff::PatchView::new(&file.patch, options.clone()))
+            })
+            .clone();
+        entity.update(cx, |view, cx| view.configure(options, cx));
+        entity.cached(
+            gpui_kit::StyleRefinement::default()
+                .w_full()
+                .h(gpui_kit::rems(18.)),
+        )
     }
 }
 #[cfg(test)]

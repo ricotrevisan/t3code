@@ -30,6 +30,7 @@ enum ComposerCommand {
 struct CommandPick {
     label: String,
     description: String,
+    skill: Option<serde_json::Value>,
     command: ComposerCommand,
 }
 
@@ -120,7 +121,7 @@ impl NativeApp {
     }
 
     fn slash_entries(&self, cx: &App) -> Vec<CommandPick> {
-        let Some((_, marker, query)) = self.command_trigger(cx) else {
+        let Some((range, marker, query)) = self.command_trigger(cx) else {
             return Vec::new();
         };
         let mut entries = Vec::new();
@@ -134,6 +135,7 @@ impl NativeApp {
             entries.push(CommandPick {
                 label: "/model".into(),
                 description: "Choose provider and model".into(),
+                skill: None,
                 command: ComposerCommand::Model,
             });
             if provider.show_interaction_mode_toggle.unwrap_or(true) {
@@ -141,11 +143,17 @@ impl NativeApp {
                     entries.push(CommandPick {
                         label: label.into(),
                         description: "Change interaction mode".into(),
+                        skill: None,
                         command: ComposerCommand::Mode(name),
                     });
                 }
             }
             for command in provider.commands_for_cwd(self.selected_workspace().as_deref()) {
+                // Provider expansion is valid only at message start; local builtins
+                // and skill mentions remain available at any prompt position.
+                if range.start != 0 {
+                    continue;
+                }
                 let Some(name) = command["name"].as_str() else {
                     continue;
                 };
@@ -174,6 +182,7 @@ impl NativeApp {
                         .or(command["input"]["hint"].as_str())
                         .unwrap_or("Provider command")
                         .into(),
+                    skill: None,
                     command: if name == "compact" {
                         ComposerCommand::Compact
                     } else if name == "usage-limits" {
@@ -211,16 +220,30 @@ impl NativeApp {
                         .or(skill["description"].as_str())
                         .unwrap_or("Provider skill")
                 ),
+                skill: Some(skill.clone()),
                 command: ComposerCommand::Insert(format!("${name} ")),
             });
         }
-        let query = query.to_lowercase();
-        entries.retain(|entry| {
-            format!("{} {}", entry.label, entry.description)
-                .to_lowercase()
-                .contains(&query)
-        });
-        entries
+        if query.trim().is_empty() {
+            return entries;
+        }
+        let mut ranked: Vec<_> = entries
+            .into_iter()
+            .filter_map(|entry| {
+                let score = if let Some(skill) = &entry.skill {
+                    t3code_desktop_gpui::composer_search::skill_score(skill, &query)
+                } else {
+                    t3code_desktop_gpui::composer_search::command_score(
+                        &entry.label,
+                        &entry.description,
+                        &query,
+                    )
+                };
+                score.map(|score| (score, entry))
+            })
+            .collect();
+        ranked.sort_by(|(a, left), (b, right)| a.cmp(b).then_with(|| left.label.cmp(&right.label)));
+        ranked.into_iter().map(|(_, entry)| entry).collect()
     }
 
     /// Provider commands insert native invocation text; client builtins act locally.

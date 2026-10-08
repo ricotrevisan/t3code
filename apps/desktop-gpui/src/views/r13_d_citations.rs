@@ -186,6 +186,7 @@ impl NativeApp {
         message: &str,
         state: &gpui_kit::Entity<TextViewState>,
         capture_scope: (&str, &str, u64),
+        snapshot: Option<(String, Value)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -199,13 +200,20 @@ impl NativeApp {
             }
             let view = state.read(cx);
             let rendered = view.rendered_text();
-            let source = view
-                .selected_source_range()
-                .ok_or("Select assistant text first")?;
-            let range = rendered
-                .range_for_source(source)
-                .ok_or("Selection cannot be mapped to assistant text")?;
-            let mut citation = selector(rendered.as_str(), range)?;
+            let mut citation = if let Some((original, citation)) = snapshot {
+                if original != rendered.as_str() {
+                    return Err("Assistant text changed; select it again");
+                }
+                citation
+            } else {
+                let source = view
+                    .selected_source_range()
+                    .ok_or("Select assistant text first")?;
+                let range = rendered
+                    .range_for_source(source)
+                    .ok_or("Selection cannot be mapped to assistant text")?;
+                selector(rendered.as_str(), range)?
+            };
             let environment = self
                 .server_config
                 .config(self.generation)

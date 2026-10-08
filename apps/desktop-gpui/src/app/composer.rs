@@ -295,7 +295,7 @@ impl NativeApp {
             .rfind(|(_, ch)| ch.is_whitespace())
             .map_or(0, |(index, ch)| index + ch.len_utf8());
         let marker = prefix[start..].chars().next()?;
-        if marker != '$' && !(marker == '/' && start == 0) {
+        if marker != '$' && marker != '/' {
             return None;
         }
         Some((
@@ -2422,6 +2422,7 @@ impl NativeApp {
         {
             row.cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = row.abort.try_send(());
             row.phase = if matches!(row.phase, "Preparing" | "Uploading") {
                 "Cancelling"
             } else {
@@ -2540,6 +2541,7 @@ impl NativeApp {
             .map(|input| {
                 let id = uuid::Uuid::new_v4().to_string();
                 let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (abort, aborted) = async_channel::bounded(1);
                 self.attachment_drafts
                     .transfers
                     .push(super::attachments::AttachmentTransfer {
@@ -2548,14 +2550,15 @@ impl NativeApp {
                         name: input.name(),
                         phase: "Waiting",
                         cancelled: cancelled.clone(),
+                        abort,
                         retry: None,
                     });
-                (input, id, cancelled)
+                (input, id, cancelled, aborted)
             })
             .collect();
         cx.notify();
         cx.spawn(async move |entity, cx| {
-            for (input, transfer_id, cancelled) in inputs {
+            for (input, transfer_id, cancelled, aborted) in inputs {
                 if cancelled.load(std::sync::atomic::Ordering::Relaxed) { continue; }
                 let name = input.name();
                 let source = input.source();
@@ -2563,13 +2566,23 @@ impl NativeApp {
                     let _ = entity.update(cx, |app, cx| { app.transfer_phase(&transfer_id, "Invalid filename; reattach source", None, cx); app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, "Invalid attachment filename", cx); });
                     continue;
                 }
-                let mime = attachment_mime(&name).to_owned();
+                let mime = match name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase().as_str() {
+                    "heic" => "image/heic",
+                    "heif" => "image/heif",
+                    _ => attachment_mime(&name),
+                }.to_owned();
                 let image = mime.starts_with("image/");
                 let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, "Reading", None, cx));
                 let read_input = input.clone();
-                let bytes = cx.background_executor().spawn(async move { read_input.read(image) }).await;
-                let bytes = match bytes {
-                    Ok(bytes) => bytes,
+                let prepare_name = name.clone();
+                let prepare_mime = mime.clone();
+                let prepared = cx.background_executor().spawn(async move {
+                    let bytes = read_input.read(image)?;
+                    if image { t3code_desktop_gpui::composer_image::prepare(prepare_name, prepare_mime, bytes) }
+                    else { Ok((prepare_name, prepare_mime, bytes)) }
+                }).await;
+                let (name, mime, bytes) = match prepared {
+                    Ok(prepared) => prepared,
                     Err(error) => {
                         let _ = entity.update(cx, |app, cx| {
                             app.transfer_phase(&transfer_id, "Failed", Some(input), cx);
@@ -2608,7 +2621,18 @@ impl NativeApp {
                     continue;
                 }
                 let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, "Uploading", None, cx));
-                let result = connection::upload(&scope.sender, url, mime.clone(), bytes).await;
+                // Dropping the upload future closes its receipt receiver; transport
+                // uses that closure to abort the actual HTTP body, not only staging.
+                let result = match futures_util::future::select(
+                    Box::pin(connection::upload(&scope.sender, url, mime.clone(), bytes)),
+                    Box::pin(aborted.recv()),
+                ).await {
+                    futures_util::future::Either::Left((result, _)) => result,
+                    futures_util::future::Either::Right((_, upload)) => {
+                        drop(upload);
+                        Err("Attachment upload cancelled".into())
+                    }
+                };
                 if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                     let cleanup = connection::call(&scope.sender, "attachments.delete", json!({"attachmentId":id})).await;
                     let _ = entity.update(cx, |app, cx| {

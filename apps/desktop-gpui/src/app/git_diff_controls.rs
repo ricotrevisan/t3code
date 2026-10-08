@@ -19,58 +19,30 @@ impl NativeApp {
                 view.child(error)
             })
             .when_some(
-                self.diffs
-                    .full_file
-                    .as_ref()
-                    .filter(|(index, _, _)| *index == self.diffs.selected_file),
-                |view, (_, old, new)| {
+                self.diffs.full_file_view.as_ref().filter(|_| {
+                    self.diffs
+                        .full_file
+                        .as_ref()
+                        .is_some_and(|(index, _, _)| *index == self.diffs.selected_file)
+                }),
+                |view, entity| {
                     view.child(
                         Button::new("diff-close-full")
+                            .debug_selector(|| "diff-close-full".into())
                             .ghost()
                             .small()
                             .label("Close full contents")
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.diffs.full_file = None;
+                                app.diffs.full_file_view = None;
                                 cx.notify();
                             })),
                     )
                     .child(
-                        div().flex().min_w_0().gap_2().children(
-                            [("Before (complete)", old), ("After (complete)", new)]
-                                .into_iter()
-                                .map(|(label, body)| {
-                                    let body = body.clone();
-                                    let copy = body.clone();
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .gap_1()
-                                        .child(
-                                            Button::new(gpui_kit::SharedString::from(format!(
-                                                "copy-full-{label}"
-                                            )))
-                                            .ghost()
-                                            .small()
-                                            .label(format!("Copy {label}"))
-                                            .on_click(move |_, _, cx| {
-                                                cx.write_to_clipboard(
-                                                    gpui_kit::ClipboardItem::new_string(
-                                                        copy.clone(),
-                                                    ),
-                                                )
-                                            }),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(gpui_kit::SharedString::from(label))
-                                                .max_h_64()
-                                                .overflow_scroll()
-                                                .whitespace_nowrap()
-                                                .child(body),
-                                        )
-                                }),
+                        entity.clone().cached(
+                            gpui_kit::StyleRefinement::default()
+                                .w_full()
+                                .h(gpui_kit::rems(14.)),
                         ),
                     )
                 },

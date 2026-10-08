@@ -2,6 +2,8 @@
 //! constructor, actions, key bindings, and the `Render` impl stay in `main.rs`.
 
 pub(crate) mod attachments;
+#[path = "../surfaces/browser/integration.rs"]
+mod browser_surfaces;
 pub(crate) mod branch_workflows;
 pub(crate) mod checkout_operations;
 pub(crate) mod checkout_receipts;

@@ -31,6 +31,7 @@ pub(crate) struct AttachmentTransfer {
     pub(crate) name: String,
     pub(crate) phase: &'static str,
     pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) abort: async_channel::Sender<()>,
     pub(crate) retry: Option<AttachmentInput>,
 }
 
@@ -102,7 +103,7 @@ impl AttachmentInput {
         match self {
             Self::Path(path) => read_attachment(&path, image),
             Self::Bytes { bytes, .. } => {
-                let limit = if image { 10 } else { 50 } * 1024 * 1024;
+                let limit = t3code_desktop_gpui::composer_image::SOURCE_LIMIT;
                 if bytes.is_empty() || bytes.len() > limit {
                     Err("Clipboard attachment exceeds upload limits".into())
                 } else {
@@ -127,18 +128,16 @@ impl AttachmentScope {
     }
 }
 
-// Public contracts: images <=10 MiB, files <=50 MiB. A bounded read also
-// catches a file growing after metadata, without allocating its entire body.
-pub(crate) fn read_attachment(path: &Path, image: bool) -> Result<Vec<u8>, String> {
-    let limit = if image { 10 } else { 50 } * 1024 * 1024;
+// Read a bounded 50 MiB source; images are compressed to the 10 MiB wire cap
+// before signing. A bounded read also catches growth after metadata.
+pub(crate) fn read_attachment(path: &Path, _image: bool) -> Result<Vec<u8>, String> {
+    let limit = t3code_desktop_gpui::composer_image::SOURCE_LIMIT as u64;
     let file = std::fs::File::open(path).map_err(|_| "Could not open attachment")?;
     let metadata = file
         .metadata()
         .map_err(|_| "Could not inspect attachment")?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > limit {
-        return Err(
-            "Attachment must be a nonempty regular file (images ≤10 MiB, files ≤50 MiB)".into(),
-        );
+        return Err("Attachment must be a nonempty regular file (source ≤50 MiB)".into());
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(limit + 1)

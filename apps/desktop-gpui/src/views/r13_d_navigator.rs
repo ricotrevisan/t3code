@@ -18,6 +18,7 @@ pub(crate) fn items(detail: &Value) -> Vec<NavigationItem> {
         .map(|message| NavigationItem {
             message: message["id"].as_str().unwrap().to_owned(),
             preview: preview(message["text"].as_str().unwrap_or("")),
+            row: 0,
         })
         .collect()
 }
@@ -57,6 +58,7 @@ impl NativeApp {
         div()
             .flex()
             .flex_col()
+            .items_start()
             .gap_1()
             .when(count > 1, |view| {
                 view.child(
@@ -64,6 +66,7 @@ impl NativeApp {
                         .debug_selector(|| "timeline-navigator-toggle".into())
                         .ghost()
                         .xsmall()
+                        .icon(IconName::List)
                         .label(if open {
                             "Close message navigator".to_owned()
                         } else {

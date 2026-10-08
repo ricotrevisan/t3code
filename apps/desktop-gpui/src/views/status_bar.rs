@@ -38,7 +38,10 @@ impl NativeApp {
             .to_owned();
         // Keep the phase readable as well as color-coded, including for unnamed hosts.
         let environment_label = format!("{environment_label} · {}", self.connection_state_text());
-        let environment_choices = self.environment_choices(cx);
+        let mut environment_choices = self.environment_choices(cx);
+        if !environment_choices.iter().any(|(origin, _, _)| origin == &self.environment_scope) {
+            environment_choices.insert(0, (self.environment_scope.clone(), environment_label.clone(), true));
+        }
         // Size only the identity's contents, not a proportion of the whole bar.
         // The text system caches this shape; extra space is kit xs icon/padding.
         let environment_width = window
@@ -123,6 +126,10 @@ impl NativeApp {
                     )
                     .child(
                         div()
+                            .capture_any_mouse_down({
+                                let focus = self.environment_return_focus.clone();
+                                move |_, window, cx| *focus.borrow_mut() = window.focused(cx)
+                            })
                             .w(environment_width.min(window.rem_size() * 20.))
                             // On compact windows status feedback takes priority;
                             // wide windows retain an ordinary host's full identity.
@@ -133,6 +140,8 @@ impl NativeApp {
                             })
                             .flex_shrink_1()
                             .child({
+                                let previous_focus = self.environment_return_focus.clone();
+
                                 let button = Button::new("environment-chip")
                                     .debug_selector(|| "environment-chip".into())
                                     .icon(gpui_kit::assets::IconName::Settings)
@@ -145,13 +154,7 @@ impl NativeApp {
                                         self.connection_state_text(),
                                         self.environment_scope
                                     ));
-                                if environment_choices.is_empty() {
-                                    button
-                                        .on_click(cx.listener(|app, _, window, cx| {
-                                            app.open_settings("", window, cx)
-                                        }))
-                                        .into_any_element()
-                                } else {
+                                {
                                     let app = cx.entity().downgrade();
                                     let choices = environment_choices.clone();
                                     let active = self.environment_scope.clone();
@@ -159,6 +162,7 @@ impl NativeApp {
                                         .dropdown_menu_with_anchor(
                                             Anchor::BottomLeft,
                                             move |mut menu, _, _| {
+                                                let previous_focus = previous_focus.borrow().clone();
                                                 menu = menu.label("Run on · saved endpoints");
                                                 for (index, (origin, label, enabled)) in
                                                     choices.iter().enumerate()
@@ -194,14 +198,17 @@ impl NativeApp {
                                                 }
                                                 let settings_app = app.clone();
                                                 menu.separator().item(
-                                                    PopupMenuItem::new("Connection settings")
+                                                    PopupMenuItem::element(move |_, _| {
+                                                        div().debug_selector(|| "environment-connection-settings".into()).child("Connection settings…")
+                                                    })
                                                         .on_click(move |_, window, cx| {
                                                             _ = settings_app.update(
                                                                 cx,
                                                                 |app, cx| {
                                                                     app.open_settings(
                                                                         "", window, cx,
-                                                                    )
+                                                                    );
+                                                                    app.previous_focus = previous_focus.clone();
                                                                 },
                                                             );
                                                         }),

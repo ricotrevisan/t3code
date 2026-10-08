@@ -43,63 +43,53 @@ fn header_readable_lanes_do_not_overlap_with_both_panels(cx: &mut TestAppContext
         let header = cx.debug_bounds("thread-header").unwrap();
         let project = cx.debug_bounds("header-project").unwrap();
         let title = cx.debug_bounds("header-title").unwrap();
-        let branch = cx.debug_bounds("branch-selector").unwrap();
-        let status = cx.debug_bounds("header-session").unwrap();
-        let diff = cx.debug_bounds("header-diff").unwrap();
+        let more = cx.debug_bounds("header-overflow").unwrap();
         assert!(
-            project.size.width >= px(80.),
+            header.size.height <= px(48.),
+            "single compact band at {width}: {header:?}"
+        );
+        assert!(
+            project.size.width >= px(40.),
             "readable project: {project:?}"
         );
         assert!(
-            title.size.width >= px(160.),
+            title.size.width >= px(96.),
             "readable title at {width}: {title:?}"
         );
-        assert!(branch.size.width >= px(160.), "readable branch: {branch:?}");
+        assert!(project.right() <= title.left() && title.right() <= more.left());
+        for bounds in [project, title, more] {
+            assert!(bounds.left() >= header.left() && bounds.right() <= header.right());
+            assert!(bounds.top() >= header.top() && bounds.bottom() <= header.bottom());
+        }
+        super::r14_e_header::ensure_overflow(cx);
+        let panel = cx.debug_bounds("header-overflow-panel").unwrap();
         assert!(
-            status.size.width >= px(70.),
-            "Interrupted must not clip: {status:?}"
+            panel.top() >= header.bottom() - px(8.),
+            "overflow is anchored below its trigger: {panel:?} / {header:?}"
         );
-        assert!(project.right() <= title.left());
-        assert!(
-            title.bottom() <= branch.top(),
-            "identity and metadata overlap"
-        );
-        assert!(branch.right() <= status.left(), "branch and state overlap");
-        assert!(branch.bottom() <= diff.top() && status.bottom() <= diff.top());
-
-        let mut painted = vec![project, title, branch, status, diff];
         for selector in [
+            "branch-selector",
+            "header-session",
+            "header-diff",
             "open-editor",
             "project-actions-header",
             "push-pr",
-            "toggle-inspector",
             "thread-menu",
         ] {
-            let action = cx.debug_bounds(selector).expect(selector);
-            let minimum_width = if selector == "push-pr" { px(20.) } else { px(40.) };
-            assert!(action.size.width >= minimum_width && action.size.height >= px(20.));
+            let bounds = cx.debug_bounds(selector).expect(selector);
             assert!(
-                action.top() >= diff.bottom(),
-                "{selector} overlaps metadata"
+                bounds.size.width >= px(20.) && bounds.size.height >= px(12.),
+                "reachable {selector}: {bounds:?}"
             );
-            painted.push(action);
-        }
-        for (index, bounds) in painted.iter().enumerate() {
             assert!(
-                bounds.left() >= header.left() && bounds.right() <= header.right(),
-                "outside header at {width}: {bounds:?}"
+                bounds.left() >= panel.left() && bounds.right() <= panel.right(),
+                "{selector} outside overflow"
             );
-            assert!(bounds.top() >= header.top() && bounds.bottom() <= header.bottom());
-            for other in &painted[index + 1..] {
-                assert!(
-                    bounds.right() <= other.left()
-                        || other.right() <= bounds.left()
-                        || bounds.bottom() <= other.top()
-                        || other.bottom() <= bounds.top(),
-                    "overlap at {width}: {bounds:?} / {other:?}"
-                );
-            }
         }
+        // Close between resizes so measurement checks cover the resting band.
+        cx.simulate_click(more.center(), Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("header-overflow-panel").is_none());
     }
 }
 
@@ -110,6 +100,7 @@ fn narrow_header_actions_reach_selected_checkout_and_visible_panels(cx: &mut Tes
     cx.simulate_resize(size(px(960.), px(1000.)));
     cx.run_until_parked();
 
+    super::r14_e_header::ensure_control(cx, "branch-selector");
     let reply = open_branch_picker_at(cx, &requests, "branch-selector", CHECKOUT);
     let chip = cx.debug_bounds("branch-selector").unwrap();
     let picker = cx
@@ -143,6 +134,7 @@ fn narrow_header_actions_reach_selected_checkout_and_visible_panels(cx: &mut Tes
         .unwrap();
     cx.run_until_parked();
 
+    super::r14_e_header::ensure_control(cx, "open-editor");
     let open = cx.debug_bounds("open-editor").unwrap();
     cx.simulate_click(open.center(), Default::default());
     cx.run_until_parked();
@@ -159,6 +151,7 @@ fn narrow_header_actions_reach_selected_checkout_and_visible_panels(cx: &mut Tes
     reply.send_blocking(Ok(json!({}))).unwrap();
     cx.run_until_parked();
 
+    super::r14_e_header::ensure_control(cx, "push-pr");
     let push = cx.debug_bounds("push-pr").unwrap();
     cx.simulate_click(push.center(), Default::default());
     cx.run_until_parked();
@@ -192,10 +185,22 @@ fn narrow_header_actions_reach_selected_checkout_and_visible_panels(cx: &mut Tes
     assert_eq!(payload["cwd"], CHECKOUT);
     assert_eq!(payload["threadId"], "t");
     assert_eq!(payload["action"], "commit_push_pr");
-    events.send_blocking(Ok(Some(json!({"kind":"action_finished","result":{"toast":{"title":"Done"}}})))).unwrap();
+    events
+        .send_blocking(Ok(Some(
+            json!({"kind":"action_finished","result":{"toast":{"title":"Done"}}}),
+        )))
+        .unwrap();
     events.send_blocking(Ok(None)).unwrap();
     cx.run_until_parked();
 
+    // Git's receipt/output popup remains a real overlay until explicitly dismissed.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        !app.read_with(cx, |app, _| app.git_header.open),
+        "Git popup dismissed before selecting Setup"
+    );
+    super::r14_e_header::ensure_control(cx, "project-actions-header");
     let actions = cx.debug_bounds("project-actions-header").unwrap();
     cx.simulate_click(actions.center(), Default::default());
     cx.run_until_parked();
@@ -215,12 +220,14 @@ fn narrow_header_actions_reach_selected_checkout_and_visible_panels(cx: &mut Tes
     );
 
     for expected in [false, true] {
+        super::r14_e_header::ensure_control(cx, "toggle-inspector");
         let toggle = cx.debug_bounds("toggle-inspector").unwrap();
         cx.simulate_click(toggle.center(), Default::default());
         cx.run_until_parked();
         assert_eq!(app.read_with(cx, |app, _| app.inspector_open), expected);
         assert_eq!(cx.debug_bounds("action-save").is_some(), expected);
     }
+    super::r14_e_header::ensure_control(cx, "thread-menu");
     let more = cx.debug_bounds("thread-menu").unwrap();
     cx.simulate_click(more.center(), Default::default());
     cx.run_until_parked();

@@ -8,6 +8,8 @@ use std::ops::Range;
 pub(super) struct Composition {
     pub id: String,
     pub scope: String,
+    pub thread: String,
+    pub epoch: u64,
     pub generation: u64,
     pub text: String,
     pub selection: Range<usize>,
@@ -38,7 +40,9 @@ impl NativeApp {
         self.terminal_drawer.composition.as_ref().filter(|mark| {
             mark.scope == self.environment_scope
                 && mark.generation == self.generation
-                && self.terminal_active().is_some_and(|tab| tab.id == mark.id)
+                && self.terminal_active().is_some_and(|tab| {
+                    tab.id == mark.id && tab.thread == mark.thread && tab.epoch == mark.epoch
+                })
         })
     }
 
@@ -172,9 +176,14 @@ impl EntityInputHandler for NativeApp {
         let selected = selection.map_or(length..length, |r| {
             (prefix_len + r.start).min(length)..(prefix_len + r.end).min(length)
         });
+        let tab = self.terminal_active().unwrap();
+        let thread = tab.thread.clone();
+        let epoch = tab.epoch;
         self.terminal_drawer.composition = (!value.is_empty()).then_some(Composition {
             id,
             scope: self.environment_scope.clone(),
+            thread,
+            epoch,
             generation: self.generation,
             text: value,
             selection: selected,

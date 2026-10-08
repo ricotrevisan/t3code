@@ -143,7 +143,15 @@ impl DraftContextRecord {
                         .0
                         .get("fenceLanguage")
                         .is_none_or(|_| string("fenceLanguage", 64, false))
-                    && self.0.get("pullRequest").is_none()
+                    && self.0.get("pullRequest").is_none_or(|pr| {
+                        pr.is_object()
+                            && pr["number"].as_u64().is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
+                            && ["title", "url", "headBranch", "baseBranch"].iter().all(|key| {
+                                pr[key].as_str().is_some_and(|s| s.encode_utf16().count() <= 2048)
+                            })
+                            && matches!(pr["state"].as_str(), Some("open" | "closed" | "merged"))
+                            && pr["isDraft"].is_boolean()
+                    })
             }
             "element" | "preview-annotation" => false, // producers need a typed validator before intake
             kind => {
@@ -202,6 +210,22 @@ pub fn message_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r14_int_review_metadata_validates_and_survives_message_transport() {
+        let fields = json!({"sectionId":"pr:17","sectionTitle":"Review","filePath":"src/main.rs","startIndex":0,"endIndex":1,"rangeLabel":"1","text":"Review","diff":"","pullRequest":{"number":17,"title":"Fix","url":"https://host.test/pull/17","headBranch":"fix","baseBranch":"main","state":"open","isDraft":false}});
+        let record = DraftContextRecord::capture("review-comment", "PR #17", fields.clone()).unwrap();
+        let (_, context) = message_context(&record.reference(), &[record]).unwrap();
+        assert_eq!(context.unwrap()["records"][0]["pullRequest"], fields["pullRequest"]);
+        for (key, value) in [("number", json!(0)), ("state", json!("unknown")), ("isDraft", Value::Null), ("title", json!("😀".repeat(1025)))] {
+            let mut malformed = fields.clone();
+            malformed["pullRequest"][key] = value;
+            assert!(DraftContextRecord::capture("review-comment", "PR", malformed).is_err(), "{key}");
+        }
+        let mut missing = fields;
+        missing["pullRequest"].as_object_mut().unwrap().remove("url");
+        assert!(DraftContextRecord::capture("review-comment", "PR", missing).is_err());
+    }
+
     #[test]
     fn r13_c_context_snapshot_identity_bounds_and_reference_transport() {
         let r =

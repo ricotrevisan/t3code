@@ -44,5 +44,6 @@ fn statusbar_polb_full_host_fits_at_1280(cx: &mut TestAppContext) {
     assert!(message.size.width >= px(96.));
     cx.simulate_click(chip.center(), Default::default());
     cx.run_until_parked();
+    click_connection_settings(cx);
     assert!(app.read_with(cx, |app, _| app.settings_open));
 }

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 pub(crate) struct NavigationItem {
     pub(crate) message: String,
     pub(crate) preview: String,
+    pub(crate) row: usize,
 }
 
 pub(crate) struct SourceView {
@@ -54,6 +55,9 @@ pub(crate) struct ConversationPresentation {
     pub(crate) jump: Option<MessageJump>,
     pub(crate) navigation: std::rc::Rc<Vec<NavigationItem>>,
     pub(crate) navigator_open: bool,
+    pub(crate) minimap_active: Option<usize>,
+    pub(crate) minimap_focus: Option<gpui_kit::FocusHandle>,
+    pub(crate) dismissed_errors: std::collections::VecDeque<(String, Option<String>, String)>,
     pub(crate) sources: HashMap<String, SourceView>,
     pub(crate) agents: Vec<t3code_desktop_gpui::surfaces::agents::Agent>,
     pub(crate) message_tail: Option<(usize, serde_json::Value)>,
@@ -289,6 +293,7 @@ impl ConversationPresentation {
             self.citation_target = None;
             self.navigation = Default::default();
             self.navigator_open = false;
+            self.minimap_active = None;
         }
         self.prepared = Some((generation, revision, thread.to_owned(), disclosures.clone()));
         self.prepared_detail = detail.cloned();

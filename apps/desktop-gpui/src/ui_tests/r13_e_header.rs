@@ -14,6 +14,7 @@ fn r13_e_live_checkout_subscription_merges_updates_and_rejects_late_owner(cx: &m
         app.apply_git_status(&key, Ok(json!({"_tag":"snapshot","local":{"isRepo":true,"refName":"feature","hasWorkingTreeChanges":true,"workingTree":{"files":[{"path":"a.rs","insertions":2,"deletions":1}],"insertions":2,"deletions":1}},"remote":{"hasUpstream":true,"aheadCount":1,"behindCount":0,"pr":null}})), cx);
     }));
     cx.run_until_parked();
+    super::r14_e_header::ensure_control(cx, "header-current-diff");
     let diff = cx.debug_bounds("header-current-diff").unwrap();
     cx.simulate_click(diff.center(), Default::default());
     cx.run_until_parked();
@@ -58,6 +59,7 @@ fn r13_e_direct_saved_action_uses_checkout_and_failure_is_retryable(cx: &mut Tes
         app.shell.threads[0].worktree_path=Some("/tmp/action-worktree".into()); cx.notify();
     }));
     cx.run_until_parked();
+    super::r14_e_header::ensure_control(cx, "header-run-action");
     let bounds = cx.debug_bounds("header-run-action").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
@@ -88,6 +90,7 @@ fn r13_e_direct_saved_action_uses_checkout_and_failure_is_retryable(cx: &mut Tes
 #[gpui_kit::test]
 fn r13_e_detached_commit_form_reaches_transport_without_branch_push(cx: &mut TestAppContext) {
     let (app, cx, requests) = harness(cx);
+    super::r14_e_header::ensure_control(cx, "push-pr");
     let bounds = cx.debug_bounds("push-pr").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();

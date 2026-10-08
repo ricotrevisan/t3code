@@ -2,7 +2,7 @@ use crate::NativeApp;
 use alacritty_terminal::term::cell::Flags;
 use gpui_kit::{
     component::{
-        ActiveTheme as _, Disableable as _, Selectable as _,
+        ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
         button::{Button, ButtonVariants},
         input::Input,
         menu::{ContextMenuExt as _, PopupMenuItem},
@@ -34,8 +34,8 @@ impl NativeApp {
         cell_width: f32,
         line_height: f32,
     ) -> Option<(usize, usize)> {
-        let bounds = self.terminal_drawer.bounds?;
         let tab = self.terminal_active()?;
+        let bounds = tab.bounds?;
         let col = (((position.x - bounds.origin.x) / px(cell_width)).max(0.) as usize)
             .min(tab.screen.size.cols - 1);
         let row = (((position.y - bounds.origin.y) / px(line_height)).max(0.) as usize)
@@ -71,6 +71,14 @@ impl NativeApp {
                     .selected(tab_id.as_ref() == Some(&id))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.terminal_drawer.active = Some(id.clone());
+                        if app
+                            .terminal_drawer
+                            .split
+                            .as_ref()
+                            .is_some_and(|(_, _, ids)| !ids.contains(&id))
+                        {
+                            app.terminal_drawer.split = None;
+                        }
                         app.terminal_drawer.focus.focus(window, cx);
                         cx.notify();
                     }))
@@ -97,7 +105,9 @@ impl NativeApp {
                 Button::new("terminal-new")
                     .debug_selector(|| "terminal-new".into())
                     .ghost()
-                    .label("New")
+                    .small()
+                    .icon(assets::IconName::Plus)
+                    .tooltip("New terminal")
                     .disabled(!connected)
                     .on_click(cx.listener(|app, _, window, cx| {
                         app.new_terminal(cx);
@@ -105,10 +115,49 @@ impl NativeApp {
                     })),
             )
             .child(
+                Button::new("terminal-split")
+                    .debug_selector(|| "terminal-split".into())
+                    .ghost()
+                    .small()
+                    .icon(assets::IconName::PanelRight)
+                    .tooltip("Split terminal side by side (max 4 panes)")
+                    .disabled(
+                        !connected
+                            || tab_id.is_none()
+                            || self.terminal_drawer.split.as_ref().is_some_and(
+                                |(scope, thread, ids)| {
+                                    scope == &self.environment_scope
+                                        && Some(thread) == self.selected_thread.as_ref()
+                                        && ids.len() >= 4
+                                },
+                            ),
+                    )
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.terminal_split(cx);
+                        app.terminal_drawer.focus.focus(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("terminal-unsplit")
+                    .debug_selector(|| "terminal-unsplit".into())
+                    .ghost()
+                    .small()
+                    .icon(assets::IconName::PanelLeftClose)
+                    .tooltip("Show only the active terminal (keep sessions open)")
+                    .disabled(self.terminal_drawer.split.is_none())
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.terminal_drawer.split = None;
+                        app.terminal_drawer.focus.focus(window, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("terminal-search")
                     .debug_selector(|| "terminal-search".into())
                     .ghost()
-                    .label("Find")
+                    .small()
+                    .icon(assets::IconName::Search)
+                    .tooltip("Find in terminal")
                     .on_click(cx.listener(|app, _, window, cx| {
                         app.terminal_drawer.searching = !app.terminal_drawer.searching;
                         if app.terminal_drawer.searching {
@@ -125,7 +174,9 @@ impl NativeApp {
                 Button::new("terminal-discover")
                     .debug_selector(|| "terminal-discover".into())
                     .ghost()
-                    .label("Restore sessions")
+                    .small()
+                    .icon(assets::IconName::RefreshCw)
+                    .tooltip("Restore sessions")
                     .disabled(!connected)
                     .on_click(cx.listener(|app, _, _, cx| app.terminal_discover(cx))),
             )
@@ -133,7 +184,9 @@ impl NativeApp {
                 Button::new("terminal-hide")
                     .debug_selector(|| "terminal-hide".into())
                     .ghost()
-                    .label("Hide")
+                    .small()
+                    .icon(assets::IconName::ChevronDown)
+                    .tooltip("Hide terminal drawer")
                     .on_click(cx.listener(|app, _, window, cx| app.toggle_terminal(window, cx))),
             );
         if let Some(id) = &tab_id {
@@ -149,8 +202,9 @@ impl NativeApp {
                     Button::new("terminal-restart")
                         .debug_selector(|| "terminal-restart".into())
                         .ghost()
-                        .label("Restart")
-                        .disabled(!connected || tab_busy || !ready)
+                        .small().icon(assets::IconName::RefreshCw)
+                        .tooltip(if self.terminal_active().is_some_and(|tab| tab.launch.is_null()) { "Restart unavailable: original launch environment/provider configuration is unknown" } else { "Restart terminal" })
+                        .disabled(!connected || tab_busy || !ready || self.terminal_active().is_some_and(|tab| tab.launch.is_null()))
                         .on_click(cx.listener(move |app, _, _, cx| {
                             app.terminal_restart(&restart_id, false, cx)
                         })),
@@ -159,7 +213,7 @@ impl NativeApp {
                     Button::new("terminal-clear")
                         .debug_selector(|| "terminal-clear".into())
                         .ghost()
-                        .label("Clear")
+                        .small().icon(assets::IconName::Eraser).tooltip("Clear terminal")
                         .disabled(!connected || tab_busy || !ready)
                         .on_click(cx.listener(move |app, _, _, cx| {
                             app.terminal_rpc(&clear_id, "terminal.clear", json!({}), cx)
@@ -169,7 +223,7 @@ impl NativeApp {
                     Button::new("terminal-rename")
                         .debug_selector(|| "terminal-rename".into())
                         .ghost()
-                        .label("Rename")
+                        .small().icon(assets::IconName::Pencil).tooltip("Rename terminal")
                         .on_click(cx.listener(move |app, _, window, cx| {
                             let title = app
                                 .terminal_drawer
@@ -195,7 +249,7 @@ impl NativeApp {
                     Button::new("terminal-close")
                         .debug_selector(|| "terminal-close".into())
                         .ghost()
-                        .label("Close")
+                        .small().icon(assets::IconName::X).tooltip("Close terminal")
                         .disabled(!connected || tab_busy)
                         .on_click(cx.listener(move |app, _, _, cx| {
                             app.terminal_close(&close_id, false, cx)
@@ -299,13 +353,19 @@ impl NativeApp {
                     ),
             );
         }
-        if let Some(id) = self.terminal_drawer.confirm.clone()
-            && let Some(tab) = self.terminal_drawer.tabs.iter().find(|tab| {
-                tab.id == id
-                    && tab.scope == self.environment_scope
-                    && Some(&tab.thread) == self.selected_thread.as_ref()
+        if let Some(owner) = self.terminal_drawer.confirm.clone()
+            && let Some(tab) = self.terminal_active().filter(|tab| {
+                owner
+                    == (
+                        tab.scope.clone(),
+                        tab.thread.clone(),
+                        tab.id.clone(),
+                        self.generation,
+                        tab.epoch,
+                    )
             })
         {
+            let id = owner.2.clone();
             drawer = drawer.child(
                 div()
                     .id("terminal-close-confirm")
@@ -341,15 +401,31 @@ impl NativeApp {
                     ),
             );
         }
-        if let Some(id) = self.terminal_drawer.restart_confirm.clone()
-            && self.terminal_active().is_some_and(|tab| tab.id == id)
+        if let Some(owner) = self.terminal_drawer.restart_confirm.clone()
+            && self.terminal_active().is_some_and(|tab| {
+                owner
+                    == (
+                        tab.scope.clone(),
+                        tab.thread.clone(),
+                        tab.id.clone(),
+                        self.generation,
+                        tab.epoch,
+                    )
+            })
         {
+            let id = owner.2.clone();
             drawer = drawer.child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child("Restart this terminal? Its running process will be stopped.")
+                    .flex_wrap()
+                    .child(format!(
+                        "Restart {} in {} / thread {}? Its running process will be stopped.",
+                        self.terminal_active().unwrap().title,
+                        owner.0,
+                        owner.1
+                    ))
                     .child(
                         Button::new("terminal-confirm-restart")
                             .debug_selector(|| "terminal-confirm-restart".into())
@@ -390,7 +466,149 @@ impl NativeApp {
                     .into_any_element(),
             );
         };
-        let tab = self.terminal_active().unwrap();
+        let mut ids = self
+            .terminal_drawer
+            .split
+            .as_ref()
+            .filter(|(scope, thread, ids)| {
+                scope == &self.environment_scope
+                    && Some(thread) == self.selected_thread.as_ref()
+                    && ids.contains(&id)
+            })
+            .map(|(_, _, ids)| ids.clone())
+            .unwrap_or_else(|| vec![id.clone()]);
+        ids.retain(|id| {
+            self.terminal_drawer.tabs.iter().any(|tab| {
+                &tab.id == id
+                    && tab.scope == self.environment_scope
+                    && Some(&tab.thread) == self.selected_thread.as_ref()
+            })
+        });
+        let panes = ids
+            .into_iter()
+            .map(|id| self.render_terminal_pane(id, cx))
+            .collect::<Vec<_>>();
+        Some(
+            drawer
+                .child(self.terminal_input_container(panes, cx))
+                .into_any_element(),
+        )
+    }
+
+    fn terminal_input_container(
+        &self,
+        panes: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let input_owner = self
+            .terminal_active()
+            .map(|tab| {
+                (
+                    tab.scope.clone(),
+                    tab.thread.clone(),
+                    tab.id.clone(),
+                    self.generation,
+                    tab.epoch,
+                )
+            })
+            .unwrap();
+        div()
+            .id("terminal-panes")
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .key_context("NativeTerminal")
+            .track_focus(&self.terminal_drawer.focus)
+            .on_action(
+                cx.listener(|app, _: &gpui_kit::component::input::Copy, _, cx| {
+                    if let Some(capture) = app.terminal_capture() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(capture.text));
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_action(
+                cx.listener(|app, _: &gpui_kit::component::input::Paste, window, cx| {
+                    app.terminal_paste(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_action(cx.listener(|app, key: &super::keys::TerminalKey, _, cx| {
+                if let Some(tab) = app.terminal_active() {
+                    let id = tab.id.clone();
+                    if let Some(data) = tab.screen.key(&key.key, None, key.control, false) {
+                        app.terminal_rpc(&id, "terminal.write", json!({"data":data}), cx);
+                    }
+                }
+            }))
+            .capture_key_down(cx.listener(move |app, event: &KeyDownEvent, _, cx| {
+                if !app.terminal_pane_current(&input_owner) {
+                    return;
+                }
+                let key = &event.keystroke;
+                // Copy/paste belong to the terminal. All other Cmd chords are app actions.
+                if key.modifiers.platform && !matches!(key.key.as_str(), "c" | "v") {
+                    return;
+                }
+                // Printable input, including Option/dead-key layouts, must pass through
+                // the platform input handler exactly once (not both keyDown and insertText).
+                if !key.modifiers.platform
+                    && !key.modifiers.control
+                    && (key.key_char.is_some() || app.terminal_composition().is_some())
+                {
+                    return;
+                }
+                let Some(tab) = app.terminal_active() else {
+                    return;
+                };
+                let input_id = tab.id.clone();
+                if key.modifiers.platform && key.key == "c" {
+                    if let Some(text) = tab.screen.selection() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                } else if key.modifiers.platform && key.key == "v" {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        let data = tab.screen.paste(&text);
+                        app.terminal_rpc(&input_id, "terminal.write", json!({"data":data}), cx);
+                    }
+                } else if !key.modifiers.platform
+                    && let Some(data) = tab.screen.key(
+                        &key.key,
+                        key.key_char.as_deref(),
+                        key.modifiers.control,
+                        key.modifiers.alt,
+                    )
+                {
+                    app.terminal_rpc(&input_id, "terminal.write", json!({"data":data}), cx);
+                }
+                cx.stop_propagation();
+            }))
+            .children(panes)
+    }
+
+    fn render_terminal_pane(&mut self, id: String, cx: &mut Context<Self>) -> AnyElement {
+        let connected =
+            self.shell.synchronized && self.connection_phase.ready() && self.commands.is_some();
+        let active = self.terminal_active().is_some_and(|tab| tab.id == id);
+        let mut drawer = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .border_l_1()
+            .border_color(cx.theme().border);
+        let tab = self
+            .terminal_drawer
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.id == id
+                    && tab.scope == self.environment_scope
+                    && Some(&tab.thread) == self.selected_thread.as_ref()
+            })
+            .unwrap();
         drawer = drawer.child(
             div()
                 .px_2()
@@ -404,8 +622,22 @@ impl NativeApp {
         if let Some(error) = &tab.error {
             drawer = drawer.child(div().text_color(cx.theme().danger).child(error.clone()));
         }
+        let owner = (
+            tab.scope.clone(),
+            tab.thread.clone(),
+            tab.id.clone(),
+            self.generation,
+            tab.epoch,
+        );
+        let geometry_owner = owner.clone();
+        let mouse_owner = owner.clone();
+        let menu_owner = owner.clone();
+        let scroll_owner = owner;
         let cells = tab.screen.cells();
-        let composition = self.terminal_composition().map(|mark| mark.text.clone());
+        let composition = self
+            .terminal_composition()
+            .filter(|_| active)
+            .map(|mark| mark.text.clone());
         let input_entity = cx.entity();
         let input_focus = self.terminal_drawer.focus.clone();
         let font_size = cx.theme().mono_font_size;
@@ -443,9 +675,22 @@ impl NativeApp {
                 );
                 let weak = weak.clone();
                 let id = resize_id.clone();
+                let owner = geometry_owner.clone();
                 cx.defer(move |cx| {
                     let _ = weak.update(cx, |app, cx| {
-                        app.terminal_drawer.bounds = Some(bounds);
+                        if !app.terminal_pane_current(&owner) {
+                            return;
+                        }
+                        if let Some(tab) = app.terminal_drawer.tabs.iter_mut().find(|tab| {
+                            tab.id == id
+                                && tab.scope == app.environment_scope
+                                && Some(&tab.thread) == app.selected_thread.as_ref()
+                        }) {
+                            tab.bounds = Some(bounds);
+                        }
+                        if app.terminal_active().is_some_and(|tab| tab.id == id) {
+                            app.terminal_drawer.bounds = Some(bounds);
+                        }
                         app.terminal_drawer.cell_width = width;
                         app.terminal_drawer.line_height = line_height;
                         app.terminal_resize(&id, size, cx);
@@ -454,11 +699,13 @@ impl NativeApp {
                 (width, font.clone(), theme.clone())
             },
             move |bounds, (width, font, theme), window, cx| {
-                window.handle_input(
-                    &input_focus,
-                    ElementInputHandler::new(bounds, input_entity.clone()),
-                    cx,
-                );
+                if active {
+                    window.handle_input(
+                        &input_focus,
+                        ElementInputHandler::new(bounds, input_entity.clone()),
+                        cx,
+                    );
+                }
                 let drag_end = drag_app.clone();
                 window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
                     if phase == DispatchPhase::Capture {
@@ -597,83 +844,27 @@ impl NativeApp {
         )
         .size_full();
         // Input captures only when the grid owns focus; cmd-j bubbles to the app.
-        let input_id = id.clone();
         let menu_app = cx.entity().downgrade();
+        let selector = if active {
+            "terminal-grid".to_owned()
+        } else {
+            format!("terminal-grid-{id}")
+        };
+        let scroll_id = id.clone();
+        let menu_id = id.clone();
         let surface = div()
-            .id("terminal-grid")
-            .debug_selector(|| "terminal-grid".into())
-            .key_context("NativeTerminal")
-            .track_focus(&self.terminal_drawer.focus)
+            .id(SharedString::from(format!("terminal-pane-{id}")))
+            .debug_selector(move || selector.clone())
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .on_action(
-                cx.listener(|app, _: &gpui_kit::component::input::Copy, _, cx| {
-                    if let Some(capture) = app.terminal_capture() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(capture.text));
-                    }
-                    cx.stop_propagation();
-                }),
-            )
-            .on_action(
-                cx.listener(|app, _: &gpui_kit::component::input::Paste, window, cx| {
-                    app.terminal_paste(window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .on_action(cx.listener(|app, key: &super::keys::TerminalKey, _, cx| {
-                if let Some(tab) = app.terminal_active() {
-                    let id = tab.id.clone();
-                    if let Some(data) = tab.screen.key(&key.key, None, key.control, false) {
-                        app.terminal_rpc(&id, "terminal.write", json!({"data":data}), cx);
-                    }
-                }
-            }))
-            .capture_key_down(cx.listener(move |app, event: &KeyDownEvent, _, cx| {
-                let key = &event.keystroke;
-                // Copy/paste belong to the terminal. All other Cmd chords are app actions.
-                if key.modifiers.platform && !matches!(key.key.as_str(), "c" | "v") {
-                    return;
-                }
-                // Printable input, including Option/dead-key layouts, must pass through
-                // the platform input handler exactly once (not both keyDown and insertText).
-                if !key.modifiers.platform
-                    && !key.modifiers.control
-                    && (key.key_char.is_some() || app.terminal_composition().is_some())
-                {
-                    return;
-                }
-                let Some(tab) = app.terminal_drawer.tabs.iter().find(|tab| {
-                    tab.id == input_id
-                        && tab.scope == app.environment_scope
-                        && Some(&tab.thread) == app.selected_thread.as_ref()
-                }) else {
-                    return;
-                };
-                if key.modifiers.platform && key.key == "c" {
-                    if let Some(text) = tab.screen.selection() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    }
-                } else if key.modifiers.platform && key.key == "v" {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        let data = tab.screen.paste(&text);
-                        app.terminal_rpc(&input_id, "terminal.write", json!({"data":data}), cx);
-                    }
-                } else if !key.modifiers.platform
-                    && let Some(data) = tab.screen.key(
-                        &key.key,
-                        key.key_char.as_deref(),
-                        key.modifiers.control,
-                        key.modifiers.alt,
-                    )
-                {
-                    app.terminal_rpc(&input_id, "terminal.write", json!({"data":data}), cx);
-                }
-                cx.stop_propagation();
-            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |app, event: &MouseDownEvent, window, cx| {
+                    if !app.terminal_pane_current(&mouse_owner) {
+                        return;
+                    }
+                    app.terminal_drawer.active = Some(draw_id.clone());
                     app.terminal_drawer.focus.focus(window, cx);
                     let width = app.terminal_drawer.cell_width;
                     if let Some((row, col)) = app.terminal_point(event.position, width, line_height)
@@ -683,9 +874,26 @@ impl NativeApp {
                                 && Some(&tab.thread) == app.selected_thread.as_ref()
                         })
                     {
-                        tab.screen.select(row, col, true);
+                        if (event.modifiers.platform || event.modifiers.control)
+                            && let Some(url) = tab.screen.link_at(row, col)
+                        {
+                            cx.open_url(&url);
+                        } else {
+                            tab.screen.select(row, col, true);
+                        }
                         cx.notify();
                     }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |app, _, window, cx| {
+                    if !app.terminal_pane_current(&menu_owner) {
+                        return;
+                    }
+                    app.terminal_drawer.active = Some(menu_id.clone());
+                    app.terminal_drawer.focus.focus(window, cx);
+                    cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(|app, event: &MouseMoveEvent, _, cx| {
@@ -708,12 +916,13 @@ impl NativeApp {
                     cx.notify();
                 }
             }))
-            .on_scroll_wheel(cx.listener(|app, event: &ScrollWheelEvent, _, cx| {
-                let Some(id) = app.terminal_active().map(|tab| tab.id.clone()) else {
+            .on_scroll_wheel(cx.listener(move |app, event: &ScrollWheelEvent, _, cx| {
+                if !app.terminal_pane_current(&scroll_owner) {
                     return;
-                };
+                }
+                let id = &scroll_id;
                 if let Some(tab) = app.terminal_drawer.tabs.iter_mut().find(|tab| {
-                    tab.id == id
+                    &tab.id == id
                         && tab.scope == app.environment_scope
                         && Some(&tab.thread) == app.selected_thread.as_ref()
                 }) {
@@ -847,10 +1056,8 @@ impl NativeApp {
                 }),
             )
         });
-        Some(
-            drawer
-                .child(div().flex().flex_1().min_h_0().px_2().pb_2().child(surface))
-                .into_any_element(),
-        )
+        drawer
+            .child(div().flex().flex_1().min_h_0().px_2().pb_2().child(surface))
+            .into_any_element()
     }
 }
