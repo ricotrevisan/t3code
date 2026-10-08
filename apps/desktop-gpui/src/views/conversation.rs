@@ -951,7 +951,7 @@ impl NativeApp {
                             .debug_selector({ let selector = format!("attachment-{}", attachment["id"].as_str().unwrap_or("unknown")); move || selector.clone() })
                             .ghost().small().label(format!("{name} · {size} B · Download"))
                             .on_click(cx.listener(move |app, _, _, cx| app.open_conversation_asset(resource.clone(), cx))))
-                        .when(preview_ready, |view| view.child(Button::new("expand-image").ghost().xsmall().label("Expand image")
+                        .when(preview_ready, |view| view.child(Button::new(gpui_kit::SharedString::from(format!("expand-image-{expand_key}"))).ghost().xsmall().label("Expand image")
                             .on_click(cx.listener(move |app, _, window, cx| app.expand_message_image(expand_key.clone(), keyboard_resource.clone(), window, cx)))))
                         .child(Button::new(gpui_kit::SharedString::from(format!("attachment-open-{}", attachment["id"].as_str().unwrap_or("unknown"))))
                             .ghost().xsmall().label(if video { "Open video in browser" } else { "Open in browser" })

@@ -199,7 +199,7 @@ impl NativeApp {
                 Err(error) => error.clone(),
             }))
             .when(self.selected_project.is_some() && !project_supported, |view| view.child("Project overrides unavailable: this server does not advertise project-scoped settings support."))
-            .child(Button::new("scoped-refresh").debug_selector(|| "scoped-refresh".into()).label(if busy { "Loading…" } else { "Refresh server data" }).ghost().disabled(!self.connection_ready() || busy)
+            .child(Button::new(("scoped-refresh", usize::from(diagnostics))).debug_selector(|| "scoped-refresh".into()).label(if busy { "Loading…" } else { "Refresh server data" }).ghost().disabled(!self.connection_ready() || busy)
                 .on_click(cx.listener(move |app, _, _, cx| app.refresh_scoped_pages(diagnostics, cx))))
             .when_some(owned.then_some(self.scoped_pages.error.clone()).flatten(), |view, error| view.child(div().text_color(cx.theme().danger).child(error)))
             .when(!diagnostics, |view| {

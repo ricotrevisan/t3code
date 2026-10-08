@@ -6,7 +6,7 @@ use gpui_kit::component::{
     input::{Input, Textarea},
     menu::{ContextMenuExt, PopupMenuItem},
 };
-use gpui_kit::{Context, div, prelude::*, rems};
+use gpui_kit::{Context, Focusable, div, prelude::*, rems};
 
 use super::field;
 use crate::NativeApp;
@@ -168,7 +168,10 @@ impl NativeApp {
                             .id(gpui_kit::SharedString::from(format!(
                                 "file-entry-menu-{index}"
                             )))
-                            .context_menu(move |menu, _, _| {
+                            .context_menu(move |menu, window, cx| {
+                                // Transfer focus before prepaint. ContextMenu otherwise
+                                // focuses in prepaint, after the input already claimed AX focus.
+                                menu.focus_handle(cx).focus(window, cx);
                                 let open_path = menu_path.clone();
                                 let add_path = menu_path.clone();
                                 let copy_path = menu_path.clone();
