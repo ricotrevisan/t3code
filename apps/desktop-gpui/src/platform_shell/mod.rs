@@ -1,6 +1,8 @@
 //! Native shell integration, kept separate from the conversation renderer.
 pub(crate) mod input_trace;
 pub(crate) mod keystrokes;
+#[cfg(target_os = "macos")]
+pub(crate) mod visible_frame;
 use crate::NativeApp;
 use gpui_kit::{
     App, Bounds, Context, Div, KeyBinding, Menu, MenuItem, OsAction, PromptLevel, SystemMenuType,
@@ -163,14 +165,29 @@ pub(crate) fn sidebar_handle(cx: &Context<NativeApp>) -> gpui_kit::base::ResizeH
     })
 }
 
-pub(crate) fn initial_bounds(state: WindowState, cx: &App) -> WindowBounds {
+pub(crate) fn initial_bounds(
+    state: WindowState,
+    cx: &App,
+) -> (WindowBounds, Option<gpui_kit::DisplayId>) {
+    #[cfg(target_os = "macos")]
+    if let Some(([x, y, w, h], display)) = visible_frame::initial(state) {
+        let bounds = Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
+        return (
+            if state.maximized {
+                WindowBounds::Maximized(bounds)
+            } else {
+                WindowBounds::Windowed(bounds)
+            },
+            Some(display),
+        );
+    }
     let primary = cx.primary_display().map(|display| display.id());
     let mut available = cx.displays();
     available.sort_by_key(|display| Some(display.id()) != primary);
     let displays: Vec<_> = available
         .iter()
         .map(|display| {
-            let bounds = display.bounds();
+            let bounds = display.visible_bounds();
             [
                 bounds.origin.x / px(1.),
                 bounds.origin.y / px(1.),
@@ -183,14 +200,21 @@ pub(crate) fn initial_bounds(state: WindowState, cx: &App) -> WindowBounds {
         .restore_rect(&displays)
         .map(|[x, y, w, h]| Bounds::new(point(px(x), px(y)), size(px(w), px(h))))
         .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(900.)), cx));
-    if state.maximized {
-        WindowBounds::Maximized(bounds)
-    } else {
-        WindowBounds::Windowed(bounds)
-    }
+    (
+        if state.maximized {
+            WindowBounds::Maximized(bounds)
+        } else {
+            WindowBounds::Windowed(bounds)
+        },
+        None,
+    )
 }
 
 pub(crate) fn remember_bounds(state: &mut WindowState, window: &gpui_kit::Window) {
+    #[cfg(target_os = "macos")]
+    if visible_frame::remember(state, window) {
+        return;
+    }
     state.maximized = window.is_maximized();
     if !state.maximized
         && let WindowBounds::Windowed(bounds) = window.window_bounds()

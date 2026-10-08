@@ -384,6 +384,8 @@ struct NativeApp {
     /// Whether the window has OS focus; a focused window still notifies for other threads.
     window_active: bool,
     _subscriptions: Vec<Subscription>,
+    #[cfg(target_os = "macos")]
+    _visible_frame_guard: Option<platform_shell::visible_frame::Guard>,
 }
 
 impl NativeApp {
@@ -823,6 +825,8 @@ impl NativeApp {
             thread_required_status: false,
             window_active: window.is_window_active(),
             _subscriptions: subscriptions,
+            #[cfg(target_os = "macos")]
+            _visible_frame_guard: if notification_handler { platform_shell::visible_frame::Guard::install(window, cx) } else { None },
         };
         let entity = cx.entity().downgrade();
         let handle = window.window_handle();
@@ -1234,10 +1238,11 @@ fn main() {
                     ],
                 },
             ]);
-            let bounds = platform_shell::initial_bounds(window_state::load(), cx);
+            let (bounds, display_id) = platform_shell::initial_bounds(window_state::load(), cx);
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(bounds),
+                    display_id,
                     window_min_size: Some(size(px(848.), px(620.))),
                     ..TitleBar::window_options()
                 },

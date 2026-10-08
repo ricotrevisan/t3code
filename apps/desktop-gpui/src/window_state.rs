@@ -51,23 +51,16 @@ impl WindowState {
     pub fn restore_rect(&self, displays: &[[f32; 4]]) -> Option<[f32; 4]> {
         let [dx, dy, dw, dh] = *displays.first()?;
         let (width, height) = self.size().unwrap_or((1280.0, 900.0));
-        if let (Some(x), Some(y)) = (self.x, self.y)
-            && x.is_finite()
-            && y.is_finite()
-            && displays.iter().any(|[dx, dy, dw, dh]| {
-                x >= *dx && y >= *dy && x + width <= dx + dw && y + height <= dy + dh
-            })
-        {
-            return Some([x, y, width, height]);
-        }
-        let width = width.min(dw);
-        let height = height.min(dh);
-        Some([
-            dx + (dw - width) / 2.0,
-            dy + (dh - height) / 2.0,
-            width,
-            height,
-        ])
+        let rect = match (self.x, self.y) {
+            (Some(x), Some(y)) if x.is_finite() && y.is_finite() => [x, y, width, height],
+            _ => [
+                dx + (dw - width) / 2.0,
+                dy + (dh - height) / 2.0,
+                width,
+                height,
+            ],
+        };
+        clamp_rect(rect, displays)
     }
 
     /// The saved size, when it is large enough to restore.
@@ -78,6 +71,48 @@ impl WindowState {
             && self.height >= 360.0)
             .then_some((self.width, self.height))
     }
+}
+
+/// Fit a rectangle to the work area with the greatest intersection. Displays
+/// are in one coordinate space, primary first. Disconnected windows recenter on
+/// the primary; partially visible ones retain their target and move minimally.
+/// No minimum size may force chrome under a Dock on a small display.
+pub fn clamp_rect(rect: [f32; 4], work_areas: &[[f32; 4]]) -> Option<[f32; 4]> {
+    let valid = |r: &&[f32; 4]| r.iter().all(|v| v.is_finite()) && r[2] > 0. && r[3] > 0.;
+    let primary = *work_areas.iter().find(valid)?;
+    let [x, y, w, h] = rect;
+    if !rect.iter().all(|v| v.is_finite()) || w <= 0. || h <= 0. {
+        return None;
+    }
+    let mut target = primary;
+    let mut overlap = 0.;
+    for area in work_areas.iter().filter(valid) {
+        let [dx, dy, dw, dh] = *area;
+        let intersection =
+            ((x + w).min(dx + dw) - x.max(dx)).max(0.) * ((y + h).min(dy + dh) - y.max(dy)).max(0.);
+        if intersection > overlap {
+            overlap = intersection;
+            target = *area;
+        }
+    }
+    let [dx, dy, dw, dh] = target;
+    let width = w.min(dw);
+    let height = h.min(dh);
+    Some(if overlap == 0. {
+        [
+            dx + (dw - width) / 2.,
+            dy + (dh - height) / 2.,
+            width,
+            height,
+        ]
+    } else {
+        [
+            x.clamp(dx, dx + dw - width),
+            y.clamp(dy, dy + dh - height),
+            width,
+            height,
+        ]
+    })
 }
 
 /// `width` held to a `(min, default, max)` range; unusable values fall back to the default.
@@ -232,6 +267,132 @@ mod tests {
             Some([0., 0., 800., 600.])
         );
         assert_eq!(state.restore_rect(&[]), None);
+    }
+
+    #[test]
+    fn r16_win_dock_bottom_clamps_diagnosed_outer_frame() {
+        let work = [[0., 25., 1920., 975.]];
+        assert_eq!(
+            clamp_rect([320., 49., 1280., 983.], &work),
+            Some([320., 25., 1280., 975.])
+        );
+        assert_eq!(
+            clamp_rect([320., 49., 1280., 900.], &work),
+            Some([320., 49., 1280., 900.])
+        );
+    }
+
+    #[test]
+    fn r16_win_left_right_and_auto_hidden_docks() {
+        let rect = [0., 0., 1920., 1080.];
+        for area in [
+            [80., 25., 1840., 1055.],
+            [0., 25., 1840., 1055.],
+            [0., 25., 1920., 1054.],
+        ] {
+            assert_eq!(clamp_rect(rect, &[area]), Some(area));
+            assert_eq!(clamp_rect(area, &[area]), Some(area));
+        }
+    }
+
+    #[test]
+    fn r16_win_secondary_display_retained_when_dock_overlaps_saved_rect() {
+        let work = [[0., 25., 1920., 975.], [-1600., -175., 1520., 875.]];
+        assert_eq!(
+            clamp_rect([-1500., -150., 1500., 900.], &work),
+            Some([-1580., -175., 1500., 875.])
+        );
+        assert_eq!(
+            clamp_rect([-1500., -150., 1500., 900.], &work[..1]),
+            Some([210., 62.5, 1500., 900.])
+        );
+        // Displays above/right of the primary use the same global coordinates.
+        assert_eq!(
+            clamp_rect(
+                [2050., -1000., 1000., 800.],
+                &[[0., 25., 1920., 975.], [1920., -1055., 1920., 975.]]
+            ),
+            Some([2050., -1000., 1000., 800.])
+        );
+    }
+
+    #[test]
+    fn r16_win_straddling_window_uses_greatest_intersection() {
+        let areas = [[0., 25., 1000., 800.], [1000., 25., 1000., 800.]];
+        assert_eq!(
+            clamp_rect([900., 100., 800., 600.], &areas),
+            Some([1000., 100., 800., 600.])
+        );
+        assert_eq!(
+            clamp_rect([400., 100., 800., 600.], &areas),
+            Some([200., 100., 800., 600.])
+        );
+    }
+
+    #[test]
+    fn r16_win_visible_frame_changes_preserve_in_bounds_user_resizes() {
+        let large = [[0., 25., 1920., 1055.]];
+        let dock = [[0., 25., 1920., 900.]];
+        let user = [320., 100., 900., 700.];
+        for areas in [large, dock, large] {
+            assert_eq!(clamp_rect(user, &areas), Some(user));
+        }
+        let full = clamp_rect([0., 25., 1920., 1055.], &dock).unwrap();
+        assert_eq!(full, dock[0]);
+        assert_eq!(clamp_rect(full, &large), Some(full));
+    }
+
+    #[test]
+    fn r16_win_invalid_displays_and_tiny_work_area() {
+        assert_eq!(
+            clamp_rect(
+                [0., 0., 1280., 900.],
+                &[
+                    [0., 0., 0., 900.],
+                    [f32::NAN, 0., 1920., 1080.],
+                    [10., 20., 300., 200.]
+                ]
+            ),
+            Some([10., 20., 300., 200.])
+        );
+        assert_eq!(clamp_rect([0., 0., 1280., 900.], &[]), None);
+        assert_eq!(
+            clamp_rect([f32::NAN, 0., 1280., 900.], &[[0., 0., 1920., 1080.]]),
+            None
+        );
+    }
+
+    #[test]
+    fn r16_win_normal_and_maximized_work_area_restore_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("window.json");
+        for maximized in [false, true] {
+            let state = WindowState {
+                x: Some(-1500.),
+                y: Some(49.),
+                width: 1280.,
+                height: 983.,
+                maximized,
+                sidebar_open: false,
+                ..WindowState::default()
+            };
+            save_to(&path, state).unwrap();
+            let restarted = parse(&std::fs::read_to_string(&path).unwrap());
+            assert_eq!(restarted, state);
+            let areas = [[0., 25., 1920., 975.], [-1920., 25., 1920., 875.]];
+            assert_eq!(
+                restarted.restore_rect(&areas),
+                Some([-1500., 25., 1280., 875.])
+            );
+            assert_eq!(
+                restarted.restore_rect(&areas[..1]),
+                Some([320., 25., 1280., 975.])
+            );
+        }
+        assert_eq!(
+            WindowState::default().restore_rect(&[[80., 25., 1840., 975.]]),
+            Some([360., 62.5, 1280., 900.])
+        );
     }
 
     #[test]
