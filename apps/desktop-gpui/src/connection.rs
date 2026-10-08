@@ -53,6 +53,7 @@ impl Phase {
     }
 }
 
+#[derive(Clone)]
 pub enum Update {
     Phase(Phase),
     Status(String),

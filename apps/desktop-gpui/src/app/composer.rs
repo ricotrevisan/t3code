@@ -697,14 +697,14 @@ impl NativeApp {
         cx.notify();
     }
 
-    pub(crate) fn composer_stashes(&self) -> &[t3code_desktop_gpui::drafts::StashEntry] {
+    pub(crate) fn composer_stashes(&self) -> Vec<t3code_desktop_gpui::drafts::StashEntry> {
         if let Some(store) = &self.draft_store {
             store.stashes(&self.environment_scope)
         } else {
             self.attachment_drafts
                 .stashes
                 .get(&self.environment_scope)
-                .map(Vec::as_slice)
+                .cloned()
                 .unwrap_or_default()
         }
     }
@@ -1450,6 +1450,7 @@ impl NativeApp {
 
     /// Sends each queue's next message whose thread finished its turn.
     pub(crate) fn flush_queues(&mut self, cx: &mut Context<Self>) {
+        if self.sessions.selected().is_some() && !self.environment_identity_verified { return; }
         if self.checkout_transition_pending() {
             return;
         }
@@ -1466,6 +1467,7 @@ impl NativeApp {
 
     /// Sends queued message `id` now, ahead of the turn finishing.
     pub(crate) fn send_queued(&mut self, thread_id: &str, id: u64, cx: &mut Context<Self>) {
+        if self.sessions.selected().is_some() && !self.environment_identity_verified { return; }
         if self.checkout_transition_pending() {
             self.report_error(
                 "Finish checkout reconciliation before sending; queued message retained",
@@ -1497,7 +1499,7 @@ impl NativeApp {
         message: queue::QueuedMessage,
         cx: &mut Context<Self>,
     ) {
-        if self.checkout_transition_pending() {
+        if self.checkout_transition_pending() || (self.sessions.selected().is_some() && !self.environment_identity_verified) {
             self.queues.settle(&thread_id, message.id, false);
             cx.notify();
             return;

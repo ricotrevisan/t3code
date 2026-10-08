@@ -56,6 +56,7 @@ mod sidebar_pols;
 mod surfaces_agents;
 mod r14_w_browser;
 mod r14_int_glue;
+mod r15_m_environments;
 
 fn click_connection_settings(cx: &mut VisualTestContext) {
     let settings = cx.debug_bounds("environment-connection-settings").expect("connection settings menu entry");

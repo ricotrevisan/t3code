@@ -101,6 +101,7 @@ async fn r14_a_multi_session_switch_keeps_background_projection_and_receipt_owne
                 id: "p".into(),
                 title: "Office project".into(),
                 workspace_root: "/office".into(),
+                repository_identity: None,
                 default_model_selection: None,
                 scripts: vec![],
             },

@@ -234,6 +234,12 @@ impl Registry {
             Some(incoming)
         }
     }
+    /// Deliver the same validated update to an environment-owned feature entity.
+    /// The returned owner must be checked before applying feature receipts.
+    pub fn apply_with_update(&mut self, incoming: Incoming) -> Option<(Event, Option<Update>)> {
+        let update = incoming.update.as_ref().ok().cloned();
+        self.apply(incoming).map(|event| (event, update))
+    }
     /// Revalidate the stream instance before applying even its phase or error.
     pub fn apply(&mut self, incoming: Incoming) -> Option<Event> {
         let id = incoming.environment_id;

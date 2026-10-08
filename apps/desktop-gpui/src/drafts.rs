@@ -133,11 +133,16 @@ struct Document {
     environments: BTreeMap<String, EnvironmentDrafts>,
 }
 
+#[derive(Clone)]
 pub struct Drafts {
     path: PathBuf,
+    state: std::rc::Rc<std::cell::RefCell<DraftState>>,
+    committed: std::sync::Arc<std::sync::Mutex<u64>>,
+}
+
+struct DraftState {
     document: Document,
     revision: u64,
-    committed: std::sync::Arc<std::sync::Mutex<u64>>,
 }
 
 pub struct Write {
@@ -173,78 +178,107 @@ impl Drafts {
         };
         Ok(Self {
             path,
-            document,
-            revision: 0,
+            state: std::rc::Rc::new(std::cell::RefCell::new(DraftState {
+                document,
+                revision: 0,
+            })),
             committed: Default::default(),
         })
     }
 
     pub fn show_skills_in_slash_menu(&self) -> bool {
-        self.document.show_skills_in_slash_menu.unwrap_or(true)
+        let draft = self.state.borrow();
+
+        draft.document.show_skills_in_slash_menu.unwrap_or(true)
     }
     pub fn set_show_skills_in_slash_menu(&mut self, show: bool) {
-        self.document.show_skills_in_slash_menu = Some(show);
-        self.revision += 1;
+        let mut draft = self.state.borrow_mut();
+
+        draft.document.show_skills_in_slash_menu = Some(show);
+        draft.revision += 1;
     }
 
     pub fn send_shortcut(&self) -> SendShortcut {
-        self.document.send_shortcut
+        let draft = self.state.borrow();
+
+        draft.document.send_shortcut
     }
     pub fn set_send_shortcut(&mut self, shortcut: SendShortcut) {
-        self.document.send_shortcut = shortcut;
-        self.revision += 1;
+        let mut draft = self.state.borrow_mut();
+
+        draft.document.send_shortcut = shortcut;
+        draft.revision += 1;
     }
 
-    pub fn model_preferences(&self, environment: &str) -> &[ModelPreference] {
-        self.document
+    pub fn model_preferences(&self, environment: &str) -> Vec<ModelPreference> {
+        let draft = self.state.borrow();
+
+        draft
+            .document
             .environments
             .get(environment)
-            .map(|state| state.model_preferences.as_slice())
+            .map(|state| state.model_preferences.clone())
             .unwrap_or_default()
     }
     pub fn set_model_preferences(&mut self, environment: &str, preferences: Vec<ModelPreference>) {
-        self.document
+        let mut draft = self.state.borrow_mut();
+
+        draft
+            .document
             .environments
             .entry(environment.into())
             .or_default()
             .model_preferences = preferences;
-        self.revision += 1;
+        draft.revision += 1;
     }
 
     pub fn pending_threads(&self, environment: &str) -> Vec<PendingThread> {
-        self.document
+        let draft = self.state.borrow();
+
+        draft
+            .document
             .environments
             .get(environment)
             .map(|state| state.pending_threads.values().cloned().collect())
             .unwrap_or_default()
     }
-    pub fn put_pending(&mut self, environment: &str, draft: PendingThread) {
-        self.revision += 1;
-        self.document
+    pub fn put_pending(&mut self, environment: &str, pending: PendingThread) {
+        let mut draft = self.state.borrow_mut();
+
+        draft.revision += 1;
+        draft
+            .document
             .environments
             .entry(environment.into())
             .or_default()
             .pending_threads
-            .insert(draft.thread.id.clone(), draft);
+            .insert(pending.thread.id.clone(), pending);
     }
     pub fn remove_pending(&mut self, environment: &str, id: &str) {
-        if let Some(state) = self.document.environments.get_mut(environment)
+        let mut draft = self.state.borrow_mut();
+
+        if let Some(state) = draft.document.environments.get_mut(environment)
             && state.pending_threads.remove(id).is_some()
         {
-            self.revision += 1;
+            draft.revision += 1;
         }
     }
-    pub fn get(&self, environment: &str, thread: &str) -> &str {
-        self.document
+    pub fn get(&self, environment: &str, thread: &str) -> String {
+        let draft = self.state.borrow();
+
+        draft
+            .document
             .environments
             .get(environment)
             .and_then(|e| e.drafts.get(thread))
-            .map(String::as_str)
-            .unwrap_or("")
+            .cloned()
+            .unwrap_or_default()
     }
     pub fn set(&mut self, environment: &str, thread: &str, text: String) {
-        self.revision += 1;
-        let state = self
+        let mut draft = self.state.borrow_mut();
+
+        draft.revision += 1;
+        let state = draft
             .document
             .environments
             .entry(environment.into())
@@ -259,14 +293,17 @@ impl Drafts {
         self.stash_record(environment, StashEntry::new(text, Vec::new()));
     }
     pub fn stash_record(&mut self, environment: &str, record: StashEntry) {
+        let mut draft = self.state.borrow_mut();
+
         if record.prompt.trim().is_empty()
             && record.attachments.is_empty()
             && record.context.is_none()
         {
             return;
         }
-        self.revision += 1;
-        self.document
+        draft.revision += 1;
+        draft
+            .document
             .environments
             .entry(environment.into())
             .or_default()
@@ -274,21 +311,26 @@ impl Drafts {
             .push(record);
     }
     pub fn update_stash(&mut self, environment: &str, record: StashEntry) {
-        if let Some(entry) = self
+        let mut draft = self.state.borrow_mut();
+
+        if let Some(entry) = draft
             .document
             .environments
             .get_mut(environment)
             .and_then(|state| state.stash.iter_mut().find(|entry| entry.id == record.id))
         {
             *entry = record;
-            self.revision += 1;
+            draft.revision += 1;
         }
     }
-    pub fn stashes(&self, environment: &str) -> &[StashEntry] {
-        self.document
+    pub fn stashes(&self, environment: &str) -> Vec<StashEntry> {
+        let draft = self.state.borrow();
+
+        draft
+            .document
             .environments
             .get(environment)
-            .map(|e| e.stash.as_slice())
+            .map(|e| e.stash.clone())
             .unwrap_or_default()
     }
     pub fn contexts(
@@ -296,7 +338,10 @@ impl Drafts {
         environment: &str,
         thread: &str,
     ) -> Vec<crate::draft_context::DraftContextRecord> {
-        self.document
+        let draft = self.state.borrow();
+
+        draft
+            .document
             .environments
             .get(environment)
             .and_then(|s| s.contexts.get(thread))
@@ -309,16 +354,22 @@ impl Drafts {
         thread: &str,
         records: Vec<crate::draft_context::DraftContextRecord>,
     ) {
-        self.document
+        let mut draft = self.state.borrow_mut();
+
+        draft
+            .document
             .environments
             .entry(environment.into())
             .or_default()
             .contexts
             .insert(thread.into(), records);
-        self.revision += 1;
+        draft.revision += 1;
     }
     pub fn resources(&self, environment: &str, thread: &str) -> Vec<serde_json::Value> {
-        self.document
+        let draft = self.state.borrow();
+
+        draft
+            .document
             .environments
             .get(environment)
             .and_then(|state| state.resources.get(thread))
@@ -331,14 +382,16 @@ impl Drafts {
         thread: &str,
         sent: &[serde_json::Value],
     ) {
-        if let Some(state) = self.document.environments.get_mut(environment)
+        let mut draft = self.state.borrow_mut();
+
+        if let Some(state) = draft.document.environments.get_mut(environment)
             && let Some(refs) = state.resources.get_mut(thread)
         {
             refs.retain(|item| !sent.iter().any(|sent| sent["id"] == item["id"]));
             if refs.is_empty() {
                 state.resources.remove(thread);
             }
-            self.revision += 1;
+            draft.revision += 1;
         }
     }
     /// One document revision transfers the stash into durable draft ownership.
@@ -362,7 +415,10 @@ impl Drafts {
             })
             .unwrap_or_default();
         self.set_contexts(environment, thread, records);
-        self.document
+
+        let mut draft = self.state.borrow_mut();
+        draft
+            .document
             .environments
             .get_mut(environment)?
             .resources
@@ -370,20 +426,25 @@ impl Drafts {
         Some(record)
     }
     pub fn take_stash(&mut self, environment: &str, id: &str) -> Option<StashEntry> {
-        let state = self.document.environments.get_mut(environment)?;
+        let mut draft = self.state.borrow_mut();
+
+        let state = draft.document.environments.get_mut(environment)?;
         let index = state.stash.iter().position(|entry| entry.id == id)?;
-        self.revision += 1;
-        Some(state.stash.remove(index))
+        let record = state.stash.remove(index);
+        draft.revision += 1;
+        Some(record)
     }
     pub fn unstash(&mut self, environment: &str) -> Option<String> {
         let id = self.stashes(environment).last()?.id.clone();
         self.take_stash(environment, &id).map(|entry| entry.prompt)
     }
     pub fn write_snapshot(&self) -> io::Result<Write> {
+        let draft = self.state.borrow();
+
         Ok(Write {
             path: self.path.clone(),
-            data: serde_json::to_vec(&self.document).map_err(io::Error::other)?,
-            revision: self.revision,
+            data: serde_json::to_vec(&draft.document).map_err(io::Error::other)?,
+            revision: draft.revision,
             committed: self.committed.clone(),
         })
     }
@@ -443,6 +504,26 @@ pub fn default_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r15_m_shared_draft_writer_keeps_both_environments_and_rejects_old_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let mut office = Drafts::open(path.clone()).unwrap();
+        let mut lab = office.clone();
+        office.set("office", "same-id", "office draft".into());
+        let stale = office.write_snapshot().unwrap();
+        lab.set("lab", "same-id", "lab draft".into());
+        lab.stash_record(
+            "lab",
+            StashEntry::new("later".into(), vec![serde_json::json!({"id":"lab-ref"})]),
+        );
+        office.write_snapshot().unwrap().persist().unwrap();
+        stale.persist().unwrap();
+        let reopened = Drafts::open(path).unwrap();
+        assert_eq!(reopened.get("office", "same-id"), "office draft");
+        assert_eq!(reopened.get("lab", "same-id"), "lab draft");
+        assert_eq!(reopened.stashes("lab")[0].attachments[0]["id"], "lab-ref");
+    }
     #[test]
     fn r13_c_context_draft_stash_restart_preserves_ids_and_scopes() {
         let dir = tempfile::tempdir().unwrap();
@@ -555,7 +636,7 @@ mod tests {
         assert_eq!(entry.context.unwrap()["records"][0]["path"], "src/main.rs");
         assert_eq!(restored.unstash("local").unwrap(), "世界");
         assert_eq!(restored.unstash("local").unwrap(), "old one");
-        assert_eq!(restored.document.version, 2);
+        assert_eq!(restored.state.borrow().document.version, 2);
     }
 
     #[test]

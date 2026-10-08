@@ -161,7 +161,7 @@ impl NativeApp {
                                     button
                                         .dropdown_menu_with_anchor(
                                             Anchor::BottomLeft,
-                                            move |mut menu, _, _| {
+                                            move |mut menu, _, cx| {
                                                 let previous_focus = previous_focus.borrow().clone();
                                                 menu = menu.label("Run on · saved endpoints");
                                                 for (index, (origin, label, enabled)) in
@@ -169,6 +169,8 @@ impl NativeApp {
                                                 {
                                                     let app = app.clone();
                                                     let origin = origin.clone();
+                                                    let phase = app.update(cx, |app, _| app.environment_phase(&origin)).unwrap_or_else(|_| "Offline".into());
+                                                    let label = format!("{label} · {phase}");
                                                     let label = if origin == active {
                                                         format!("{label} · current")
                                                     } else {

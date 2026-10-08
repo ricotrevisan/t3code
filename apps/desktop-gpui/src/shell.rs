@@ -8,6 +8,8 @@ pub struct Project {
     pub title: String,
     pub workspace_root: String,
     #[serde(default)]
+    pub repository_identity: Option<serde_json::Value>,
+    #[serde(default)]
     pub default_model_selection: Option<serde_json::Value>,
     #[serde(default)]
     pub scripts: Vec<serde_json::Value>,
@@ -98,7 +100,7 @@ pub struct Thread {
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub snapshot_sequence: u64,
@@ -128,7 +130,7 @@ fn decode_threads<'de, D: serde::Deserializer<'de>>(
         .collect()
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 // Wire events carry the full thread/project projection; the variant-size lint
 // does not apply to a decoded network message.

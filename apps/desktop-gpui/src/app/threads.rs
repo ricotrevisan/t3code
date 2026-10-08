@@ -322,14 +322,8 @@ impl NativeApp {
             },
             cx,
         );
-        if let Some(sender) = &self.commands
-            && sender
-                .try_send(connection::Command::SelectThread(if pending {
-                    None
-                } else {
-                    Some(id.into())
-                }))
-                .is_err()
+        if self.commands.is_some()
+            && self.send_thread_selection(if pending { None } else { Some(id.into()) }).is_err()
         {
             self.report_error("Connection busy or closed; retry selection", cx);
         }
@@ -353,19 +347,15 @@ impl NativeApp {
             // Its old starting session must not prevent sending that draft again.
             self.detail = thread::ThreadDetail::default();
             self.pending_history_attached = false;
-            if let Some(sender) = &self.commands {
-                let _ = sender.try_send(connection::Command::SelectThread(None));
-            }
+            let _ = self.send_thread_selection(None);
             cx.notify();
             return;
         }
         if self.pending_history_attached || !materialized {
             return;
         }
-        if let Some(sender) = &self.commands
-            && sender
-                .try_send(connection::Command::SelectThread(Some(id.clone())))
-                .is_ok()
+        let id = id.clone();
+        if self.commands.is_some() && self.send_thread_selection(Some(id)).is_ok()
         {
             self.pending_history_attached = true;
             cx.notify();

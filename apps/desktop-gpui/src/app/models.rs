@@ -52,7 +52,7 @@ impl NativeApp {
         cx.notify();
     }
 
-    pub(crate) fn model_preferences(&self) -> &[t3code_desktop_gpui::drafts::ModelPreference] {
+    pub(crate) fn model_preferences(&self) -> Vec<t3code_desktop_gpui::drafts::ModelPreference> {
         self.draft_store
             .as_ref()
             .map(|store| store.model_preferences(&self.environment_scope))
@@ -60,7 +60,7 @@ impl NativeApp {
                 self.composer_state
                     .model_preferences
                     .get(&self.environment_scope)
-                    .map(Vec::as_slice)
+                    .cloned()
                     .unwrap_or_default()
             })
     }
@@ -69,9 +69,9 @@ impl NativeApp {
         &self,
         instance: &str,
         slug: &str,
-    ) -> Option<&t3code_desktop_gpui::drafts::ModelPreference> {
+    ) -> Option<t3code_desktop_gpui::drafts::ModelPreference> {
         self.model_preferences()
-            .iter()
+            .into_iter()
             .find(|entry| entry.instance_id == instance && entry.model == slug)
     }
 
@@ -123,10 +123,10 @@ impl NativeApp {
             .enumerate()
             .filter(|(_, model)| {
                 let preference = self.model_preference(&provider.instance_id, &model.slug);
-                (!preference.is_some_and(|entry| entry.hidden)
+                (!preference.as_ref().is_some_and(|entry| entry.hidden)
                     || self.composer_state.catalog_show_hidden)
                     && (!self.composer_state.catalog_favorites_only
-                        || preference.is_some_and(|entry| entry.favorite))
+                        || preference.as_ref().is_some_and(|entry| entry.favorite))
                     && format!(
                         "{} {} {} {}",
                         provider.label(),

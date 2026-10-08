@@ -150,7 +150,8 @@ impl NativeApp {
         for tag in self.notification_platform.invalidate() {
             cx.dismiss_system_notification(&tag);
         }
-        self.notification_platform.badge(0);
+        self.sync_environment_badge();
+        self.clear_environment_alerts(cx);
     }
 
     pub(crate) fn clear_notifications(&mut self, cx: &mut Context<Self>) {
@@ -263,7 +264,11 @@ impl NativeApp {
         let branch = self.selected_thread_branch();
         self.shell.apply(item)?;
         if synchronized {
-            self.connection_phase = t3code_desktop_gpui::connection::Phase::Ready;
+            self.connection_phase = if self.sessions.selected().is_none() || self.environment_identity_verified {
+                t3code_desktop_gpui::connection::Phase::Ready
+            } else {
+                t3code_desktop_gpui::connection::Phase::Syncing
+            };
         }
         if self.checkout_context() != checkout || self.selected_thread_branch() != branch {
             self.invalidate_checkout_context(cx);
@@ -287,7 +292,8 @@ impl NativeApp {
         let Some(event) = self.notification_tracker.observe(next) else {
             return Ok(());
         };
-        let selected = self.selected_thread.as_deref() == Some(next.id.as_str());
+        let selected = self.environment_is_selected()
+            && self.selected_thread.as_deref() == Some(next.id.as_str());
         let mut preferences = self.notification_preferences;
         preferences.mode = self.notification_platform.effect_mode(preferences.mode);
         let route = notifications::decision(preferences, selected, self.window_active);
@@ -319,8 +325,7 @@ impl NativeApp {
                     if outcome == DeliveryOutcome::Accepted && valid {
                         let tag = notifications::tag(&scope, &thread_id);
                         if app.notification_badge.insert(tag) {
-                            app.notification_platform
-                                .badge(app.notification_badge.len());
+                            app.sync_environment_badge();
                         }
                     } else {
                         cx.dismiss_system_notification(&delivery.tag);
@@ -345,7 +350,11 @@ impl NativeApp {
                 notifications::Event::ThreadFailed => notifications::ToastKind::Error,
                 _ => notifications::ToastKind::Info,
             };
-            self.push_toast(kind, format!("{} · {title}", event.title()), Some(id), cx);
+            if self.environment_is_selected() {
+                self.push_toast(kind, format!("{} · {title}", event.title()), Some(id), cx);
+            } else {
+                self.background_environment_alert(&id, format!("{} · {title}", event.title()), cx);
+            }
         }
         Ok(())
     }

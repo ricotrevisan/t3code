@@ -85,11 +85,13 @@ impl Projection {
 }
 impl NativeApp {
     pub(crate) fn accept_config_snapshot(&mut self, value: Value, cx: &mut Context<Self>) {
+        if !self.verify_environment_config(&value, cx) { return; }
         if self.server_config.seed(self.generation, value) {
             self.publish_server_config(cx);
         }
     }
     pub(crate) fn apply_server_config_event(&mut self, event: Value, cx: &mut Context<Self>) {
+        if event["type"] == "snapshot" && !self.verify_environment_config(&event["config"], cx) { return; }
         if !self.server_config.apply(self.generation, &event) {
             return;
         }
@@ -125,6 +127,10 @@ impl NativeApp {
                 provider
             })
             .collect();
+        if self.sessions.selected().is_some() && self.environment_identity_verified {
+            self.flush_queues(cx);
+            self.publish_environment_phase(cx);
+        }
         cx.notify();
     }
 }

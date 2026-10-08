@@ -149,6 +149,8 @@ mod settings_keybindings;
 mod settings_scopes;
 mod settings_clone;
 mod settings_environments;
+mod environment_pages;
+mod environment_sidebar;
 mod settings_provider;
 mod settings_provider_interaction;
 mod settings_palette;
@@ -167,6 +169,11 @@ fn single_line_input(window: &mut Window, cx: &mut Context<InputState>) -> Input
 }
 
 struct NativeApp {
+    environment_page_id: gpui_kit::EntityId,
+    environment_hub: std::rc::Rc<std::cell::RefCell<environment_pages::Hub>>,
+    environment_pages: Vec<Entity<NativeApp>>,
+    sessions: t3code_desktop_gpui::connection_sessions::Registry,
+    environment_identity_verified: bool,
     focus: FocusHandle,
     palette_open: bool,
     palette_query: Entity<InputState>,
@@ -407,6 +414,10 @@ impl NativeApp {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>, auto_connect: bool) -> Self {
+        Self::new_scoped(window, cx, auto_connect, true)
+    }
+
+    fn new_scoped(window: &mut Window, cx: &mut Context<Self>, auto_connect: bool, notification_handler: bool) -> Self {
         theme::observe(window, cx);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -595,7 +606,7 @@ impl NativeApp {
         }));
         subscriptions.push(cx.observe_window_activation(window, |app, window, cx| {
             app.window_active = window.is_window_active();
-            if app.window_active {
+            if app.window_active && app.environment_is_selected() {
                 app.clear_notification_badge(cx);
                 app.refresh_notification_authorization(cx);
             }
@@ -607,6 +618,11 @@ impl NativeApp {
             }
         }));
         let mut app = Self {
+            environment_page_id: cx.entity_id(),
+            environment_hub: std::rc::Rc::new(std::cell::RefCell::new(environment_pages::Hub::new(cx.entity().downgrade()))),
+            environment_pages: Vec::new(),
+            sessions: Default::default(),
+            environment_identity_verified: false,
             focus: cx.focus_handle(),
             palette_open: false,
             palette_query,
@@ -819,16 +835,17 @@ impl NativeApp {
         };
         let entity = cx.entity().downgrade();
         let handle = window.window_handle();
-        cx.on_system_notification_response(move |response, cx| {
+        if notification_handler { cx.on_system_notification_response(move |response, cx| {
             let _ = handle.update(cx, |_, window, cx| {
                 entity.update(cx, |app, cx| {
-                    app.open_notified_thread(&response.tag, window, cx)
+                    app.route_environment_notification(&response.tag, window, cx)
                 })
             });
         });
+        }
         // Keyboard shortcuts dispatch along the focus path, so an unfocused window
         // has none; start in the composer, where the user types first anyway.
-        app.composer.update(cx, |input, cx| input.focus(window, cx));
+        if notification_handler { app.composer.update(cx, |input, cx| input.focus(window, cx)); }
         if auto_connect {
             let state = window_state::load();
             app.context_meter_hidden = state.context_meter_hidden;
@@ -848,7 +865,15 @@ impl NativeApp {
                         .into(),
                 ),
             }
-            app.connect(cx);
+            let saved = app.environment_choices(cx);
+            let initial_saved = saved.iter().find(|(origin, _, enabled)| *enabled && origin == &app.environment_scope)
+                .or_else(|| if std::env::var_os("T3_NATIVE_SERVER").is_none() { saved.iter().find(|(_, _, enabled)| *enabled) } else { None });
+            if let Some((origin, _, _)) = initial_saved {
+                app.environment_scope = origin.clone();
+                app.server.update(cx, |input, cx| input.set_value(origin.clone(), window, cx));
+                if std::env::var_os("T3_NATIVE_ACCESS_TOKEN").is_some() && std::env::var("T3_NATIVE_SERVER").ok().and_then(|base| auth::origin(&base).ok()).as_ref() == Some(origin) { app.connect(cx); }
+                else { app.credential_operation(credentials::Operation::Load, cx); }
+            } else { app.connect(cx); }
             app.refresh_notification_authorization(cx);
         }
         app
@@ -879,6 +904,10 @@ impl Drop for NativeApp {
 
 impl Render for NativeApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_environment_pages(_window, cx);
+        if let Some(page) = self.presented_environment(cx) {
+            return div().size_full().child(page).into_any_element();
+        }
         self.clamp_terminal_height(_window);
         self.terminal_synchronize(cx);
         self.sync_git_status(cx);
@@ -1065,7 +1094,7 @@ impl Render for NativeApp {
                                             ..px(window_state::SIDEBAR_WIDTH.2),
                                     )
                                     .flex_none()
-                                    .child(self.render_sidebar(cx).into_any_element()),
+                                    .child(self.render_environment_sidebar(cx)),
                             )
                             .child(resizable_panel().size_range(px(640.)..px(f32::MAX)).child(workspace)),
                     )
@@ -1074,6 +1103,7 @@ impl Render for NativeApp {
                 }
             }))
             .children(self.render_overlay_layer(cx))
+            .into_any_element()
     }
 }
 

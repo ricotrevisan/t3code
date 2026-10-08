@@ -29,7 +29,12 @@ Keychain operations run on an ordered background worker, so forgetting cannot be
 undone by an earlier delayed save. Plain HTTP is accepted only for loopback;
 remote origins require HTTPS. Pairing binds the credential to a DPoP key; remembering
 it retains both the key and access token in Keychain. Previously remembered bearer
-credentials remain readable. Relay pairing is not implemented yet.
+credentials remain readable. Save endpoints in Connection settings, then use the
+status-bar switcher to select one. Enabled saved endpoints with remembered credentials
+stay connected in the background; switching retains each environment’s work. With
+multiple environments, the sidebar’s All environments view can group by machine or
+merge matching repositories. Save or discard dirty file edits before switching.
+Relay pairing is not implemented yet.
 
 For development, `T3_NATIVE_SERVER` and `T3_NATIVE_ACCESS_TOKEN` optionally supply
 an existing bearer **access token**, scoped to that server origin. Do not put
@@ -82,10 +87,9 @@ the final edit. Environment origins and thread IDs isolate drafts.
   the same confirmation as chat controls. Custom keybinding configuration and
   the complete current-client command catalog still require parity work.
 
-Important gaps include full connection-management UI and relay/DPoP,
-multi-environment navigation, queue management, attachments/context, approvals,
-full Markdown equivalence, plan execution, terminal rendering, source-control
-UI, settings/palette/keybinding parity and embedded browser functionality.
+Important gaps include relay pairing, client revocation and other advanced
+environment management, device previews and recording, SnapShot capture, in-app
+updates, and full Markdown equivalence.
 Unimplemented thread events fail closed rather than silently showing stale state.
 The existing server remains authoritative for provider execution, orchestration,
 durable history and checkpoints. This port does not embed Electron.

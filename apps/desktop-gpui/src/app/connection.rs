@@ -60,6 +60,10 @@ impl NativeApp {
         self.action_runs_connection_lost();
         self.clear_notifications(cx);
         self.connection_task = None;
+        self.environment_identity_verified = false;
+        if let Some(id) = self.sessions.selected_id().map(str::to_owned) {
+            self.sessions.remove(&id);
+        }
         self.pairing_task = None;
         self.credential_task = None;
         self.commands = None;
@@ -285,228 +289,7 @@ impl NativeApp {
                     self.environment_scope = scope;
                     self.restore_attachment_draft();
                     let session = connection::start_session(options);
-                    self.commands = Some(session.commands);
-                    self.apply_connection_phase(connection::Phase::Connecting, cx);
-                    let generation = self.generation;
-                    self.connection_task = Some(cx.spawn(async move |entity, cx| {
-                        while let Ok(update) = session.updates.recv().await {
-                            let keep_running = entity.update(cx, |app, cx| {
-                                // A queued update must not mutate a newly selected connection.
-                                if app.generation != generation {
-                                    return false;
-                                }
-                                let result = match update {
-                                    connection::Update::Phase(phase) => {
-                                        app.apply_connection_phase(phase, cx);
-                                        Ok(())
-                                    }
-                                    connection::Update::Resynchronizing => {
-                                        app.connection_phase = connection::Phase::Syncing;
-                                        app.action_runs_connection_lost();
-                                        app.clear_checkout_stops();
-                                        app.clear_queue_subscriptions();
-                                        app.clear_notifications(cx);
-                                        app.shell = shell::Shell::default();
-                                        app.archived_shell = shell::Shell::default();
-                                        app.action_task = None;
-                                        app.action_busy = false;
-                                        app.project_settings = None;
-                                        app.action_edit_id = None;
-                                        app.confirm_action_delete = None;
-                                        app.detail = thread::ThreadDetail::default();
-                                        app.snooze_wake = None;
-                                        app.clone_progress.clear();
-                                        app.setup_progress = None;
-                                        app.pending_history_attached = false;
-                                        app.report_progress(
-                                            "Reconnecting — history is being synchronized",
-                                            cx,
-                                        );
-                                        Ok(())
-                                    }
-                                    connection::Update::Error(error) => {
-                                        app.report_error(error, cx);
-                                        Ok(())
-                                    }
-                                    connection::Update::Status(status) => {
-                                        app.set_status(status, cx);
-                                        Ok(())
-                                    }
-                                    connection::Update::Shell(item) => {
-                                        let was_synchronized = app.shell.synchronized;
-                                        let result =
-                                            app.apply_shell_item(*item, cx).map_err(str::to_owned);
-                                        app.flush_queues(cx);
-                                        app.attach_created_pending(cx);
-                                        app.schedule_snooze_wake(cx);
-                                        if app.shell.synchronized && !was_synchronized {
-                                            app.action_runs_synchronized(cx);
-                                            app.perform("server.getConfig", json!({}), None, cx);
-                                            app.enqueue_subscription(
-                                                connection::Command::Subscribe {
-                                                    key: "server-config".into(),
-                                                    tag: "subscribeServerConfig".into(),
-                                                    payload: json!({"usageLimitSources":true}),
-                                                },
-                                                cx,
-                                            );
-                                            if app.inspector_section
-                                                == Some(InspectorSection::Clone)
-                                            {
-                                                app.enqueue_subscription(
-                                                    connection::Command::Subscribe {
-                                                        key: "project-clones".into(),
-                                                        tag: "subscribeProjectClones".into(),
-                                                        payload: json!({}),
-                                                    },
-                                                    cx,
-                                                );
-                                            }
-                                        }
-                                        if app.shell.synchronized {
-                                            app.set_status("Connected · synchronized", cx);
-                                        }
-                                        result
-                                    }
-                                    connection::Update::Subscription { key, item } => {
-                                        if key.starts_with("header-vcs:") {
-                                            app.apply_git_status(&key, item, cx);
-                                            Ok(())
-                                        } else if key.starts_with("checkout-stop-") {
-                                            app.apply_checkout_stop_subscription(&key, item);
-                                            Ok(())
-                                        } else if key.starts_with("queue-detail:") {
-                                            app.apply_queue_subscription(&key, item, cx)
-                                        } else if key.starts_with("drawer-") {
-                                            app.terminal_update(&key, item, cx);
-                                            Ok(())
-                                        } else if key.starts_with("action-") {
-                                            app.action_run_update(&key, item, cx);
-                                            Ok(())
-                                        } else if let Some(instance) = key.strip_prefix("auth:") {
-                                            if app.auth_state.as_ref().is_some_and(|state| {
-                                                state["instanceId"] == instance
-                                            }) {
-                                                match item {
-                                                    Ok(value)
-                                                        if value["instanceId"] == instance =>
-                                                    {
-                                                        app.accept_provider_auth(value, false, cx)
-                                                    }
-                                                    Ok(_) => app.report_error(
-                                                        "Invalid authentication state",
-                                                        cx,
-                                                    ),
-                                                    Err(error) => app.report_error(error, cx),
-                                                }
-                                            }
-                                            Ok(())
-                                        } else if key == "server-config" {
-                                            match item {
-                                                Ok(value) => {
-                                                    app.apply_server_config_event(value, cx);
-                                                    Ok(())
-                                                }
-                                                Err(error) => {
-                                                    app.report_error(error, cx);
-                                                    Ok(())
-                                                }
-                                            }
-                                        } else if key == "project-clones"
-                                            && app.inspector_section
-                                                == Some(InspectorSection::Clone)
-                                        {
-                                            match item {
-                                                Ok(value) => {
-                                                    let running: Vec<String> = app
-                                                        .clone_progress
-                                                        .iter()
-                                                        .filter(|clone| clone.phase == "running")
-                                                        .map(|clone| clone.project_id.clone())
-                                                        .collect();
-                                                    let result = workspaces::apply_clones(
-                                                        &mut app.clone_progress,
-                                                        value,
-                                                    );
-                                                    if app.clone_progress.iter().any(|clone| {
-                                                        clone.phase == "done"
-                                                            && running.contains(&clone.project_id)
-                                                    }) {
-                                                        app.report_success("Repository cloned", cx);
-                                                    }
-                                                    result
-                                                }
-                                                Err(error) => {
-                                                    app.report_error(error, cx);
-                                                    app.clone_progress.clear();
-                                                    Ok(())
-                                                }
-                                            }
-                                        } else if key == "worktree-setup" {
-                                            match item {
-                                                Ok(value) => {
-                                                    if let Some(id) = &app.selected_thread {
-                                                        workspaces::apply_setup(
-                                                            &mut app.setup_progress,
-                                                            id,
-                                                            value,
-                                                        )
-                                                    } else {
-                                                        Ok(())
-                                                    }
-                                                }
-                                                Err(error) => {
-                                                    app.report_error(error, cx);
-                                                    Ok(())
-                                                }
-                                            }
-                                        } else {
-                                            Ok(())
-                                        }
-                                    }
-                                    connection::Update::Thread { thread_id, item } => {
-                                        if app.selected_thread.as_ref() == Some(&thread_id) {
-                                            app.apply_thread_update(&thread_id, item, cx)
-                                        } else {
-                                            Ok(())
-                                        }
-                                    }
-                                };
-                                if let Err(error) = result {
-                                    app.clear_notifications(cx);
-                                    app.report_error(
-                                        format!("Projection failed — reconnect required: {error}"),
-                                        cx,
-                                    );
-                                    app.action_runs_connection_lost();
-                                    app.clear_checkout_stops();
-                                    app.clear_queue_subscriptions();
-                                    app.commands = None;
-                                    app.connection_phase = connection::Phase::Error(error);
-                                    cx.notify();
-                                    return false;
-                                }
-                                cx.notify();
-                                true
-                            });
-                            if !matches!(keep_running, Ok(true)) {
-                                break;
-                            }
-                        }
-                        let _ = entity.update(cx, |app, cx| {
-                            if app.generation == generation {
-                                app.clear_checkout_stops();
-                                app.action_runs_connection_lost();
-                                app.clear_queue_subscriptions();
-                                app.clear_notifications(cx);
-                                app.commands = None;
-                                if !matches!(app.connection_phase, connection::Phase::Error(_)) {
-                                    app.connection_phase = connection::Phase::Offline;
-                                }
-                                cx.notify();
-                            }
-                        });
-                    }));
+                    self.start_owned_session(session, cx);
                 }
                 Err(message) => {
                     self.apply_connection_phase(connection::Phase::Error(message.into()), cx)
@@ -514,6 +297,172 @@ impl NativeApp {
             }
         }
         cx.notify();
+    }
+
+    pub(crate) fn apply_connection_update(
+        &mut self,
+        update: connection::Update,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        match update {
+            connection::Update::Phase(phase) => {
+                self.apply_connection_phase(phase, cx);
+                Ok(())
+            }
+            connection::Update::Resynchronizing => {
+                self.connection_phase = connection::Phase::Syncing;
+                self.action_runs_connection_lost();
+                self.clear_checkout_stops();
+                self.clear_queue_subscriptions();
+                self.clear_notifications(cx);
+                self.shell = shell::Shell::default();
+                self.archived_shell = shell::Shell::default();
+                self.action_task = None;
+                self.action_busy = false;
+                self.project_settings = None;
+                self.action_edit_id = None;
+                self.confirm_action_delete = None;
+                self.detail = thread::ThreadDetail::default();
+                self.snooze_wake = None;
+                self.clone_progress.clear();
+                self.setup_progress = None;
+                self.pending_history_attached = false;
+                self.report_progress("Reconnecting — history is being synchronized", cx);
+                Ok(())
+            }
+            connection::Update::Error(error) => {
+                self.report_error(error, cx);
+                Ok(())
+            }
+            connection::Update::Status(status) => {
+                self.set_status(status, cx);
+                Ok(())
+            }
+            connection::Update::Shell(item) => {
+                let was_synchronized = self.shell.synchronized;
+                let result = self.apply_shell_item(*item, cx).map_err(str::to_owned);
+                self.flush_queues(cx);
+                self.attach_created_pending(cx);
+                self.schedule_snooze_wake(cx);
+                if self.shell.synchronized && !was_synchronized {
+                    self.action_runs_synchronized(cx);
+                    self.perform("server.getConfig", json!({}), None, cx);
+                    self.enqueue_subscription(
+                        connection::Command::Subscribe {
+                            key: "server-config".into(),
+                            tag: "subscribeServerConfig".into(),
+                            payload: json!({"usageLimitSources":true}),
+                        },
+                        cx,
+                    );
+                    if self.inspector_section == Some(InspectorSection::Clone) {
+                        self.enqueue_subscription(
+                            connection::Command::Subscribe {
+                                key: "project-clones".into(),
+                                tag: "subscribeProjectClones".into(),
+                                payload: json!({}),
+                            },
+                            cx,
+                        );
+                    }
+                }
+                if self.shell.synchronized {
+                    self.set_status("Connected · synchronized", cx);
+                }
+                result
+            }
+            connection::Update::Subscription { key, item } => {
+                if key.starts_with("header-vcs:") {
+                    self.apply_git_status(&key, item, cx);
+                    Ok(())
+                } else if key.starts_with("checkout-stop-") {
+                    self.apply_checkout_stop_subscription(&key, item);
+                    Ok(())
+                } else if key.starts_with("queue-detail:") {
+                    self.apply_queue_subscription(&key, item, cx)
+                } else if key.starts_with("drawer-") {
+                    self.terminal_update(&key, item, cx);
+                    Ok(())
+                } else if key.starts_with("action-") {
+                    self.action_run_update(&key, item, cx);
+                    Ok(())
+                } else if let Some(instance) = key.strip_prefix("auth:") {
+                    if self
+                        .auth_state
+                        .as_ref()
+                        .is_some_and(|state| state["instanceId"] == instance)
+                    {
+                        match item {
+                            Ok(value) if value["instanceId"] == instance => {
+                                self.accept_provider_auth(value, false, cx)
+                            }
+                            Ok(_) => self.report_error("Invalid authentication state", cx),
+                            Err(error) => self.report_error(error, cx),
+                        }
+                    }
+                    Ok(())
+                } else if key == "server-config" {
+                    match item {
+                        Ok(value) => {
+                            self.apply_server_config_event(value, cx);
+                            Ok(())
+                        }
+                        Err(error) => {
+                            self.report_error(error, cx);
+                            Ok(())
+                        }
+                    }
+                } else if key == "project-clones"
+                    && self.inspector_section == Some(InspectorSection::Clone)
+                {
+                    match item {
+                        Ok(value) => {
+                            let running: Vec<String> = self
+                                .clone_progress
+                                .iter()
+                                .filter(|clone| clone.phase == "running")
+                                .map(|clone| clone.project_id.clone())
+                                .collect();
+                            let result = workspaces::apply_clones(&mut self.clone_progress, value);
+                            if self.clone_progress.iter().any(|clone| {
+                                clone.phase == "done" && running.contains(&clone.project_id)
+                            }) {
+                                self.report_success("Repository cloned", cx);
+                            }
+                            result
+                        }
+                        Err(error) => {
+                            self.report_error(error, cx);
+                            self.clone_progress.clear();
+                            Ok(())
+                        }
+                    }
+                } else if key == "worktree-setup" {
+                    match item {
+                        Ok(value) => {
+                            if let Some(id) = &self.selected_thread {
+                                workspaces::apply_setup(&mut self.setup_progress, id, value)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        Err(error) => {
+                            self.report_error(error, cx);
+                            Ok(())
+                        }
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            connection::Update::Thread { thread_id, item } => {
+                if self.selected_thread.as_ref() == Some(&thread_id) {
+                    self.apply_thread_update(&thread_id, item, cx)
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 
     pub(crate) fn perform(
@@ -547,7 +496,9 @@ impl NativeApp {
         } else {
             Vec::new()
         };
-        let sent_context = sent_prompt.as_ref().and_then(|_| payload["message"].get("context").cloned());
+        let sent_context = sent_prompt
+            .as_ref()
+            .and_then(|_| payload["message"].get("context").cloned());
         let reverting = payload["type"] == "thread.checkpoint.revert";
         self.pending_actions += 1;
         self.report_progress("Waiting for server receipt…", cx);
@@ -599,11 +550,8 @@ impl NativeApp {
                                 store.remove_pending(&app.environment_scope, id);
                             }
                             app.schedule_draft_save(cx);
-                            if app.selected_thread.as_ref() == Some(id)
-                                && let Some(sender) = &app.commands
-                            {
-                                let _ = sender
-                                    .try_send(connection::Command::SelectThread(Some(id.clone())));
+                            if app.selected_thread.as_ref() == Some(id) {
+                                let _ = app.send_thread_selection(Some(id.clone()));
                             }
                         }
                         if tag == "projectClone.start" {

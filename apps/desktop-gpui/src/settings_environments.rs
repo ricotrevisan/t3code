@@ -8,7 +8,7 @@ use gpui_kit::component::{
 use gpui_kit::{App, Context, Global, Window, div, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use t3code_desktop_gpui::{auth, credentials};
+use t3code_desktop_gpui::auth;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Environment {
@@ -172,6 +172,7 @@ impl NativeApp {
             return false;
         }
         cx.global_mut::<State>().saved = saved;
+        self.notify_environment_root(cx);
         cx.notify();
         true
     }
@@ -218,14 +219,7 @@ impl NativeApp {
         if !self.can_change_checkout(cx) {
             return;
         }
-        self.disconnect(cx);
-        self.access = None;
-        self.use_dev_credential = false;
-        self.server
-            .update(cx, |input, cx| input.set_value(origin, window, cx));
-        self.pairing
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.credential_operation(credentials::Operation::Load, cx);
+        self.present_environment_page(&origin, window, cx);
     }
     pub(crate) fn render_saved_environments(
         &self,
@@ -254,10 +248,13 @@ impl NativeApp {
                     .child(div().flex().items_center().gap_1()
                         .child(Switch::new(("environment-enabled", index)).label("Enabled").checked(entry.enabled).small()
                             .on_click(cx.listener(move |app, enabled: &bool, _, cx| {
-                                if !*enabled && active && !app.can_change_checkout(cx) { return; }
+                                if !*enabled && !app.can_retire_environment(&toggle, cx) { return; }
                                 let mut saved = cx.global::<State>().saved.clone();
                                 if let Some(entry) = saved.environments.iter_mut().find(|e| e.origin == toggle) { entry.enabled = *enabled; }
-                                if app.persist_environments(saved, cx) && !*enabled && active { app.disconnect(cx); }
+                                if app.persist_environments(saved, cx) {
+                                    if !*enabled { app.retire_environment_page(&toggle, cx); }
+                                    else { app.resume_environment_page(&toggle, cx); }
+                                }
                             })))
                         .child(Button::new(("environment-switch", index)).label("Switch").secondary().small().disabled(!entry.enabled || active)
                             .on_click(cx.listener(move |app, _, window, cx| app.switch_environment(&switch, window, cx))))
@@ -269,11 +266,11 @@ impl NativeApp {
                             })))
                         .child(Button::new(("environment-forget", index)).label("Forget entry").ghost().small()
                             .on_click(cx.listener(move |app, _, _, cx| {
-                                if active && !app.can_change_checkout(cx) { return; }
+                                if !app.can_retire_environment(&forget, cx) { return; }
                                 let mut saved = cx.global::<State>().saved.clone();
                                 saved.environments.retain(|e| e.origin != forget);
                                 if app.persist_environments(saved, cx) {
-                                    if active { app.disconnect(cx); }
+                                    app.retire_environment_page(&forget, cx);
                                     if cx.global::<State>().editing.as_ref() == Some(&forget) { cx.global_mut::<State>().editing = None; }
                                 }
                             }))))

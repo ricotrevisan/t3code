@@ -7,6 +7,7 @@ use t3code_desktop_gpui::{connection, notifications};
 impl NativeApp {
     pub(crate) fn connection_ready(&self) -> bool {
         self.connection_phase.ready() && self.shell.synchronized && self.commands.is_some()
+            && (self.sessions.selected().is_none() || self.environment_identity_verified)
     }
 
     pub(crate) fn connection_state_text(&self) -> String {
@@ -51,7 +52,10 @@ impl NativeApp {
         } else {
             self.report_progress(phase.label(), cx);
         }
-        self.connection_phase = phase;
+        self.connection_phase = if phase.ready() && self.sessions.selected().is_some() && !self.environment_identity_verified {
+            connection::Phase::Syncing
+        } else { phase };
+        self.publish_environment_phase(cx);
         cx.notify();
     }
 

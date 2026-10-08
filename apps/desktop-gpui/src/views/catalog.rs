@@ -204,11 +204,11 @@ impl NativeApp {
                                     )))
                                     .child(Button::new(gpui_kit::SharedString::from(format!("catalog-favorite-{}-{index}", provider.instance_id)))
                                         .debug_selector({ let instance = provider.instance_id.clone(); move || format!("catalog-favorite-{instance}-{index}") })
-                                        .ghost().small().label(if preference.is_some_and(|entry| entry.favorite) { "Unfavorite" } else { "Favorite" })
+                                        .ghost().small().label(if preference.as_ref().is_some_and(|entry| entry.favorite) { "Unfavorite" } else { "Favorite" })
                                         .on_click(cx.listener(move |app, _, _, cx| app.toggle_model_preference(&favorite_instance, &favorite_slug, true, cx))))
                                     .child(Button::new(gpui_kit::SharedString::from(format!("catalog-hide-{}-{index}", provider.instance_id)))
                                         .debug_selector({ let instance = provider.instance_id.clone(); move || format!("catalog-hide-{instance}-{index}") })
-                                        .ghost().small().label(if preference.is_some_and(|entry| entry.hidden) { "Unhide" } else { "Hide" })
+                                        .ghost().small().label(if preference.as_ref().is_some_and(|entry| entry.hidden) { "Unhide" } else { "Hide" })
                                         .on_click(cx.listener(move |app, _, _, cx| app.toggle_model_preference(&hidden_instance, &hidden_slug, false, cx))))
                                 }),
                         )
