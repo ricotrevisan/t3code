@@ -2340,6 +2340,7 @@ const makeWsRpcLayer = (
               return Stream.concat(
                 Stream.make({
                   kind: "snapshot" as const,
+                  supportsCorrelatedSessionStops: true as const,
                   snapshot: projectThreadDetailSnapshot(
                     snapshot.value,
                     input.reasoningMessages === true,

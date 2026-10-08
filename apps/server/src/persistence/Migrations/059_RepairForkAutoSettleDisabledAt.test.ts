@@ -30,7 +30,9 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
           INSERT INTO projection_threads (thread_id, project_id, title, runtime_mode, created_at, updated_at)
           VALUES ('historical-thread', 'project', 'Existing thread', 'full-access', ${now}, ${now})
         `;
-        assert.deepEqual(yield* runMigrations(), [[59, "RepairForkAutoSettleDisabledAt"]]);
+        assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 59 }), [
+          [59, "RepairForkAutoSettleDisabledAt"],
+        ]);
         const rows = yield* sql<{ readonly autoSettleDisabledAt: string | null }>`
           SELECT auto_settle_disabled_at AS "autoSettleDisabledAt"
           FROM projection_threads WHERE thread_id = 'historical-thread'
@@ -45,7 +47,7 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
         `,
           [{ autoSettleDisabledAt: now }],
         );
-        assert.deepEqual(yield* runMigrations(), []);
+        assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 59 }), []);
       }),
     );
   },
@@ -63,7 +65,9 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
           INSERT INTO projection_threads (thread_id, project_id, title, runtime_mode, created_at, updated_at, auto_settle_disabled_at)
           VALUES ('upstream-thread', 'project', 'Existing thread', 'full-access', ${now}, ${now}, ${now})
         `;
-        assert.deepEqual(yield* runMigrations(), [[59, "RepairForkAutoSettleDisabledAt"]]);
+        assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 59 }), [
+          [59, "RepairForkAutoSettleDisabledAt"],
+        ]);
         assert.deepEqual(
           yield* sql`
           SELECT auto_settle_disabled_at AS "autoSettleDisabledAt"

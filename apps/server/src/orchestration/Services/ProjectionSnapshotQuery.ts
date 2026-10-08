@@ -251,9 +251,10 @@ export interface ProjectionSnapshotQueryShape {
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
 
-  /** Read the active thread and session facts used to ingest provider events. */
+  /** Read thread/session facts; archived, non-deleted threads are opt-in for stops. */
   readonly getThreadRuntimeContext: (
     threadId: ThreadId,
+    options?: { readonly includeArchived?: boolean },
   ) => Effect.Effect<
     Option.Option<
       Pick<OrchestrationThreadShell, "id" | "projectId" | "title" | "titleState" | "session">

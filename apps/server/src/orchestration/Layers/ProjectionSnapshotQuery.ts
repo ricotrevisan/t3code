@@ -150,6 +150,7 @@ const ProjectionThreadActivityIdRowSchema = Schema.Struct({
 const projectionThreadSessionDbFields = {
   threadId: ProjectionThreadSession.fields.threadId,
   status: ProjectionThreadSession.fields.status,
+  stopCommandId: ProjectionThreadSession.fields.stopCommandId,
   providerName: ProjectionThreadSession.fields.providerName,
   providerInstanceId: ProjectionThreadSession.fields.providerInstanceId,
   runtimeMode: ProjectionThreadSession.fields.runtimeMode,
@@ -411,6 +412,7 @@ function mapSessionRow(
   return {
     threadId: row.threadId,
     status: row.status,
+    stopCommandId: row.stopCommandId,
     providerName: row.providerName,
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
     ...(row.adapterPackageId !== null
@@ -949,6 +951,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
+          stop_command_id AS "stopCommandId",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
         ORDER BY thread_id ASC
@@ -973,6 +976,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
+          sessions.stop_command_id AS "stopCommandId",
           sessions.updated_at AS "updatedAt"
         FROM projection_thread_sessions sessions
         INNER JOIN projection_threads threads
@@ -1002,6 +1006,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
+          sessions.stop_command_id AS "stopCommandId",
           sessions.updated_at AS "updatedAt"
         FROM projection_thread_sessions sessions
         INNER JOIN projection_threads threads
@@ -1378,9 +1383,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const getThreadRuntimeContextRow = SqlSchema.findOneOption({
-    Request: ThreadIdLookupInput,
+    Request: Schema.Struct({ threadId: ThreadId, includeArchived: Schema.Boolean }),
     Result: ProjectionThreadRuntimeContextDbRowSchema,
-    execute: ({ threadId }) =>
+    execute: ({ threadId, includeArchived }) =>
       sql`
         SELECT
           threads.thread_id AS id,
@@ -1397,13 +1402,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
+          sessions.stop_command_id AS "stopCommandId",
           sessions.updated_at AS "updatedAt"
         FROM projection_threads AS threads
         LEFT JOIN projection_thread_sessions AS sessions
           ON sessions.thread_id = threads.thread_id
         WHERE threads.thread_id = ${threadId}
           AND threads.deleted_at IS NULL
-          AND threads.archived_at IS NULL
+          AND (${includeArchived ? 1 : 0} = 1 OR threads.archived_at IS NULL)
         LIMIT 1
       `.pipe(
         Effect.map((rows) =>
@@ -1718,6 +1724,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
+          stop_command_id AS "stopCommandId",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
         WHERE thread_id = ${threadId}
@@ -3390,8 +3397,11 @@ pending_approval_requests AS (
     });
 
   const getThreadRuntimeContext: ProjectionSnapshotQueryShape["getThreadRuntimeContext"] =
-    Effect.fn("ProjectionSnapshotQuery.getThreadRuntimeContext")(function* (threadId) {
-      const context = yield* getThreadRuntimeContextRow({ threadId }).pipe(
+    Effect.fn("ProjectionSnapshotQuery.getThreadRuntimeContext")(function* (threadId, options) {
+      const context = yield* getThreadRuntimeContextRow({
+        threadId,
+        includeArchived: options?.includeArchived === true,
+      }).pipe(
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
             "ProjectionSnapshotQuery.getThreadRuntimeContext:query",

@@ -613,6 +613,8 @@ export type OrchestrationSessionStatus = typeof OrchestrationSessionStatus.Type;
 
 export const OrchestrationSession = Schema.Struct({
   threadId: ThreadId,
+  // Completion receipt for the stop request, not the session-set command that publishes it.
+  stopCommandId: Schema.optional(Schema.NullOr(CommandId)),
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
@@ -2214,6 +2216,7 @@ export const OrchestrationThreadStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationThreadDetailSnapshot,
+    supportsCorrelatedSessionStops: Schema.optional(Schema.Literal(true)),
   }),
   Schema.Struct({
     kind: Schema.Literal("event"),

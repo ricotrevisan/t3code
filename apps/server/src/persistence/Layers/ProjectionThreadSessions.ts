@@ -24,6 +24,7 @@ import {
 const projectionThreadSessionDbFields = {
   threadId: ProjectionThreadSession.fields.threadId,
   status: ProjectionThreadSession.fields.status,
+  stopCommandId: ProjectionThreadSession.fields.stopCommandId,
   providerName: ProjectionThreadSession.fields.providerName,
   providerInstanceId: ProjectionThreadSession.fields.providerInstanceId,
   runtimeMode: ProjectionThreadSession.fields.runtimeMode,
@@ -52,6 +53,7 @@ const toProjectionThreadSession = (
 ): ProjectionThreadSession => ({
   threadId: row.threadId,
   status: row.status,
+  stopCommandId: row.stopCommandId,
   providerName: row.providerName,
   providerInstanceId: row.providerInstanceId,
   ...(row.adapterPackageId !== null
@@ -87,6 +89,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           runtime_mode,
           active_turn_id,
           last_error,
+          stop_command_id,
           updated_at
         )
         VALUES (
@@ -100,6 +103,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           ${row.runtimeMode},
           ${row.activeTurnId},
           ${row.lastError},
+          ${row.stopCommandId ?? null},
           ${row.updatedAt}
         )
         ON CONFLICT (thread_id)
@@ -113,6 +117,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           runtime_mode = excluded.runtime_mode,
           active_turn_id = excluded.active_turn_id,
           last_error = excluded.last_error,
+          stop_command_id = excluded.stop_command_id,
           updated_at = excluded.updated_at
       `,
   });
@@ -133,6 +138,7 @@ const makeProjectionThreadSessionRepository = Effect.gen(function* () {
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
+          stop_command_id AS "stopCommandId",
           updated_at AS "updatedAt"
         FROM projection_thread_sessions
         WHERE thread_id = ${threadId}

@@ -5,6 +5,8 @@ import * as NodePath from "node:path";
 
 import {
   ModelSelection,
+  OrchestrationEvent,
+  OrchestrationThreadStreamItem,
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderDriverKind,
@@ -34,6 +36,8 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -80,6 +84,9 @@ const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+const threadStreamJsonCodec = Schema.fromJsonString(OrchestrationThreadStreamItem);
+const encodeThreadStreamJson = Schema.encodeEffect(threadStreamJsonCodec);
+const decodeThreadStreamJson = Schema.decodeEffect(threadStreamJsonCodec);
 
 const assistantQuoteText = "Retain the reconnect backoff.";
 const assistantCitation = {
@@ -4340,6 +4347,450 @@ describe("ProviderCommandReactor", () => {
         (activity.payload as Record<string, unknown>).requestId === "user-input-request-1",
     );
     expect(resolvedActivity).toBeUndefined();
+  });
+
+  effectIt.layer(Layer.empty)("correlated session-stop receipts", (it) => {
+    it.effect(
+      "correlates session stops only after shutdown across a queued start and second stop",
+      () =>
+        Effect.gen(function* () {
+          const firstEntered = yield* Deferred.make<void>();
+          const secondEntered = yield* Deferred.make<void>();
+          const releaseFirst = yield* Deferred.make<void>();
+          const releaseSecond = yield* Deferred.make<void>();
+          const firstReceipt = yield* Deferred.make<OrchestrationEvent>();
+          const secondReceipt = yield* Deferred.make<void>();
+          const thirdReceipt = yield* Deferred.make<void>();
+          let stopCount = 0;
+          const harness = yield* Effect.promise(() =>
+            createHarness({
+              stopSessionEffect: () => {
+                const first = stopCount++ === 0;
+                return Deferred.succeed(first ? firstEntered : secondEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(first ? releaseFirst : releaseSecond)),
+                );
+              },
+            }),
+          );
+          const threadId = ThreadId.make("thread-1");
+          const now = "2026-01-01T00:00:00.000Z";
+          const firstId = CommandId.make("correlated-stop-first");
+          const secondId = CommandId.make("correlated-stop-second");
+          const events = yield* harness.engine.subscribeDomainEvents;
+          yield* Stream.runForEach(events, (event) =>
+            event.type === "thread.session-set" && event.payload.session.stopCommandId === firstId
+              ? Deferred.succeed(firstReceipt, event)
+              : event.type === "thread.session-set" &&
+                  event.payload.session.stopCommandId === secondId
+                ? Deferred.succeed(secondReceipt, undefined)
+                : event.type === "thread.session-set" &&
+                    event.payload.session.stopCommandId === "correlated-already-stopped"
+                  ? Deferred.succeed(thirdReceipt, undefined)
+                  : Effect.void,
+          ).pipe(Effect.forkScoped);
+
+          yield* harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("correlated-initial-ready"),
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          });
+          yield* harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: firstId,
+            threadId,
+            createdAt: now,
+          });
+          yield* Deferred.await(firstEntered);
+          const beforeStop = yield* harness.snapshotQuery
+            .getThreadShellById(threadId)
+            .pipe(Effect.map(Option.getOrThrow));
+          expect(beforeStop.session?.status).toBe("ready");
+          expect(beforeStop.session?.stopCommandId == null).toBe(true);
+
+          yield* harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("correlated-intervening-start"),
+            threadId,
+            message: {
+              messageId: asMessageId("correlated-message"),
+              role: "user",
+              text: "hello",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          });
+          const secondAcceptance = yield* harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: secondId,
+            threadId,
+            createdAt: now,
+          });
+          yield* Deferred.succeed(releaseFirst, undefined);
+          const receipt = yield* Deferred.await(firstReceipt);
+          expect(receipt.sequence).toBeGreaterThan(secondAcceptance.sequence);
+          const wire = yield* encodeThreadStreamJson({ kind: "event", event: receipt });
+          const decoded = yield* decodeThreadStreamJson(wire);
+          expect(
+            decoded.kind === "event" && decoded.event.type === "thread.session-set"
+              ? decoded.event.payload.session.stopCommandId
+              : null,
+          ).toBe(firstId);
+          yield* Deferred.await(secondEntered);
+          expect(harness.startSession).toHaveBeenCalledTimes(1);
+          const active = yield* harness.snapshotQuery
+            .getThreadDetailSnapshot(threadId)
+            .pipe(Effect.map(Option.getOrThrow));
+          expect(active.thread.session?.status).not.toBe("stopped");
+          expect(active.thread.session?.stopCommandId == null).toBe(true);
+
+          yield* Deferred.succeed(releaseSecond, undefined);
+          yield* Deferred.await(secondReceipt);
+          yield* Effect.promise(() => harness.drain());
+          const stopped = yield* harness.snapshotQuery
+            .getThreadShellById(threadId)
+            .pipe(Effect.map(Option.getOrThrow));
+          expect(stopped.session?.stopCommandId).toBe(secondId);
+          const shell = yield* harness.snapshotQuery.getShellSnapshot();
+          expect(
+            shell.threads.find((thread) => thread.id === threadId)?.session?.stopCommandId,
+          ).toBe(secondId);
+          const context = yield* harness.snapshotQuery
+            .getThreadRuntimeContext(threadId)
+            .pipe(Effect.map(Option.getOrThrow));
+          expect(context.session?.stopCommandId).toBe(secondId);
+          const snapshot = yield* Effect.promise(() => harness.readModel());
+          expect(
+            snapshot.threads.find((thread) => thread.id === threadId)?.session?.stopCommandId,
+          ).toBe(secondId);
+          const detail = yield* harness.snapshotQuery
+            .getThreadDetailSnapshot(threadId)
+            .pipe(Effect.map(Option.getOrThrow));
+          expect(detail.thread.session?.stopCommandId).toBe(secondId);
+
+          const thirdId = CommandId.make("correlated-already-stopped");
+          yield* harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: thirdId,
+            threadId,
+            createdAt: now,
+          });
+          yield* Deferred.await(thirdReceipt);
+          yield* Effect.promise(() => harness.drain());
+          const repeated = yield* harness.snapshotQuery
+            .getThreadShellById(threadId)
+            .pipe(Effect.map(Option.getOrThrow));
+          expect(repeated.session?.stopCommandId).toBe(thirdId);
+          expect(harness.stopSession).toHaveBeenCalledTimes(2);
+        }),
+    );
+
+    for (const initialStatus of ["ready", "stopped", "none"] as const) {
+      it.effect(`correlates a direct archived stop with ${initialStatus} session`, () =>
+        Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const receipt = yield* Deferred.make<OrchestrationEvent>();
+          const harness = yield* Effect.promise(() =>
+            createHarness({
+              stopSessionEffect: () =>
+                Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+            }),
+          );
+          const threadId = ThreadId.make("thread-1");
+          const now = "2026-01-01T00:00:00.000Z";
+          const stopId = CommandId.make(`archived-direct-${initialStatus}`);
+          if (initialStatus !== "none") {
+            yield* harness.engine.dispatch({
+              type: "thread.session.set",
+              commandId: CommandId.make("archived-ready"),
+              threadId,
+              session: {
+                threadId,
+                status: initialStatus,
+                providerName: "codex",
+                runtimeMode: "approval-required",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: now,
+              },
+              createdAt: now,
+            });
+          }
+          yield* harness.engine.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make("archive-direct"),
+            threadId,
+          });
+          expect(
+            Option.isNone(yield* harness.snapshotQuery.getThreadRuntimeContext(threadId)),
+          ).toBe(true);
+          const archived = yield* harness.snapshotQuery
+            .getThreadRuntimeContext(threadId, { includeArchived: true })
+            .pipe(Effect.map(Option.getOrThrow));
+          expect(archived.session?.status ?? "none").toBe(initialStatus);
+          const events = yield* harness.engine.subscribeDomainEvents;
+          yield* Stream.runForEach(events, (event) =>
+            event.type === "thread.session-set" && event.payload.session.stopCommandId === stopId
+              ? Deferred.succeed(receipt, event)
+              : Effect.void,
+          ).pipe(Effect.forkScoped);
+          const acceptance = yield* harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: stopId,
+            threadId,
+            createdAt: now,
+          });
+          if (initialStatus === "ready") {
+            yield* Deferred.await(entered);
+            expect(yield* Deferred.isDone(receipt)).toBe(false);
+            expect(harness.stopSession).toHaveBeenCalledWith({ threadId });
+            yield* Deferred.succeed(release, undefined);
+          }
+          const stoppedEvent = yield* Deferred.await(receipt);
+          expect(stoppedEvent.sequence).toBeGreaterThan(acceptance.sequence);
+          expect(stoppedEvent).toMatchObject({
+            type: "thread.session-set",
+            payload: { session: { status: "stopped", stopCommandId: stopId } },
+          });
+          yield* Effect.promise(() => harness.drain());
+          const stopped = yield* harness.snapshotQuery
+            .getThreadRuntimeContext(threadId, { includeArchived: true })
+            .pipe(Effect.map(Option.getOrThrow));
+          expect(stopped.session).toMatchObject({ status: "stopped", stopCommandId: stopId });
+          expect(
+            Option.isNone(yield* harness.snapshotQuery.getThreadRuntimeContext(threadId)),
+          ).toBe(true);
+          expect(harness.stopSession).toHaveBeenCalledTimes(initialStatus === "ready" ? 1 : 0);
+        }),
+      );
+    }
+
+    for (const transition of ["archive", "delete"] as const) {
+      it.effect(
+        `correlates a queued stop after ${transition} while an earlier worker is blocked`,
+        () =>
+          Effect.gen(function* () {
+            const entered = yield* Deferred.make<void>();
+            const release = yield* Deferred.make<void>();
+            const firstReceipt = yield* Deferred.make<OrchestrationEvent>();
+            const ownedReceipt = yield* Deferred.make<OrchestrationEvent>();
+            const successes: CommandId[] = [];
+            const harness = yield* Effect.promise(() =>
+              createHarness({
+                stopSessionEffect: () =>
+                  Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                  ),
+              }),
+            );
+            const threadId = ThreadId.make("thread-1");
+            const now = "2026-01-01T00:00:00.000Z";
+            const firstId = CommandId.make(`blocked-before-${transition}`);
+            const stopId = CommandId.make(`accepted-before-${transition}`);
+            const events = yield* harness.engine.subscribeDomainEvents;
+            yield* Stream.runForEach(events, (event) => {
+              if (
+                event.type === "thread.session-set" &&
+                event.payload.session.stopCommandId != null
+              ) {
+                successes.push(event.payload.session.stopCommandId);
+                if (event.payload.session.stopCommandId === firstId) {
+                  return Deferred.succeed(firstReceipt, event);
+                }
+                if (event.payload.session.stopCommandId === stopId) {
+                  return Deferred.succeed(ownedReceipt, event);
+                }
+              }
+              return event.type === "thread.activity-appended" &&
+                event.payload.activity.kind === "provider.session.stop.failed" &&
+                Predicate.hasProperty(event.payload.activity.payload, "commandId") &&
+                event.payload.activity.payload.commandId === stopId
+                ? Deferred.succeed(ownedReceipt, event)
+                : Effect.void;
+            }).pipe(Effect.forkScoped);
+            yield* harness.engine.dispatch({
+              type: "thread.session.set",
+              commandId: CommandId.make("queued-archive-ready"),
+              threadId,
+              session: {
+                threadId,
+                status: "ready",
+                providerName: "codex",
+                runtimeMode: "approval-required",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: now,
+              },
+              createdAt: now,
+            });
+            yield* harness.engine.dispatch({
+              type: "thread.session.stop",
+              commandId: firstId,
+              threadId,
+              createdAt: now,
+            });
+            yield* Deferred.await(entered);
+            const acceptance = yield* harness.engine.dispatch({
+              type: "thread.session.stop",
+              commandId: stopId,
+              threadId,
+              createdAt: now,
+            });
+            yield* harness.engine.dispatch({
+              type: transition === "archive" ? "thread.archive" : "thread.delete",
+              commandId: CommandId.make(`queued-${transition}`),
+              threadId,
+            });
+            expect(
+              Option.isNone(yield* harness.snapshotQuery.getThreadRuntimeContext(threadId)),
+            ).toBe(true);
+            expect(yield* Deferred.isDone(ownedReceipt)).toBe(false);
+            yield* Deferred.succeed(release, undefined);
+            const older = yield* Deferred.await(firstReceipt);
+            expect(older.sequence).toBeGreaterThan(acceptance.sequence);
+            const owned = yield* Deferred.await(ownedReceipt);
+            expect(owned.sequence).toBeGreaterThan(older.sequence);
+            yield* Effect.promise(() => harness.drain());
+            // The earlier worker stopped the provider; the owned archived stop is now a no-op.
+            expect(harness.stopSession).toHaveBeenCalledTimes(1);
+            expect(harness.stopSession).toHaveBeenCalledWith({ threadId });
+            const context = yield* harness.snapshotQuery.getThreadRuntimeContext(threadId, {
+              includeArchived: true,
+            });
+            if (transition === "archive") {
+              expect(owned).toMatchObject({
+                type: "thread.session-set",
+                payload: { session: { status: "stopped", stopCommandId: stopId } },
+              });
+              expect(Option.getOrThrow(context).session?.stopCommandId).toBe(stopId);
+              expect(successes).toEqual([firstId, stopId]);
+            } else {
+              expect(Option.isNone(context)).toBe(true);
+              expect(owned).toMatchObject({
+                type: "thread.activity-appended",
+                payload: {
+                  activity: {
+                    kind: "provider.session.stop.failed",
+                    payload: {
+                      commandId: stopId,
+                      detail: "Thread runtime context is unavailable (thread missing or deleted).",
+                    },
+                  },
+                },
+              });
+              expect(successes).toEqual([firstId]);
+              const readModel = yield* harness.snapshotQuery.getCommandReadModel();
+              const deleted = readModel.threads.filter((thread) => thread.id === threadId);
+              expect(deleted).toHaveLength(1);
+              expect(deleted[0]?.deletedAt).not.toBeNull();
+            }
+          }),
+      );
+    }
+
+    it.effect("correlates a stop failure without publishing a success marker", () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            stopSessionEffect: () =>
+              Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "session.stop",
+                  detail: "shutdown failed",
+                }),
+              ),
+          }),
+        );
+        const threadId = ThreadId.make("thread-1");
+        const now = "2026-01-01T00:00:00.000Z";
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("failure-ready"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+        const stopId = CommandId.make("correlated-failed-stop");
+        const failed = yield* Deferred.make<void>();
+        const successes: CommandId[] = [];
+        const events = yield* harness.engine.subscribeDomainEvents;
+        yield* Stream.runForEach(events, (event) => {
+          if (event.type === "thread.session-set" && event.payload.session.stopCommandId != null) {
+            successes.push(event.payload.session.stopCommandId);
+          }
+          return event.type === "thread.activity-appended" &&
+            event.payload.activity.kind === "provider.session.stop.failed"
+            ? Deferred.succeed(failed, undefined)
+            : Effect.void;
+        }).pipe(Effect.forkScoped);
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: stopId,
+          threadId,
+          createdAt: now,
+        });
+        yield* Deferred.await(failed);
+        yield* Effect.promise(() => harness.drain());
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (thread) => thread.id === threadId,
+        );
+        expect(thread?.session?.status).toBe("ready");
+        expect(thread?.session?.stopCommandId == null).toBe(true);
+        expect(
+          thread?.activities.find((activity) => activity.kind === "provider.session.stop.failed"),
+        ).toMatchObject({ payload: { commandId: stopId, detail: "shutdown failed" } });
+        expect(successes).toEqual([]);
+      }),
+    );
+
+    it.effect("correlates stop requests when no provider session exists", () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const threadId = ThreadId.make("thread-1");
+        const stopId = CommandId.make("correlated-no-session");
+        const receipt = yield* Deferred.make<void>();
+        const events = yield* harness.engine.subscribeDomainEvents;
+        yield* Stream.runForEach(events, (event) =>
+          event.type === "thread.session-set" && event.payload.session.stopCommandId === stopId
+            ? Deferred.succeed(receipt, undefined)
+            : Effect.void,
+        ).pipe(Effect.forkScoped);
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: stopId,
+          threadId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        yield* Deferred.await(receipt);
+        yield* Effect.promise(() => harness.drain());
+        const thread = yield* harness.snapshotQuery
+          .getThreadShellById(threadId)
+          .pipe(Effect.map(Option.getOrThrow));
+        expect(thread.session).toMatchObject({ status: "stopped", stopCommandId: stopId });
+        expect(harness.stopSession).not.toHaveBeenCalled();
+      }),
+    );
   });
 
   effectIt.effect("stops a provider session without reading unrelated message bodies", () =>

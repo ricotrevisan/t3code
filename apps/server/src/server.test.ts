@@ -9990,7 +9990,21 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   it.effect("subscribeThread replaces a cursor ahead of the authoritative head", () =>
     Effect.gen(function* () {
       let readEventsCalls = 0;
-      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+      const originalThread = makeDefaultOrchestrationReadModel().threads[0]!;
+      const stopCommandId = CommandId.make("snapshot-stop-origin");
+      const thread = {
+        ...originalThread,
+        session: {
+          threadId: originalThread.id,
+          status: "stopped" as const,
+          stopCommandId,
+          providerName: null,
+          runtimeMode: "full-access" as const,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: originalThread.updatedAt,
+        },
+      };
 
       yield* buildAppUnderTest({
         layers: {
@@ -10020,7 +10034,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      assert.equal(Option.getOrThrow(first).kind, "snapshot");
+      const item = Option.getOrThrow(first);
+      assert.equal(item.kind, "snapshot");
+      if (item.kind === "snapshot") {
+        assert.equal(item.supportsCorrelatedSessionStops, true);
+        assert.equal(item.snapshot.thread.session?.stopCommandId, stopCommandId);
+      }
       assert.equal(readEventsCalls, 0);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

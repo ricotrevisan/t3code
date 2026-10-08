@@ -71,6 +71,7 @@ import RepairForkProjectionSchema from "./Migrations/053_RepairForkProjectionSch
 import Migration0055 from "./Migrations/055_ProviderAdapterPackageSessionIdentity.ts";
 import Migration0056 from "./Migrations/056_PullRequestFilesViewed.ts";
 import RepairForkAutoSettleDisabledAt from "./Migrations/059_RepairForkAutoSettleDisabledAt.ts";
+import Migration0060 from "./Migrations/060_ProjectionThreadSessionStopCommandId.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -142,6 +143,7 @@ const migrationEntries = [
   [57, "ClearAutomaticProjectModelDefaultsForkCompatibility", ClearAutomaticProjectModelDefaults],
   [58, "RepairForkProjectionSchemaForkCompatibility", RepairForkProjectionSchema],
   [59, "RepairForkAutoSettleDisabledAt", RepairForkAutoSettleDisabledAt],
+  [60, "ProjectionThreadSessionStopCommandId", Migration0060],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

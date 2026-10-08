@@ -7,6 +7,7 @@
  * @module ProjectionThreadSessionRepository
  */
 import {
+  CommandId,
   RuntimeMode,
   IsoDateTime,
   OrchestrationSessionStatus,
@@ -24,6 +25,7 @@ import type { ProjectionRepositoryError } from "../Errors.ts";
 
 export const ProjectionThreadSession = Schema.Struct({
   threadId: ThreadId,
+  stopCommandId: Schema.optional(Schema.NullOr(CommandId)),
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(Schema.String),
   providerInstanceId: Schema.NullOr(ProviderInstanceId),

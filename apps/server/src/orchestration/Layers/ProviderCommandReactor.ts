@@ -280,6 +280,7 @@ const make = Effect.gen(function* () {
     readonly turnId: TurnId | null;
     readonly createdAt: string;
     readonly requestId?: string;
+    readonly commandId?: CommandId;
   }) =>
     Effect.all({
       commandId: serverCommandId("provider-failure-activity"),
@@ -298,6 +299,7 @@ const make = Effect.gen(function* () {
             payload: {
               detail: input.detail,
               ...(input.requestId ? { requestId: input.requestId } : {}),
+              ...(input.commandId ? { commandId: input.commandId } : {}),
             },
             turnId: input.turnId,
             createdAt: input.createdAt,
@@ -1728,10 +1730,24 @@ const make = Effect.gen(function* () {
   const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
   ) {
-    const thread = yield* resolveThreadShell(event.payload.threadId);
-    if (!thread) {
+    const context = yield* projectionSnapshotQuery.getThreadRuntimeContext(event.payload.threadId, {
+      includeArchived: true,
+    });
+    if (Option.isNone(context)) {
+      // Deletion retains the aggregate, so a failure activity remains legal without
+      // recreating the thread or publishing a stopped session for a deleted record.
+      yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.session.stop.failed",
+        ...(event.commandId !== null ? { commandId: event.commandId } : {}),
+        summary: "Provider session stop failed",
+        detail: "Thread runtime context is unavailable (thread missing or deleted).",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
       return;
     }
+    const thread = context.value;
 
     const now = event.payload.createdAt;
     const wasCompacting = compactingThreadIds.has(thread.id);
@@ -1763,6 +1779,7 @@ const make = Effect.gen(function* () {
               appendProviderFailureActivity({
                 threadId: thread.id,
                 kind: "provider.session.stop.failed",
+                ...(event.commandId !== null ? { commandId: event.commandId } : {}),
                 summary: "Provider session stop failed",
                 detail,
                 turnId: null,
@@ -1777,6 +1794,7 @@ const make = Effect.gen(function* () {
             session: {
               threadId: thread.id,
               status: "stopped",
+              stopCommandId: event.commandId,
               providerName: thread.session?.providerName ?? null,
               ...(thread.session?.providerInstanceId !== undefined
                 ? { providerInstanceId: thread.session.providerInstanceId }
