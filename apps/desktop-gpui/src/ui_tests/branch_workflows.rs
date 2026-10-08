@@ -165,7 +165,7 @@ fn accepted_queued_start_without_session_waits_for_own_stop_marker(cx: &mut Test
         app.update(cx, |app, _| {
             app.shell.threads[0].session = None;
             app.detail.thread =
-                Some(json!({"id":"t","session":null,"latestTurn":{"status":"queued"}}));
+                Some(json!({"id":"t","session":null,"latestTurn":{"status":"queued"}}).into());
         })
     });
     run(&app, cx, false);
@@ -350,7 +350,7 @@ fn branchless_threads_and_drafts_can_reach_checkout_workflows(cx: &mut TestAppCo
                 }
                 app.shell.threads[0].branch = None;
                 if let Some(detail) = &mut app.detail.thread {
-                    detail["branch"] = Value::Null;
+                    std::sync::Arc::make_mut(detail)["branch"] = Value::Null;
                 }
                 app.composer.update(cx, |input, cx| {
                     input.set_value("keep this prompt", window, cx)
@@ -476,7 +476,7 @@ fn pr_resolution_stop_prepare_metadata_are_receipt_ordered(cx: &mut TestAppConte
     enter(&app, cx, BranchWorkflow::PullRequest, "#42");
     cx.update(|_, cx| {
         app.update(cx, |app, _| {
-            app.detail.thread = Some(json!({"id":"t","session":{"status":"ready"}}))
+            app.detail.thread = Some(json!({"id":"t","session":{"status":"ready"}}).into())
         })
     });
     run(&app, cx, true);
@@ -976,7 +976,7 @@ fn empty_materialized_root_uses_public_prepare_bootstrap_without_recreate(cx: &m
     let (app, cx, requests) = harness(cx);
     cx.update(|_, cx| app.update(cx, |app, _| {
         app.detail.synchronized = true;
-        app.detail.thread = Some(json!({"id":"t","messages":[],"activities":[],"session":null,"worktreePath":null,"latestTurn":null}));
+        app.detail.thread = Some(json!({"id":"t","messages":[],"activities":[],"session":null,"worktreePath":null,"latestTurn":null}).into());
     }));
     enter(&app, cx, BranchWorkflow::Environment, "main");
     let worktree = cx.debug_bounds("branch-workflow-worktree").unwrap();

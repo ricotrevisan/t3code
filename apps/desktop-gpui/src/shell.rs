@@ -13,7 +13,7 @@ pub struct Project {
     pub scripts: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub status: String,
@@ -21,16 +21,20 @@ pub struct Session {
     pub last_error: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LatestTurn {
     pub turn_id: String,
     pub state: String,
     #[serde(default)]
+    pub requested_at: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
     pub completed_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub id: String,
@@ -47,9 +51,21 @@ pub struct Thread {
     #[serde(default)]
     pub snoozed_until: Option<String>,
     #[serde(default)]
+    pub snoozed_at: Option<String>,
+    #[serde(default)]
     pub settled_override: Option<String>,
     #[serde(default)]
+    pub auto_settle_disabled_at: Option<String>,
+    #[serde(default)]
     pub pinned_at: Option<String>,
+    #[serde(default)]
+    pub pin_order_key: Option<String>,
+    #[serde(default)]
+    pub active_order_key: Option<String>,
+    #[serde(default)]
+    pub unsettled_at: Option<String>,
+    #[serde(default)]
+    pub title_regeneration: Option<serde_json::Value>,
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
@@ -117,6 +133,8 @@ pub enum ShellItem {
 
 #[derive(Default)]
 pub struct Shell {
+    /// Local identity also advances for replacement snapshots at the same wire sequence.
+    pub revision: u64,
     pub sequence: Option<u64>,
     pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
@@ -127,6 +145,7 @@ impl Shell {
     pub fn apply(&mut self, item: ShellItem) -> Result<(), &'static str> {
         match item {
             ShellItem::Snapshot { snapshot } => {
+                self.revision += 1;
                 self.sequence = Some(snapshot.snapshot_sequence);
                 self.projects = snapshot.projects;
                 self.threads = snapshot.threads;
@@ -177,6 +196,7 @@ impl Shell {
             _ => unreachable!(),
         }
         self.sequence = Some(sequence);
+        self.revision += 1;
         Ok(())
     }
 }

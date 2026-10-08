@@ -1,15 +1,14 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable,
+    ActiveTheme as _, Disableable, Icon, Sizable,
     button::{Button, ButtonVariants as _},
     tooltip::Tooltip,
 };
-use gpui_kit::{Context, FontWeight, anchored, deferred, div, prelude::*, px};
+use gpui_kit::{Context, FontWeight, anchored, deferred, div, prelude::*};
 use t3code_desktop_gpui::{conversation, palette, sidebar};
 
-use super::list_row;
-use crate::{NativeApp, THREAD_ACTIONS};
+use crate::NativeApp;
 
 impl NativeApp {
     pub(crate) fn render_thread_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -58,6 +57,21 @@ impl NativeApp {
                 (files.len(), additions, deletions)
             })
             .filter(|(files, _, _)| *files > 0);
+        let linked_pr = self
+            .detail
+            .thread
+            .as_ref()
+            .filter(|detail| detail["id"].as_str() == self.selected_thread.as_deref())
+            .and_then(|detail| detail["pullRequests"].as_array())
+            .and_then(|links| links.first())
+            .and_then(|link| {
+                let url = link["url"].as_str()?.to_owned();
+                let number = link["number"].as_u64()?;
+                let state = link["snapshot"]["state"]
+                    .as_str()
+                    .unwrap_or("status unknown");
+                Some((format!("PR #{number} · {state}"), url))
+            });
         let header_project = self
             .selected_project
             .as_ref()
@@ -105,10 +119,19 @@ impl NativeApp {
                                             Tooltip::new(project.clone()).build(window, cx)
                                         }
                                     })
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|app, _, window, cx| app.new_thread(window, cx)))
                                     .child(project),
                             )
                         })
-                        .child(
+                        .when_some(self.header_rename.input.as_ref(), |view, input| view.child(
+                            div().flex_1().min_w_0()
+                                .capture_key_down(cx.listener(|app, event: &gpui_kit::KeyDownEvent, window, cx| {
+                                    if event.keystroke.key == "escape" { app.finish_header_rename(false, window, cx); cx.stop_propagation(); }
+                                }))
+                                .child(gpui_kit::component::input::Input::new(input).small())
+                        ))
+                        .when(self.header_rename.input.is_none(), |view| view.child(
                             div()
                                 .id("header-title")
                                 .debug_selector(|| "header-title".into())
@@ -120,8 +143,15 @@ impl NativeApp {
                                     let title = header_title.clone();
                                     move |window, cx| Tooltip::new(title.clone()).build(window, cx)
                                 })
+                                .cursor_text()
+                                .on_click(cx.listener({
+                                    let title = header_title.clone();
+                                    move |app, event: &gpui_kit::ClickEvent, window, cx| {
+                                        if event.click_count() == 2 { app.begin_header_rename(title.clone(), window, cx); }
+                                    }
+                                }))
                                 .child(header_title),
-                        ),
+                        )),
                 )
                 .child(
                     div()
@@ -168,6 +198,10 @@ impl NativeApp {
                                     }),
                             )
                         })
+                        .when_some(linked_pr, |view, (label, url)| view.child(
+                            Button::new("header-linked-pr").ghost().small().label(label).tooltip(url.clone())
+                                .on_click(cx.listener(move |_, _, _, cx| { cx.open_url(&url); }))
+                        ))
                         .when_some(header_session, |view, (label, is_danger)| {
                             view.child(
                                 div()
@@ -196,7 +230,12 @@ impl NativeApp {
                 .when_some(header_diff, |view, (files, additions, deletions)| {
                     view.child(
                         div()
+                            .id("header-diff-click")
                             .debug_selector(|| "header-diff".into())
+                            .cursor_pointer()
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                if let Some(turn) = app.detail.thread.as_ref().and_then(|detail| detail["checkpoints"].as_array()).and_then(|list| list.last()).and_then(|checkpoint| checkpoint["checkpointTurnCount"].as_u64()) { app.view_checkpoint_diff(turn, cx); }
+                            }))
                             .flex()
                             .items_center()
                             .gap_1()
@@ -211,6 +250,7 @@ impl NativeApp {
                     )
                 })
             })
+            .when(self.editor_choice.open, |view| view.child(self.render_editor_choices(cx)))
             .child(
                 div()
                     .flex()
@@ -225,9 +265,12 @@ impl NativeApp {
                                 .label("Open")
                                 .secondary()
                                 .small()
-                                .tooltip("Open the worktree in an editor")
+                                .disabled((self.editor_unavailable_reason().is_some()) || !self.connection_ready())
+                                .tooltip(self.editor_unavailable_reason().unwrap_or("Open the worktree in the preferred editor"))
                                 .on_click(cx.listener(|app, _, _, cx| app.open_in_editor(cx))),
                         )
+                        .child(Button::new("open-editor-picker").ghost().small().label("Open in…")
+                            .on_click(cx.listener(|app, _, _, cx| { app.editor_choice.open = !app.editor_choice.open; cx.notify(); })))
                         .child(
                             Button::new("project-actions-header")
                                 .debug_selector(|| "project-actions-header".into())
@@ -244,14 +287,7 @@ impl NativeApp {
                                 })),
                         )
                         .child(
-                            Button::new("push-pr")
-                                .debug_selector(|| "push-pr".into())
-                                .icon(gpui_kit::assets::IconName::GitPullRequest)
-                                .label("Push & create PR")
-                                .secondary()
-                                .small()
-                                .tooltip("Commit, push, and open a pull request")
-                                .on_click(cx.listener(|app, _, _, cx| app.push_and_create_pr(cx))),
+                            self.render_git_split(cx),
                         )
                     })
                     .child(
@@ -304,50 +340,6 @@ impl NativeApp {
     /// The thread actions menu, shared by the header "More" trigger and a sidebar
     /// row's secondary click. Entries act on `thread_menu_target`.
     pub(crate) fn render_thread_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let now = chrono::Utc::now();
-        let target = self.thread_menu_target();
-        let menu_thread = target.as_ref().and_then(|id| {
-            self.shell
-                .threads
-                .iter()
-                .chain(&self.archived_shell.threads)
-                .find(|thread| &thread.id == id)
-        });
-        let armed = target.is_some() && self.confirm_delete == target;
-        div()
-            .id("thread-menu-popover")
-            .occlude()
-            .mt_1()
-            .w(px(220.))
-            .flex()
-            .flex_col()
-            .p_2()
-            .rounded_md()
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_lg()
-            .children(
-                THREAD_ACTIONS
-                    .iter()
-                    .filter(|(id, _, _)| {
-                        menu_thread.is_none_or(|thread| sidebar::action_applies(thread, id, now))
-                    })
-                    .map(|(id, label, kind)| {
-                        list_row(
-                            *id,
-                            None,
-                            if armed && *id == "delete" {
-                                "Confirm delete"
-                            } else {
-                                *label
-                            },
-                            false,
-                        )
-                        .on_click(cx.listener(
-                            move |app, _, window, cx| app.run_thread_menu_action(kind, window, cx),
-                        ))
-                    }),
-            )
+        self.render_sidebar_thread_menu(cx)
     }
 }

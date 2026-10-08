@@ -309,7 +309,7 @@ fn root_worktree_path_is_normalized_to_null_before_metadata(cx: &mut TestAppCont
     cx.update(|_, cx| {
         app.update(cx, |app, _| {
             app.detail.thread =
-                Some(json!({"id":"t", "branch":"root-branch", "worktreePath":null}));
+                Some(json!({"id":"t", "branch":"root-branch", "worktreePath":null}).into());
         })
     });
     meta.send_blocking(Ok(json!({"sequence":2}))).unwrap();
@@ -371,7 +371,7 @@ fn remote_ref_metadata_uses_actual_branch_and_detached_null(cx: &mut TestAppCont
         cx.update(|_, cx| {
             app.update(cx, |app, _| {
                 app.shell.threads[0].branch = actual.as_str().map(str::to_owned);
-                app.detail.thread = Some(json!({"id":"t", "branch":actual, "worktreePath":null}));
+                app.detail.thread = Some(json!({"id":"t", "branch":actual, "worktreePath":null}).into());
             })
         });
         meta.send_blocking(Ok(json!({"sequence":2}))).unwrap();
@@ -584,7 +584,7 @@ fn remote_branch_change_retires_a_file_read_in_the_same_directory(cx: &mut TestA
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.shell.threads[0].branch = Some("before".into());
-            app.detail.thread = Some(json!({"id":"t","branch":"before","worktreePath":null}));
+            app.detail.thread = Some(json!({"id":"t","branch":"before","worktreePath":null}).into());
             app.file_path
                 .update(cx, |input, cx| input.set_value("file.txt", window, cx));
             app.file_operation(false, window, cx);

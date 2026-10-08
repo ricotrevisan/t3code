@@ -190,6 +190,17 @@ fn only_accepted_receipts_badge_and_late_receipts_are_invalidated(cx: &mut TestA
                     .any(|call| matches!(call, Call::Receipt(_, result) if *result == outcome))
             );
             assert!(!app.notification_platform.calls.contains(&Call::Badge(1)));
+            let text = app.notification_state_text();
+            match outcome {
+                DeliveryOutcome::Denied => assert!(text.contains("denied")),
+                DeliveryOutcome::Unavailable => assert!(text.contains("unavailable")),
+                DeliveryOutcome::AuthorizationError => {
+                    assert!(text.contains("Could not determine"))
+                }
+                DeliveryOutcome::DeliveryError => assert!(text.contains("delivery failed")),
+                _ => unreachable!(),
+            }
+            assert!(!text.contains("OS accepted"));
         });
     }
     // Every reset invalidates an in-flight accepted receipt, including changing
@@ -372,4 +383,41 @@ fn stale_environment_click_and_reconnected_snapshot_do_not_replay(cx: &mut TestA
     );
     assert!(app.read_with(cx, |app, _| app.notification_platform.calls.is_empty()));
     assert!(cx.shown_system_notifications().is_empty());
+}
+
+#[gpui_kit::test]
+fn authorization_probe_surfaces_denied_and_not_determined_without_delivery(
+    cx: &mut TestAppContext,
+) {
+    use t3code_desktop_gpui::notification_platform::Authorization;
+    let (app, cx, _) = harness(cx);
+    for authorization in [
+        Authorization::NotDetermined,
+        Authorization::Denied,
+        Authorization::Authorized,
+    ] {
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.notification_platform
+                    .record_authorization(authorization);
+                app.refresh_notification_authorization(cx);
+            })
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let text = app.notification_state_text();
+            match authorization {
+                Authorization::NotDetermined => assert!(text.contains("not determined")),
+                Authorization::Denied => assert!(text.contains("denied")),
+                Authorization::Authorized => assert!(text.contains("no delivery receipt")),
+                _ => unreachable!(),
+            }
+            assert!(
+                !app.notification_platform
+                    .calls
+                    .iter()
+                    .any(|call| matches!(call, Call::Delivery(_)))
+            );
+        });
+    }
 }

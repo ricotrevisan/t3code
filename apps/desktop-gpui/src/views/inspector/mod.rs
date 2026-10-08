@@ -71,20 +71,14 @@ impl NativeApp {
             cx.notify();
             return;
         }
-        if previous == Some(InspectorSection::Clone)
-            && let Some(sender) = &self.commands
-        {
-            let _ = sender.try_send(connection::Command::Unsubscribe("project-clones".into()));
+        if previous == Some(InspectorSection::Clone) {
+            self.enqueue_subscription(connection::Command::Unsubscribe("project-clones".into()), cx);
         }
         match section {
             Some(InspectorSection::Clone) => {
-                if let Some(sender) = &self.commands {
-                    let _ = sender.try_send(connection::Command::Subscribe {
-                        key: "project-clones".into(),
-                        tag: "subscribeProjectClones".into(),
-                        payload: json!({}),
-                    });
-                }
+                self.enqueue_subscription(connection::Command::Subscribe {
+                    key: "project-clones".into(), tag: "subscribeProjectClones".into(), payload: json!({}),
+                }, cx);
             }
             Some(InspectorSection::ProjectActions) => self.project_actions(None, cx),
             Some(InspectorSection::Worktrees) => self.worktree_operation("vcs.listRefs", false, cx),

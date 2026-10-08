@@ -1,8 +1,9 @@
-use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable,
+    ActiveTheme as _, Disableable, Sizable,
     button::{Button, ButtonVariants as _},
     input::Input,
+    radio::{Radio, RadioGroup},
+    switch::Switch,
 };
 use gpui_kit::{Context, div, prelude::*};
 use serde_json::json;
@@ -47,7 +48,7 @@ impl NativeApp {
                 let stop_key = run.key.clone();
                 let retry_key = run.key.clone();
                 let dismiss_key = run.key.clone();
-                let connected = self.commands.is_some() && run.scope == self.environment_scope;
+                let connected = self.connection_ready() && run.scope == self.environment_scope;
                 div()
                     .flex()
                     .flex_col()
@@ -146,40 +147,36 @@ impl NativeApp {
             }))
             .child(field("Action name", Input::new(&self.action_name), cx))
             .child(field("Command", Input::new(&self.action_command), cx))
-            .child(
-                Button::new("action-setup")
-                    .ghost()
-                    .selected(self.action_setup)
-                    .label(if self.action_setup {
-                        "Runs on worktree creation"
-                    } else {
-                        "Run manually"
-                    })
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.action_setup = !app.action_setup;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("action-wait")
-                    .ghost()
-                    .selected(self.action_wait)
-                    .label(if self.action_wait {
-                        "Wait before starting agent"
-                    } else {
-                        "Start agent while setup runs"
-                    })
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.action_wait = !app.action_wait;
-                        cx.notify();
-                    })),
-            )
+            .child(div().flex().flex_col().gap_2().items_start()
+                .child(Switch::new("action-setup").label("Run on worktree creation").small().checked(self.action_setup)
+                    .on_click(cx.listener(|app, enabled: &bool, _, cx| { app.action_setup = *enabled; cx.notify(); })))
+                .child(Switch::new("action-wait").label("Wait before starting agent").small().checked(self.action_wait)
+                    .disabled(!self.action_setup)
+                    .on_click(cx.listener(|app, enabled: &bool, _, cx| { app.action_wait = *enabled; cx.notify(); }))))
+            .child(RadioGroup::horizontal("action-icon")
+                .selected_index(crate::settings_project_actions::ICONS.iter().position(|icon| *icon == self.action_extras.icon))
+                .children(crate::settings_project_actions::ICONS.into_iter().enumerate().map(|(index, icon)| Radio::new(("action-icon-choice", index)).label(icon)))
+                .on_click(cx.listener(|app, index: &usize, _, cx| { app.action_extras.icon = crate::settings_project_actions::ICONS[*index].into(); cx.notify(); })))
+            .child(Button::new("actions-read-t3-json").debug_selector(|| "actions-read-t3-json".into()).label("Read actions from t3.json").ghost().small()
+                .on_click(cx.listener(|app, _, _, cx| app.load_checked_in_actions(cx))))
+            .when(self.action_extras.target.as_ref().is_some_and(|(generation, project)| *generation == self.generation && Some(project) == self.selected_project.as_ref()), |view| {
+                view.when(self.action_extras.loading, |view| view.child("Reading t3.json…"))
+                    .when_some(self.action_extras.error.clone(), |view, error| view.child(div().text_xs().text_color(cx.theme().danger).child(error)))
+                    .children(self.action_extras.scripts.iter().filter(|script| !scripts.iter().any(|saved| saved["command"] == script["command"] || saved["name"].as_str().unwrap_or_default().eq_ignore_ascii_case(script["name"].as_str().unwrap_or_default()))).enumerate().map(|(index, script)| {
+                        let script = script.clone();
+                        Button::new(("action-import", index)).debug_selector(move || format!("action-import-{index}")).label(format!("Import {}", script["name"].as_str().unwrap_or("Action"))).ghost().small().disabled(self.action_busy || !self.connection_ready())
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.project_actions(Some(json!({"operation":"save","id":uuid::Uuid::new_v4().to_string(),"name":script["name"],"command":script["command"],"setup":script["runOnWorktreeCreate"] == true,"wait":script["runOnWorktreeCreate"] == true && script["async"] == false,"icon":script["icon"].as_str().unwrap_or("play"),"extra":script})), cx);
+                            }))
+                    }))
+            })
+            .child(div().flex().flex_wrap().gap_2()
             .child(
                 Button::new("action-save")
                     .debug_selector(|| "action-save".into())
                     .label("Save action")
                     .primary()
-                    .disabled(self.action_busy)
+                    .disabled((self.action_busy) || !self.connection_ready())
                     .on_click(cx.listener(|app, _, _, cx| app.save_project_action(cx))),
             )
             .child(
@@ -191,12 +188,14 @@ impl NativeApp {
                         app.confirm_action_delete = None;
                         app.action_setup = false;
                         app.action_wait = false;
+                        app.action_extras.icon = "play".into();
                         app.action_name
                             .update(cx, |input, cx| input.set_value("", window, cx));
                         app.action_command
                             .update(cx, |input, cx| input.set_value("", window, cx));
                         cx.notify();
                     })),
+            )
             )
             .children(scripts.into_iter().enumerate().map(|(index, script)| {
                 let edit = script.clone();
@@ -219,13 +218,14 @@ impl NativeApp {
                             ""
                         }
                     ))
+                    .child(div().flex().flex_wrap().gap_1()
                     .child(
                         Button::new(gpui_kit::SharedString::from(format!("action-run-{index}")))
                             .debug_selector(move || format!("action-run-{index}"))
-                            .label("Run action")
+                            .label("Run").small()
                             .secondary()
                             .disabled(
-                                self.commands.is_none()
+                                !self.connection_ready()
                                     || self.selected_thread.is_none()
                                     || self.action_runs.iter().any(|run| {
                                         run.busy
@@ -243,10 +243,11 @@ impl NativeApp {
                     )
                     .child(
                         Button::new(gpui_kit::SharedString::from(format!("action-edit-{index}")))
-                            .label("Edit action")
+                            .label("Edit").small()
                             .ghost()
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 app.action_edit_id = edit["id"].as_str().map(str::to_owned);
+                                app.action_extras.icon = edit["icon"].as_str().unwrap_or("play").into();
                                 app.action_setup = edit["runOnWorktreeCreate"] == true;
                                 app.action_wait = edit["async"] == false;
                                 app.action_name.update(cx, |input, cx| {
@@ -273,11 +274,11 @@ impl NativeApp {
                         .label(if confirm {
                             "Confirm delete action"
                         } else {
-                            "Delete action"
+                            "Delete"
                         })
                         .danger()
                         .outline()
-                        .disabled(self.action_busy)
+                        .disabled(self.action_busy || !self.connection_ready())
                         .on_click(cx.listener(move |app, _, _, cx| {
                             if app.confirm_action_delete.as_ref() == Some(&id) {
                                 app.project_actions(
@@ -290,15 +291,16 @@ impl NativeApp {
                             }
                         })),
                     )
+                    )
             }))
             .child(
-                Button::new("project-default-save")
+                Button::new("project-default-save").disabled(!self.connection_ready())
                     .label("Use selected provider and model for new threads")
                     .secondary()
                     .on_click(cx.listener(|app, _, _, cx| app.update_project_default(false, cx))),
             )
             .child(
-                Button::new("project-default-inherit")
+                Button::new("project-default-inherit").disabled(!self.connection_ready())
                     .label("Use environment model default")
                     .ghost()
                     .on_click(cx.listener(|app, _, _, cx| {
@@ -306,7 +308,7 @@ impl NativeApp {
                     })),
             )
             .child(
-                Button::new("project-default-clear")
+                Button::new("project-default-clear").disabled(!self.connection_ready())
                     .label("Clear project model default")
                     .ghost()
                     .on_click(cx.listener(|app, _, _, cx| app.update_project_default(true, cx))),
@@ -315,14 +317,14 @@ impl NativeApp {
                 Button::new("actions-refresh")
                     .label("Refresh actions")
                     .ghost()
-                    .disabled(self.action_busy)
+                    .disabled((self.action_busy) || !self.connection_ready())
                     .on_click(cx.listener(|app, _, _, cx| app.project_actions(None, cx))),
             )
             .child(
                 Button::new("actions-inherit")
                     .label("Use environment action defaults")
                     .ghost()
-                    .disabled(self.action_busy)
+                    .disabled((self.action_busy) || !self.connection_ready())
                     .on_click(cx.listener(|app, _, _, cx| {
                         app.project_actions(Some(json!({"operation":"inherit"})), cx)
                     })),

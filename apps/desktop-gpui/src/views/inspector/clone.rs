@@ -1,3 +1,4 @@
+use gpui_kit::base::Disableable;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     input::Input,
@@ -22,7 +23,7 @@ impl NativeApp {
                 cx,
             ))
             .child(
-                Button::new("clone-start")
+                Button::new("clone-start").disabled(!self.connection_ready())
                     .debug_selector(|| "clone-start".into())
                     .label("Start clone to project directory")
                     .primary()

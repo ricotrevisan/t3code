@@ -14,6 +14,11 @@ pub(crate) struct DiffState {
     pub error: Option<String>,
     pub files: Vec<PatchFile>,
     pub selected_file: usize,
+    pub git_scope: Option<String>,
+    pub wrap: bool,
+    pub expand_all: bool,
+    pub collapsed: std::collections::HashSet<usize>,
+    pub truncated: bool,
     epoch: u64,
     task: Option<Task<()>>,
 }
@@ -140,6 +145,62 @@ fn split_patch(patch: String) -> Vec<PatchFile> {
 }
 
 impl NativeApp {
+    pub(crate) fn view_git_diff(&mut self, scope: &str, cx: &mut Context<Self>) {
+        self.inspector_open = true;
+        self.right_tab = RightTab::Changes;
+        let (Some(thread_id), Some(cwd), Some(sender)) = (
+            self.selected_thread.clone(),
+            self.selected_workspace(),
+            self.commands.clone(),
+        ) else {
+            return;
+        };
+        self.diffs.epoch += 1;
+        let epoch = self.diffs.epoch;
+        let generation = self.generation;
+        let context = self.checkout_context();
+        let scope = scope.to_owned();
+        self.diffs.generation = generation;
+        self.diffs.thread_id = Some(thread_id);
+        self.diffs.turn_count = None;
+        self.diffs.git_scope = Some(scope.clone());
+        self.diffs.files.clear();
+        self.diffs.selected_file = 0;
+        self.diffs.collapsed.clear();
+        self.diffs.error = None;
+        self.diffs.loading = true;
+        self.diffs.task = Some(cx.spawn(async move |entity, cx| {
+            let result =
+                connection::call(&sender, "review.getDiffPreview", json!({"cwd":cwd})).await;
+            let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation
+                    || app.checkout_context() != context
+                    || app.diffs.epoch != epoch
+                {
+                    return;
+                }
+                app.diffs.loading = false;
+                match result {
+                    Ok(value) if value["cwd"].as_str() == Some(cwd.as_str()) => {
+                        if let Some(source) = value["sources"].as_array().and_then(|sources| {
+                            sources.iter().find(|source| source["kind"] == scope)
+                        }) {
+                            app.diffs.files =
+                                split_patch(source["diff"].as_str().unwrap_or_default().to_owned());
+                            app.diffs.truncated = source["truncated"] == true;
+                        } else {
+                            app.diffs.error = Some("Requested diff scope is unavailable".into());
+                        }
+                    }
+                    Ok(_) => app.diffs.error = Some("Diff response has the wrong checkout".into()),
+                    Err(error) => app.diffs.error = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     pub(crate) fn view_checkpoint_diff(&mut self, turn_count: u64, cx: &mut Context<Self>) {
         self.inspector_open = true;
         self.right_tab = RightTab::Changes;
@@ -152,6 +213,9 @@ impl NativeApp {
         self.diffs.task = None;
         self.diffs.thread_id = Some(thread_id.clone());
         self.diffs.turn_count = Some(turn_count);
+        self.diffs.git_scope = None;
+        self.diffs.truncated = false;
+        self.diffs.collapsed.clear();
         self.diffs.files.clear();
         self.diffs.selected_file = 0;
         self.diffs.error = None;

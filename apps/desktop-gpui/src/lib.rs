@@ -18,5 +18,8 @@ pub mod reconnect;
 pub mod shell;
 pub mod sidebar;
 pub mod thread;
+pub mod surfaces;
+#[path = "surfaces/terminal/model.rs"]
+pub mod terminal;
 pub mod window_state;
 pub mod workspaces;

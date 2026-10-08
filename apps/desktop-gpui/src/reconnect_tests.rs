@@ -115,10 +115,19 @@ async fn reconnect_uses_fresh_ticket_restores_selection_and_never_replays_uncert
     .await;
     assert!(outcome.unwrap_err().contains("outcome is unknown"));
     let mut reset = false;
+    let mut reconnect_phase = false;
     let mut second_sync = false;
     while !second_sync {
         match updates.recv().await.unwrap() {
             Update::Resynchronizing => reset = true,
+            Update::Phase(Phase::Reconnecting {
+                attempt, retry_in, ..
+            }) => {
+                assert_eq!(attempt, 1);
+                assert!(retry_in <= Duration::from_millis(250));
+                reconnect_phase = true;
+                commands.send(Command::RetryNow).await.unwrap();
+            }
             Update::Thread { thread_id, item } if item["kind"] == "synchronized" => {
                 assert_eq!(thread_id, "t");
                 second_sync = true;
@@ -129,6 +138,10 @@ async fn reconnect_uses_fresh_ticket_restores_selection_and_never_replays_uncert
     assert!(
         reset,
         "UI must discard stale projection before replacement snapshots"
+    );
+    assert!(
+        reconnect_phase,
+        "typed backoff phase precedes the fresh connection"
     );
     assert_eq!(
         call(

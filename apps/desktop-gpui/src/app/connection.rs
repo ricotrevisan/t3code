@@ -4,11 +4,44 @@ use crate::{InspectorSection, NativeApp};
 use gpui_kit::{Context, Window};
 use serde_json::{Value, json};
 use t3code_desktop_gpui::{
-    auth, connection, credentials, files, providers, shell, sidebar, thread, workspaces,
+    auth, connection, credentials, files, shell, sidebar, thread, workspaces,
 };
 
 impl NativeApp {
+    /// Retain a cancellable send when the bounded queue is full. Replacing or
+    /// unsubscribing the same key retires its old send; disconnect retires all.
+    pub(crate) fn enqueue_subscription(&mut self, command: connection::Command, cx: &mut Context<Self>) {
+        let key = match &command {
+            connection::Command::Subscribe { key, .. } | connection::Command::Unsubscribe(key) => key.clone(),
+            _ => unreachable!("subscription control only"),
+        };
+        self.subscription_enqueues.remove(&key);
+        let Some(sender) = self.commands.clone() else {
+            self.report_error("Subscription not requested: not connected", cx);
+            return;
+        };
+        match sender.try_send(command) {
+            Ok(()) => {},
+            Err(async_channel::TrySendError::Closed(_)) => self.report_error("Subscription not requested: connection closed", cx),
+            Err(async_channel::TrySendError::Full(command)) => {
+                let generation = self.generation;
+                let scope = self.environment_scope.clone();
+                let task = cx.spawn(async move |entity, cx| {
+                    let result = sender.send(command).await;
+                    let _ = entity.update(cx, |app, cx| {
+                        if app.generation != generation || app.environment_scope != scope { return; }
+                        if result.is_err() { app.report_error("Subscription not requested: connection closed", cx); }
+                        cx.notify();
+                    });
+                });
+                self.subscription_enqueues.insert(key, task);
+            }
+        }
+    }
+
     pub(crate) fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.subscription_enqueues.clear();
+        self.auth_state = None;
         self.clear_checkout_stops();
         self.clear_queue_subscriptions();
         self.diffs.invalidate();
@@ -18,6 +51,8 @@ impl NativeApp {
         self.pairing_task = None;
         self.credential_task = None;
         self.commands = None;
+        self.connection_phase = connection::Phase::Offline;
+        self.environment_name = None;
         self.action_task = None;
         self.action_busy = false;
         self.project_settings = None;
@@ -67,7 +102,8 @@ impl NativeApp {
             .update(cx, |input, cx| input.set_value("", window, cx));
         let receiver = auth::pair(server, credential);
         let generation = self.generation;
-        self.set_status("Pairing…", cx);
+        self.apply_connection_phase(connection::Phase::Authenticating, cx);
+        self.report_progress("Pairing…", cx);
         self.pairing_task = Some(cx.spawn(async move |entity, cx| {
             if let Ok(result) = receiver.recv().await {
                 let _ = entity.update(cx, |app, cx| {
@@ -82,8 +118,15 @@ impl NativeApp {
                             app.access = Some(access);
                             app.connect(cx);
                         }
-                        Ok(_) => app.set_status("Server changed while pairing; pair again", cx),
-                        Err(message) => app.set_status(message, cx),
+                        Ok(_) => app.apply_connection_phase(
+                            connection::Phase::Error(
+                                "Server changed while pairing; pair again".into(),
+                            ),
+                            cx,
+                        ),
+                        Err(message) => {
+                            app.apply_connection_phase(connection::Phase::Error(message.into()), cx)
+                        }
                     }
                     cx.notify();
                 });
@@ -105,7 +148,7 @@ impl NativeApp {
         let origin = match auth::origin(&server) {
             Ok(origin) => origin,
             Err(error) => {
-                self.set_status(error, cx);
+                self.report_error(error, cx);
                 cx.notify();
                 return;
             }
@@ -113,13 +156,13 @@ impl NativeApp {
         let receiver = match self.vault.request(&server, operation) {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.set_status(error, cx);
+                self.report_error(error, cx);
                 cx.notify();
                 return;
             }
         };
         let generation = self.generation;
-        self.set_status("Updating Keychain…", cx);
+        self.report_progress("Updating Keychain…", cx);
         self.credential_task = Some(cx.spawn(async move |entity, cx| {
             if let Ok(result) = receiver.recv().await {
                 let _ = entity.update(cx, |app, cx| {
@@ -135,15 +178,15 @@ impl NativeApp {
                                     app.access = Some(access);
                                     app.connect(cx);
                                 }
-                                Err(error) => app.set_status(error, cx),
+                                Err(error) => app.report_error(error, cx),
                             }
                         }
                         Ok(None) if loading => app.set_status(
                             "No remembered credential for this server. Pair to connect.",
                             cx,
                         ),
-                        Ok(_) => app.set_status("Keychain updated", cx),
-                        Err(error) => app.set_status(error, cx),
+                        Ok(_) => app.report_success("Keychain updated", cx),
+                        Err(error) => app.report_error(error, cx),
                     }
                     cx.notify();
                 });
@@ -212,6 +255,10 @@ impl NativeApp {
                     );
                     let scope = options.origin();
                     if scope != self.environment_scope {
+                        self.sidebar_state.capabilities = json!({});
+                        self.sidebar_state.custom_snooze_target = None;
+                        self.sidebar_state.rename_target = None;
+                        self.sidebar_state.selection.clear();
                         self.queues = Default::default();
                         self.drafts.clear();
                         self.stash_memory.clear();
@@ -227,12 +274,18 @@ impl NativeApp {
                     self.restore_attachment_draft();
                     let session = connection::start_session(options);
                     self.commands = Some(session.commands);
+                    self.apply_connection_phase(connection::Phase::Connecting, cx);
                     let generation = self.generation;
                     self.connection_task = Some(cx.spawn(async move |entity, cx| {
                         while let Ok(update) = session.updates.recv().await {
                             let keep_running = entity.update(cx, |app, cx| {
                                 let result = match update {
+                                    connection::Update::Phase(phase) => {
+                                        app.apply_connection_phase(phase, cx);
+                                        Ok(())
+                                    }
                                     connection::Update::Resynchronizing => {
+                                        app.connection_phase = connection::Phase::Syncing;
                                         app.action_runs_connection_lost();
                                         app.clear_checkout_stops();
                                         app.clear_queue_subscriptions();
@@ -249,10 +302,14 @@ impl NativeApp {
                                         app.clone_progress.clear();
                                         app.setup_progress = None;
                                         app.pending_history_attached = false;
-                                        app.set_status(
+                                        app.report_progress(
                                             "Reconnecting — history is being synchronized",
                                             cx,
                                         );
+                                        Ok(())
+                                    }
+                                    connection::Update::Error(error) => {
+                                        app.report_error(error, cx);
                                         Ok(())
                                     }
                                     connection::Update::Status(status) => {
@@ -269,26 +326,17 @@ impl NativeApp {
                                         if app.shell.synchronized && !was_synchronized {
                                             app.action_runs_synchronized(cx);
                                             app.perform("server.getConfig", json!({}), None, cx);
-                                            if let Some(sender) = &app.commands {
-                                                let _ = sender.try_send(
-                                                    connection::Command::Subscribe {
-                                                        key: "server-config".into(),
-                                                        tag: "subscribeServerConfig".into(),
-                                                        payload: json!({}),
-                                                    },
-                                                );
-                                            }
+                                            app.enqueue_subscription(connection::Command::Subscribe {
+                                                key: "server-config".into(), tag: "subscribeServerConfig".into(),
+                                                payload: json!({"usageLimitSources":true}),
+                                            }, cx);
                                             if app.inspector_section
                                                 == Some(InspectorSection::Clone)
-                                                && let Some(sender) = &app.commands
                                             {
-                                                let _ = sender.try_send(
-                                                    connection::Command::Subscribe {
-                                                        key: "project-clones".into(),
-                                                        tag: "subscribeProjectClones".into(),
-                                                        payload: json!({}),
-                                                    },
-                                                );
+                                                app.enqueue_subscription(connection::Command::Subscribe {
+                                                    key: "project-clones".into(), tag: "subscribeProjectClones".into(),
+                                                    payload: json!({}),
+                                                }, cx);
                                             }
                                         }
                                         if app.shell.synchronized {
@@ -302,26 +350,29 @@ impl NativeApp {
                                             Ok(())
                                         } else if key.starts_with("queue-detail:") {
                                             app.apply_queue_subscription(&key, item, cx)
+                                        } else if key.starts_with("drawer-") {
+                                            app.terminal_update(&key, item, cx);
+                                            Ok(())
                                         } else if key.starts_with("action-") {
                                             app.action_run_update(&key, item, cx);
+                                            Ok(())
+                                        } else if let Some(instance) = key.strip_prefix("auth:") {
+                                            if app.auth_state.as_ref().is_some_and(|state| state["instanceId"] == instance) {
+                                                match item {
+                                                    Ok(value) if value["instanceId"] == instance => app.accept_provider_auth(value, false, cx),
+                                                    Ok(_) => app.report_error("Invalid authentication state", cx),
+                                                    Err(error) => app.report_error(error, cx),
+                                                }
+                                            }
                                             Ok(())
                                         } else if key == "server-config" {
                                             match item {
                                                 Ok(value) => {
-                                                    if value["type"] == "snapshot" {
-                                                        app.project_settings = Some(
-                                                            value["config"]["settings"].clone(),
-                                                        );
-                                                    } else if value["type"] == "settingsUpdated" {
-                                                        app.project_settings = Some(
-                                                            value["payload"]["settings"].clone(),
-                                                        );
-                                                    }
+                                                    app.apply_server_config_event(value, cx);
                                                     Ok(())
                                                 }
                                                 Err(error) => {
-                                                    app.project_settings = None;
-                                                    app.set_status(error, cx);
+                                                    app.report_error(error, cx);
                                                     Ok(())
                                                 }
                                             }
@@ -350,7 +401,7 @@ impl NativeApp {
                                                     result
                                                 }
                                                 Err(error) => {
-                                                    app.set_status(error, cx);
+                                                    app.report_error(error, cx);
                                                     app.clone_progress.clear();
                                                     Ok(())
                                                 }
@@ -369,7 +420,7 @@ impl NativeApp {
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    app.set_status(error, cx);
+                                                    app.report_error(error, cx);
                                                     Ok(())
                                                 }
                                             }
@@ -387,7 +438,7 @@ impl NativeApp {
                                 };
                                 if let Err(error) = result {
                                     app.clear_notifications(cx);
-                                    app.set_status(
+                                    app.report_error(
                                         format!("Projection failed — reconnect required: {error}"),
                                         cx,
                                     );
@@ -395,6 +446,7 @@ impl NativeApp {
                                     app.clear_checkout_stops();
                                     app.clear_queue_subscriptions();
                                     app.commands = None;
+                                    app.connection_phase = connection::Phase::Error(error);
                                     cx.notify();
                                     return false;
                                 }
@@ -412,12 +464,17 @@ impl NativeApp {
                                 app.clear_queue_subscriptions();
                                 app.clear_notifications(cx);
                                 app.commands = None;
+                                if !matches!(app.connection_phase, connection::Phase::Error(_)) {
+                                    app.connection_phase = connection::Phase::Offline;
+                                }
                                 cx.notify();
                             }
                         });
                     }));
                 }
-                Err(message) => self.set_status(message, cx),
+                Err(message) => {
+                    self.apply_connection_phase(connection::Phase::Error(message.into()), cx)
+                }
             }
         }
         cx.notify();
@@ -431,7 +488,7 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             cx.notify();
             return;
         };
@@ -450,7 +507,7 @@ impl NativeApp {
         };
         let reverting = payload["type"] == "thread.checkpoint.revert";
         self.pending_actions += 1;
-        self.set_status("Waiting for server receipt…", cx);
+        self.report_progress("Waiting for server receipt…", cx);
         cx.spawn(async move |entity, cx| {
             let result = connection::call(&sender, &tag, payload).await;
             if result.is_ok()
@@ -509,14 +566,7 @@ impl NativeApp {
                             app.project_settings = Some(value.clone());
                         }
                         if tag == "server.getConfig" {
-                            match serde_json::from_value::<providers::Config>(value.clone()) {
-                                Ok(config) => app.provider_catalog = config.providers,
-                                Err(_) => {
-                                    app.set_status("Invalid provider catalog response", cx);
-                                    cx.notify();
-                                    return;
-                                }
-                            }
+                            app.accept_config_snapshot(value.clone(), cx);
                             app.available_editors = value["availableEditors"]
                                 .as_array()
                                 .map(|editors| {
@@ -527,17 +577,8 @@ impl NativeApp {
                                 })
                                 .unwrap_or_default();
                         }
-                        if tag == "provider.auth.start" {
-                            app.auth_state = Some(value.clone());
-                            if let Some(url) = value["authorizationUrl"].as_str() {
-                                cx.open_url(url);
-                            }
-                        }
-                        if tag == "provider.auth.start" {
-                            app.auth_state = Some(value.clone());
-                            if let Some(url) = value["authorizationUrl"].as_str() {
-                                cx.open_url(url);
-                            }
+                        if matches!(tag.as_str(), "provider.auth.start" | "provider.auth.complete" | "provider.auth.cancel") {
+                            app.accept_provider_auth(value.clone(), tag == "provider.auth.start", cx);
                         }
                         if tag == "orchestration.getArchivedShellSnapshot" {
                             match serde_json::from_value::<shell::Snapshot>(value.clone()) {
@@ -547,7 +588,7 @@ impl NativeApp {
                                         .apply(shell::ShellItem::Snapshot { snapshot });
                                 }
                                 Err(_) => {
-                                    app.set_status("Invalid archive snapshot", cx);
+                                    app.report_error("Invalid archive snapshot", cx);
                                     cx.notify();
                                     return;
                                 }
@@ -598,7 +639,7 @@ impl NativeApp {
                             app.report_success("Checkpoint restored", cx);
                         }
                     }
-                    Err(error) => app.set_status(error, cx),
+                    Err(error) => app.report_error(error, cx),
                 }
                 cx.notify();
             });

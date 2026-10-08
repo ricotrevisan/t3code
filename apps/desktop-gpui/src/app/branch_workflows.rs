@@ -74,6 +74,9 @@ impl NativeApp {
         self.branch_workflow_busy = false;
         self.branch_workflow_error = None;
         self.branch_workflow = BranchWorkflow::Browse;
+        self.git_picker.index = 0;
+        self.git_picker.query.clear();
+        self.git_picker.scroll.scroll_to_item(0);
         cx.notify();
     }
 
@@ -142,6 +145,13 @@ impl NativeApp {
         self.worktree_path.update(cx, |input, cx| {
             input.set_value(path.unwrap_or_default(), window, cx)
         });
+        if self.inspector_open
+            && self.inspector_section == Some(crate::InspectorSection::Worktrees)
+            && self.refs.is_empty()
+            && !self.worktree_busy
+        {
+            self.worktree_operation("vcs.listRefs", false, cx);
+        }
         base
     }
 
@@ -422,6 +432,7 @@ impl NativeApp {
                 thread.worktree_path = path.clone();
             }
             if let Some(detail) = self.detail.thread.as_mut().filter(|t| t["id"] == id) {
+                let detail = std::sync::Arc::make_mut(detail);
                 detail["branch"] = json!(branch);
                 detail["worktreePath"] = json!(path);
             }

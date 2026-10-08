@@ -4,9 +4,22 @@ use crate::{InspectorSection, NativeApp};
 use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::{AppContext as _, Context, Focusable as _, Window};
 use serde_json::json;
-use t3code_desktop_gpui::{commands, palette};
+use t3code_desktop_gpui::palette;
 
 impl NativeApp {
+    pub(crate) fn change_scale(
+        &mut self,
+        delta: Option<i8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = crate::theme::update(window, cx, |preferences| {
+            preferences.zoom = delta.map_or(0, |delta| preferences.zoom.saturating_add(delta));
+        }) {
+            self.report_error(format!("Could not save appearance: {error}"), cx);
+        }
+        cx.notify();
+    }
     /// Closes the topmost open overlay; false when there was nothing to close.
     pub(crate) fn dismiss_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.palette_open {
@@ -84,12 +97,10 @@ impl NativeApp {
     }
 
     pub(crate) fn move_palette(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let count = palette::matching(
-            &self.palette_query.read(cx).value(),
-            self.selected_thread.is_some(),
-        )
-        .len();
+        let count = self.palette_items(cx).len();
         self.palette_index = palette::step(self.palette_index, count, forward);
+        self.palette_scroll
+            .scroll_to_item(self.palette_index, gpui_kit::ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -126,19 +137,7 @@ impl NativeApp {
                     .update(cx, |input, cx| input.focus(window, cx));
             }
             Command::ContentSearch => self.reveal_inspector(InspectorSection::Files, window, cx),
-            Command::AddProject => {
-                self.reveal_inspector(InspectorSection::Project, window, cx);
-                match commands::create_project(
-                    &self.title.read(cx).value(),
-                    &self.workspace.read(cx).value(),
-                ) {
-                    Ok(command) => self.dispatch(command, cx),
-                    Err(error) => {
-                        self.set_status(error, cx);
-                        cx.notify();
-                    }
-                }
-            }
+            Command::AddProject => self.open_add_project(window, cx),
             Command::RenameProject => self.update_project(false, cx),
             Command::RemoveProject => self.update_project(true, cx),
             Command::NewThread => self.new_thread(window, cx),
@@ -149,6 +148,9 @@ impl NativeApp {
             Command::Connect => self.connect(cx),
             Command::Disconnect => self.disconnect(cx),
             Command::Settings => {
+                self.settings_query
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.refresh_settings_providers(false, cx);
                 self.settings_open = true;
                 cx.notify();
             }

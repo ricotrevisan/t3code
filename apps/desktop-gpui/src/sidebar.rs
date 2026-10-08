@@ -1,8 +1,668 @@
 //! Sidebar membership derives timed snoozes locally; expiry needs no server event.
 use crate::shell::Thread;
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
+pub struct State {
+    pub capabilities: Value,
+    pub cleanup: CleanupState,
+    pub project_settings_target: Option<(String, String)>,
+    pub priority: bool,
+    pub scroll: gpui_kit::ScrollHandle,
+    pub selected_bounds:
+        std::rc::Rc<std::cell::RefCell<Option<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
+    pub scope_picker: bool,
+    local_path: Option<std::path::PathBuf>,
+    pub project_scope: Option<String>,
+    pub custom_snooze_target: Option<String>,
+    pub custom_snooze_environment: Option<String>,
+    pub rename_target: Option<(String, String)>,
+    pub rename_busy: Option<u64>,
+    pub search_query: String,
+    pub search_environment: String,
+    pub search_epoch: u64,
+    pub search_loading: bool,
+    pub search_error: Option<String>,
+    pub search_index: usize,
+    pub order_busy: bool,
+    pub order_generation: u64,
+    pub selection_environment: String,
+    pub selection: Vec<String>,
+    pub selection_anchor: Option<String>,
+    pub bulk_busy: bool,
+    pub bulk_generation: u64,
+    /// Search contracts expose timestamps, not message IDs. Timeline resolves
+    /// this exact source/timestamp pair after the thread projection arrives.
+    pub message_anchor: Option<MessageAnchor>,
+    groups: std::cell::RefCell<GroupCache>,
+    row_cache: std::cell::RefCell<RowCache>,
+    pub read_at: std::collections::HashMap<(String, String), DateTime<Utc>>,
+    pub marked_unread: std::collections::HashSet<(String, String)>,
+}
+
+#[derive(Clone)]
+pub struct Drag {
+    pub id: String,
+    pub title: String,
+    pub environment: String,
+    pub generation: u64,
+}
+
+#[derive(Default)]
+pub struct CleanupState {
+    pub generation: u64,
+    pub target: Option<(String, String)>,
+    pub epoch: u64,
+    pub busy: bool,
+    pub review: Option<CleanupReview>,
+    pub result: Option<CleanupResult>,
+    pub selected: Vec<String>,
+    pub error: Option<String>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupReview {
+    pub review_id: String,
+    pub thread_id: String,
+    pub title: String,
+    pub actions: Vec<CleanupAction>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupAction {
+    pub id: String,
+    pub title: String,
+    pub detail: String,
+    pub blocked_reason: Option<String>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupResult {
+    pub thread_id: String,
+    pub actions: Vec<CleanupOutcome>,
+}
+#[derive(serde::Deserialize)]
+pub struct CleanupOutcome {
+    pub id: String,
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct LocalState {
+    priority: bool,
+    read_at: Vec<(String, String, DateTime<Utc>)>,
+    marked_unread: Vec<(String, String)>,
+}
+
+pub struct RowData {
+    pub status: Option<Status>,
+    pub meta: Option<String>,
+    pub age: Option<String>,
+}
+struct CachedRow {
+    thread: Thread,
+    queued: bool,
+    clock: (i64, bool),
+    data: std::rc::Rc<RowData>,
+}
+#[derive(Default)]
+struct RowCache {
+    environment: String,
+    rows: std::collections::HashMap<String, CachedRow>,
+    preparations: usize,
+}
+
+#[derive(Default)]
+struct GroupCache {
+    environment: String,
+    identity: Option<(Option<u64>, usize, i64)>,
+    expires_at: Option<DateTime<Utc>>,
+    rows: std::collections::HashMap<(String, View), [Vec<usize>; 2]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageAnchor {
+    pub environment: String,
+    pub thread_id: String,
+    pub source: String,
+    pub message_created_at: String,
+}
+
+/// Resolve the wire search timestamp to a real message after its thread loads.
+/// Never manufacture a message ID or fall back to the timeline tail.
+pub fn resolve_search_anchor(anchor: &MessageAnchor, thread: &Value) -> Option<String> {
+    if thread["id"].as_str() != Some(anchor.thread_id.as_str()) {
+        return None;
+    }
+    let at = DateTime::parse_from_rfc3339(&anchor.message_created_at).ok()?;
+    thread["messages"].as_array()?.iter().find(|message| {
+        message["role"].as_str() == Some(anchor.source.as_str())
+            && message["createdAt"]
+                .as_str()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                == Some(at)
+    })?["id"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+impl State {
+    /// Reveal only an offscreen row, using the next layout's bounds. Aligning
+    /// every selection to the top hides shelf headers even when it was visible.
+    pub fn scroll_selected(&self, window: &mut gpui_kit::Window, _cx: &mut gpui_kit::App) {
+        let selected = self.selected_bounds.clone();
+        let scroll = self.scroll.clone();
+        window.on_next_frame(move |window, _| {
+            let Some(row) = *selected.borrow() else {
+                return;
+            };
+            let viewport = scroll.bounds();
+            let delta = if row.top() < viewport.top() {
+                viewport.top() - row.top()
+            } else if row.bottom() > viewport.bottom() {
+                viewport.bottom() - row.bottom()
+            } else {
+                return;
+            };
+            let mut offset = scroll.offset();
+            offset.y += delta;
+            scroll.set_offset(offset);
+            window.refresh();
+        });
+    }
+
+    pub fn retain_rows(&self, threads: &[Thread], environment: &str) {
+        let mut cache = self.row_cache.borrow_mut();
+        if cache.environment != environment {
+            cache.rows.clear();
+            cache.environment = environment.to_owned();
+        }
+        let ids: std::collections::HashSet<_> =
+            threads.iter().map(|thread| thread.id.as_str()).collect();
+        cache.rows.retain(|id, _| ids.contains(id.as_str()));
+    }
+
+    pub fn prepared_row(
+        &self,
+        thread: &Thread,
+        queued: bool,
+        now: DateTime<Utc>,
+    ) -> std::rc::Rc<RowData> {
+        let mut cache = self.row_cache.borrow_mut();
+        let clock = (now.timestamp() / 60, snoozed(thread, now));
+        if let Some(row) = cache.rows.get(&thread.id)
+            && row.thread == *thread
+            && row.queued == queued
+            && row.clock == clock
+        {
+            return row.data.clone();
+        }
+        let data = std::rc::Rc::new(RowData {
+            status: primary_status(thread, queued),
+            meta: thread_meta(thread),
+            age: row_time(thread, now),
+        });
+        cache.preparations += 1;
+        cache.rows.insert(
+            thread.id.clone(),
+            CachedRow {
+                thread: thread.clone(),
+                queued,
+                clock,
+                data: data.clone(),
+            },
+        );
+        data
+    }
+
+    pub fn row_preparation_count(&self) -> usize {
+        self.row_cache.borrow().preparations
+    }
+
+    pub fn woke(&self, environment: &str, thread: &Thread, now: DateTime<Utc>) -> bool {
+        thread.settled_override.as_deref() != Some("settled")
+            && woke_at(thread, now).is_some_and(|at| {
+                self.read_at
+                    .get(&(environment.to_owned(), thread.id.clone()))
+                    .is_none_or(|read| *read < at)
+            })
+    }
+    pub fn reconcile_selection(&mut self, environment: &str, order: &[String]) {
+        if self.selection_environment != environment {
+            self.selection.clear();
+            self.selection_anchor = None;
+            self.selection_environment = environment.to_owned();
+        }
+        self.selection.retain(|id| order.contains(id));
+        if self
+            .selection_anchor
+            .as_ref()
+            .is_some_and(|id| !order.contains(id))
+        {
+            self.selection_anchor = None;
+        }
+    }
+
+    /// Only projection changes and a coarse minute boundary invalidate group
+    /// membership/order. Unrelated composer/streaming notifies reuse indices.
+    pub fn grouped<'a>(
+        &self,
+        threads: &'a [Thread],
+        sequence: Option<u64>,
+        project: &str,
+        view: View,
+        now: DateTime<Utc>,
+        environment: &str,
+    ) -> [(&'static str, &'static str, Vec<&'a Thread>); 2] {
+        let mut cache = self.groups.borrow_mut();
+        let identity = (sequence, threads.len(), now.timestamp() / 60);
+        if cache.environment != environment
+            || cache.identity != Some(identity)
+            || cache.expires_at.is_some_and(|at| at <= now)
+        {
+            cache.rows.clear();
+            cache.identity = Some(identity);
+            cache.environment = environment.to_owned();
+            cache.expires_at = threads
+                .iter()
+                .filter_map(|thread| thread.snoozed_until.as_deref())
+                .filter_map(|at| DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&Utc))
+                .filter(|at| *at > now)
+                .min();
+        }
+        let key = (project.to_owned(), view);
+        let indices = cache.rows.entry(key).or_insert_with(|| {
+            let groups = grouped(threads, project, view, now);
+            let lookup: std::collections::HashMap<_, _> = threads
+                .iter()
+                .enumerate()
+                .map(|(index, thread)| (thread.id.as_str(), index))
+                .collect();
+            groups.map(|(_, _, rows)| {
+                rows.into_iter()
+                    .filter_map(|thread| lookup.get(thread.id.as_str()).copied())
+                    .collect()
+            })
+        });
+        [
+            (
+                "pinned",
+                "Pinned",
+                indices[0].iter().map(|index| &threads[*index]).collect(),
+            ),
+            (
+                "active",
+                group_label(view),
+                indices[1].iter().map(|index| &threads[*index]).collect(),
+            ),
+        ]
+    }
+
+    pub fn priority_groups<'a>(
+        &self,
+        threads: &'a [Thread],
+        revision: u64,
+        now: DateTime<Utc>,
+        environment: &str,
+    ) -> Vec<(&'static str, &'static str, Vec<&'a Thread>)> {
+        let project = self.project_scope.as_deref().unwrap_or("");
+        let active = self.grouped(
+            threads,
+            Some(revision),
+            project,
+            View::Active,
+            now,
+            environment,
+        );
+        let snoozed = self.grouped(
+            threads,
+            Some(revision),
+            project,
+            View::Snoozed,
+            now,
+            environment,
+        );
+        let settled = self.grouped(
+            threads,
+            Some(revision),
+            project,
+            View::Settled,
+            now,
+            environment,
+        );
+        let mut sleeping: Vec<_> = snoozed.into_iter().flat_map(|(_, _, rows)| rows).collect();
+        sleeping.sort_by(|left, right| {
+            left.snoozed_until
+                .cmp(&right.snoozed_until)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut finished: Vec<_> = settled.into_iter().flat_map(|(_, _, rows)| rows).collect();
+        finished.sort_by(|left, right| {
+            last_activity(right)
+                .cmp(&last_activity(left))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        vec![
+            active[0].clone(),
+            active[1].clone(),
+            ("snoozed", "Snoozed", sleeping),
+            ("settled", "Settled", finished),
+        ]
+    }
+
+    /// Tests pass a sandbox path; production opts in only on normal startup.
+    pub fn load_local(&mut self, path: std::path::PathBuf) -> Result<(), String> {
+        let local: LocalState = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalState::default(),
+            Err(error) => return Err(error.to_string()),
+        };
+        self.priority = local.priority;
+        self.read_at = local
+            .read_at
+            .into_iter()
+            .map(|(environment, thread, at)| ((environment, thread), at))
+            .collect();
+        self.marked_unread = local.marked_unread.into_iter().collect();
+        self.local_path = Some(path);
+        Ok(())
+    }
+
+    /// Flush at shutdown; no synchronous disk writes on streaming/UI renders.
+    pub fn save_local(&self) -> Result<(), String> {
+        let Some(path) = &self.local_path else {
+            return Ok(());
+        };
+        let local = LocalState {
+            priority: self.priority,
+            read_at: self
+                .read_at
+                .iter()
+                .map(|((environment, thread), at)| (environment.clone(), thread.clone(), *at))
+                .collect(),
+            marked_unread: self.marked_unread.iter().cloned().collect(),
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let pending = path.with_extension("json.pending");
+        std::fs::write(
+            &pending,
+            serde_json::to_vec(&local).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::rename(pending, path).map_err(|error| error.to_string())
+    }
+
+    pub fn visit(&mut self, environment: &str, thread: &Thread) {
+        let key = (environment.to_owned(), thread.id.clone());
+        self.marked_unread.remove(&key);
+        self.read_at.insert(key, Utc::now());
+    }
+
+    pub fn unread(&self, environment: &str, thread: &Thread) -> bool {
+        let key = (environment.to_owned(), thread.id.clone());
+        self.marked_unread.contains(&key)
+            || thread
+                .latest_turn
+                .as_ref()
+                .and_then(|turn| turn.completed_at.as_deref())
+                .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                .is_some_and(|at| self.read_at.get(&key).is_some_and(|read| at > *read))
+    }
+}
+
+/// Shared availability for the header and real sidebar row menu. A missing
+/// projection is an unsent draft, never a wildcard for lifecycle operations.
+pub fn thread_action_policy(
+    thread: Option<&Thread>,
+    action: &str,
+    now: DateTime<Utc>,
+    capabilities: &Value,
+) -> bool {
+    let Some(thread) = thread else {
+        return matches!(action, "rename" | "discard");
+    };
+    let running = thread
+        .session
+        .as_ref()
+        .is_some_and(|session| matches!(session.status.as_str(), "running" | "starting"));
+    let supported = |name: &str| capabilities[name].as_bool() == Some(true);
+    if thread.archived_at.is_some()
+        && matches!(
+            action,
+            "settle" | "unsettle" | "snooze" | "unsnooze" | "pin" | "unpin"
+        )
+    {
+        return false;
+    }
+    match action {
+        "discard" => false,
+        "settle" | "unsettle" => {
+            supported("threadSettlement")
+                && (action == "unsettle"
+                    || (!running
+                        && !thread.has_pending_approvals
+                        && !thread.has_pending_user_input
+                        && !queued_turn_start(thread, now)))
+                && action_applies(thread, action, now)
+        }
+        "pin" | "unpin" => supported("threadPinning") && action_applies(thread, action, now),
+        "snooze" | "unsnooze" => {
+            supported("threadSnooze")
+                && (action == "unsnooze"
+                    || (!thread.has_pending_approvals
+                        && !thread.has_pending_user_input
+                        && !queued_turn_start(thread, now)))
+                && action_applies(thread, action, now)
+        }
+        "archive" => !running && action_applies(thread, action, now),
+        "regenerate-title" => {
+            supported("threadTitleRegeneration") && thread.title_regeneration.is_none()
+        }
+        "new-thread-on-branch" | "copy-branch" => thread.branch.is_some(),
+        _ => action_applies(thread, action, now),
+    }
+}
+
+/// Client twin of the bounded adoption-window invariant from threadSettled.ts.
+pub fn queued_turn_start(thread: &Thread, now: DateTime<Utc>) -> bool {
+    if thread
+        .session
+        .as_ref()
+        .is_some_and(|session| session.status == "error")
+    {
+        return false;
+    }
+    let Some(message) = thread
+        .latest_user_message_at
+        .as_deref()
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+    else {
+        return false;
+    };
+    if (now - message.with_timezone(&Utc))
+        .num_seconds()
+        .unsigned_abs()
+        > 120
+    {
+        return false;
+    }
+    thread.latest_turn.as_ref().is_none_or(|turn| {
+        [&turn.requested_at, &turn.started_at, &turn.completed_at]
+            .into_iter()
+            .filter_map(|value| value.as_deref())
+            .filter_map(|at| DateTime::parse_from_rfc3339(at).ok())
+            .all(|at| at < message)
+    })
+}
+
+/// Same base-26 fractional key convention as client-runtime/threadSort.ts.
+/// A keyless neighbor needs section materialization; callers omit the move
+/// rather than pretending one write can cross the keyless Active prefix.
+pub fn move_key(rows: &[&Thread], target: &str, forward: bool, pinned: bool) -> Option<String> {
+    let from = rows.iter().position(|thread| thread.id == target)?;
+    let to = if forward {
+        from.checked_add(1)?
+    } else {
+        from.checked_sub(1)?
+    };
+    if to >= rows.len() {
+        return None;
+    }
+    let mut order = rows.to_vec();
+    let moved = order.remove(from);
+    order.insert(to, moved);
+    let key = |thread: &Thread| {
+        if pinned {
+            thread.pin_order_key.clone()
+        } else {
+            thread.active_order_key.clone()
+        }
+    };
+    let before = if to > 0 {
+        Some(key(order[to - 1])?)
+    } else {
+        None
+    };
+    let after = if to + 1 < order.len() {
+        Some(key(order[to + 1])?)
+    } else {
+        None
+    };
+    key_between(before.as_deref(), after.as_deref())
+}
+
+pub fn key_between(before: Option<&str>, after: Option<&str>) -> Option<String> {
+    let a = before.unwrap_or("");
+    let b = after.unwrap_or("");
+    let valid = |key: &str| {
+        key.is_empty()
+            || (key.bytes().all(|digit| digit.is_ascii_lowercase()) && !key.ends_with('a'))
+    };
+    if !valid(a) || !valid(b) || (!b.is_empty() && a >= b) {
+        return None;
+    }
+    fn midpoint(a: &[u8], b: &[u8]) -> Vec<u8> {
+        if !b.is_empty() {
+            let prefix = b
+                .iter()
+                .enumerate()
+                .take_while(|(index, digit)| a.get(*index).copied().unwrap_or(b'a') == **digit)
+                .count();
+            if prefix > 0 {
+                let mut key = b[..prefix].to_vec();
+                key.extend(midpoint(a.get(prefix..).unwrap_or_default(), &b[prefix..]));
+                return key;
+            }
+        }
+        let low = a.first().map_or(0, |digit| digit - b'a');
+        let high = b.first().map_or(26, |digit| digit - b'a');
+        if high - low > 1 {
+            return vec![b'a' + (low + high).div_ceil(2)];
+        }
+        if b.len() > 1 {
+            return vec![b[0]];
+        }
+        let mut key = vec![b'a' + low];
+        key.extend(midpoint(a.get(1..).unwrap_or_default(), &[]));
+        key
+    }
+    String::from_utf8(midpoint(a.as_bytes(), b.as_bytes())).ok()
+}
+
+/// Byte ranges stay on Unicode boundaries even when lowercase expands a
+/// character. The original snippet, not a lowercase copy, is rendered.
+pub fn match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    if query.is_empty() {
+        return vec![];
+    }
+    let needle = query.to_lowercase();
+    let boundaries: Vec<_> = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let mut ranges = Vec::new();
+    let mut next = 0;
+    for (index, start) in boundaries.iter().copied().enumerate() {
+        if start < next {
+            continue;
+        }
+        for end in boundaries.iter().copied().skip(index + 1) {
+            let value = text[start..end].to_lowercase();
+            if value == needle {
+                ranges.push(start..end);
+                next = end;
+                break;
+            }
+            if value.len() >= needle.len() {
+                break;
+            }
+        }
+    }
+    ranges
+}
+
+pub fn row_time(thread: &Thread, now: DateTime<Utc>) -> Option<String> {
+    if snoozed(thread, now) {
+        let until = DateTime::parse_from_rfc3339(thread.snoozed_until.as_deref()?).ok()?;
+        return Some(format!(
+            "Wakes {}",
+            until.with_timezone(&chrono::Local).format("%a %H:%M")
+        ));
+    }
+    last_activity(thread).map(|at| relative_time(at, now))
+}
+
+/// Resolve calendar presets in local time, preserving DST and deduplicating
+/// Sunday's Tomorrow/Next week. Ambiguous/nonexistent wall times are omitted.
+pub fn snooze_presets(now: DateTime<chrono::Local>) -> Vec<(&'static str, DateTime<Utc>)> {
+    use chrono::{Datelike, TimeZone};
+    let mut choices = vec![
+        (
+            "In 1 hour",
+            (now + chrono::Duration::hours(1)).with_timezone(&Utc),
+        ),
+        (
+            "In 3 hours",
+            (now + chrono::Duration::hours(3)).with_timezone(&Utc),
+        ),
+    ];
+    let at = |date: chrono::NaiveDate, hour| {
+        chrono::Local
+            .from_local_datetime(&date.and_hms_opt(hour, 0, 0)?)
+            .single()
+            .map(|value| value.with_timezone(&Utc))
+    };
+    if let Some(evening) = at(now.date_naive(), 18)
+        && evening > now.with_timezone(&Utc) + chrono::Duration::hours(1)
+    {
+        choices.push(("This evening", evening));
+    }
+    if let Some(tomorrow) = now.date_naive().succ_opt().and_then(|date| at(date, 9)) {
+        choices.push(("Tomorrow", tomorrow));
+    }
+    let days = match now.weekday().num_days_from_monday() {
+        0 => 7,
+        day => 7 - day,
+    };
+    if let Some(next) = now
+        .date_naive()
+        .checked_add_days(chrono::Days::new(days.into()))
+        .and_then(|date| at(date, 9))
+        && !choices.iter().any(|(_, value)| *value == next)
+    {
+        choices.push(("Next week", next));
+    }
+    choices
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {
     Active,
     Settled,
@@ -10,7 +670,43 @@ pub enum View {
     Archived,
 }
 
+fn timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|at| at.with_timezone(&Utc))
+}
+
+pub fn raised_hand(thread: &Thread) -> bool {
+    thread.has_pending_approvals
+        || thread.has_pending_user_input
+        // Session status-edge timestamps are not projected by this client yet.
+        // Never treat a pre-snooze error as fresh information.
+        || thread.latest_turn.as_ref().is_some_and(|turn| {
+            turn.state == "completed"
+                && timestamp(thread.snoozed_at.as_deref()).is_some()
+                && timestamp(turn.completed_at.as_deref()) > timestamp(thread.snoozed_at.as_deref())
+        })
+}
+
+pub fn woke_at(thread: &Thread, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let until = timestamp(thread.snoozed_until.as_deref())?;
+    if raised_hand(thread) {
+        if let Some(turn) = &thread.latest_turn
+            && turn.state == "completed"
+            && timestamp(thread.snoozed_at.as_deref()).is_some()
+            && timestamp(turn.completed_at.as_deref()) > timestamp(thread.snoozed_at.as_deref())
+        {
+            return timestamp(turn.completed_at.as_deref());
+        }
+        return timestamp(thread.snoozed_at.as_deref());
+    }
+    (until <= now).then_some(until)
+}
+
 pub fn snoozed(thread: &Thread, now: DateTime<Utc>) -> bool {
+    if raised_hand(thread) {
+        return false;
+    }
     thread
         .snoozed_until
         .as_deref()
@@ -55,6 +751,7 @@ pub enum Status {
     Input,
     Working,
     Plan,
+    Error,
 }
 
 impl Status {
@@ -64,6 +761,7 @@ impl Status {
             Self::Input => "Input",
             Self::Working => "Working",
             Self::Plan => "Plan",
+            Self::Error => "Error",
         }
     }
 }
@@ -82,6 +780,12 @@ pub fn primary_status(thread: &Thread, queued: bool) -> Option<Status> {
             .is_some_and(|session| matches!(session.status.as_str(), "running" | "starting"))
     {
         Some(Status::Working)
+    } else if thread
+        .session
+        .as_ref()
+        .is_some_and(|session| session.status == "error" || session.last_error.is_some())
+    {
+        Some(Status::Error)
     } else if thread.has_actionable_proposed_plan {
         Some(Status::Plan)
     } else {
@@ -122,9 +826,8 @@ pub fn relative_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// A project's rows for a view, split into the groups the sidebar renders, in
-/// render order, most recently active first. Thread navigation walks the same
-/// result.
+/// A project's rows in render/navigation order. Active honors server-arranged
+/// keys; keyless rows use creation/re-entry anchors (legacy activity fallback).
 pub fn grouped<'a>(
     threads: &'a [Thread],
     project_id: &str,
@@ -133,9 +836,59 @@ pub fn grouped<'a>(
 ) -> [(&'static str, &'static str, Vec<&'a Thread>); 2] {
     let mut rows: Vec<_> = threads
         .iter()
-        .filter(|thread| thread.project_id == project_id && belongs(thread, view, now))
+        .filter(|thread| {
+            (project_id.is_empty() || thread.project_id == project_id) && belongs(thread, view, now)
+        })
         .collect();
-    rows.sort_by_key(|thread| std::cmp::Reverse(last_activity(thread)));
+    let anchor = |thread: &Thread, pinned: bool| {
+        (if pinned {
+            thread.created_at.as_deref()
+        } else {
+            thread
+                .unsettled_at
+                .as_deref()
+                .or(thread.created_at.as_deref())
+        })
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&Utc))
+        .or_else(|| last_activity(thread))
+    };
+    rows.sort_by(|left, right| {
+        if left.pinned_at.is_some() != right.pinned_at.is_some() {
+            return right.pinned_at.is_some().cmp(&left.pinned_at.is_some());
+        }
+        if view != View::Active {
+            return last_activity(right)
+                .cmp(&last_activity(left))
+                .then_with(|| left.id.cmp(&right.id));
+        }
+        let pinned = left.pinned_at.is_some() && right.pinned_at.is_some();
+        let (left_key, right_key) = if pinned {
+            (&left.pin_order_key, &right.pin_order_key)
+        } else {
+            (&left.active_order_key, &right.active_order_key)
+        };
+        match (left_key, right_key) {
+            (Some(a), Some(b)) => a.cmp(b).then_with(|| left.id.cmp(&right.id)),
+            (Some(_), None) => {
+                if pinned {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            }
+            (None, Some(_)) => {
+                if pinned {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                }
+            }
+            _ => anchor(right, pinned)
+                .cmp(&anchor(left, pinned))
+                .then_with(|| left.id.cmp(&right.id)),
+        }
+    });
     let (pinned, active) = rows
         .into_iter()
         .partition(|thread| thread.pinned_at.is_some());
@@ -221,6 +974,114 @@ pub fn thread_meta(thread: &Thread) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn sidebar_fixb_prepares_only_changed_rows() {
+        let state = State::default();
+        let now = Utc::now();
+        let mut first = thread();
+        first.id = "a".into();
+        let mut second = first.clone();
+        second.id = "b".into();
+        state.retain_rows(&[first.clone(), second.clone()], "env");
+        let a = state.prepared_row(&first, false, now);
+        state.prepared_row(&second, false, now);
+        for _ in 0..100 {
+            assert!(std::rc::Rc::ptr_eq(
+                &a,
+                &state.prepared_row(&first, false, now)
+            ));
+            state.prepared_row(&second, false, now);
+        }
+        assert_eq!(state.row_preparation_count(), 2);
+        second.title = "Changed by stream".into();
+        state.prepared_row(&second, false, now);
+        assert_eq!(state.row_preparation_count(), 3);
+        assert!(std::rc::Rc::ptr_eq(
+            &a,
+            &state.prepared_row(&first, false, now)
+        ));
+        state.prepared_row(&first, true, now);
+        assert_eq!(state.row_preparation_count(), 4);
+    }
+
+    #[test]
+    fn sidebar_fixb_local_restart_keeps_environment_read_markers_and_view() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sidebar.json");
+        let mut state = State::default();
+        state.load_local(path.clone()).unwrap();
+        state.priority = true;
+        let mut row = thread();
+        row.latest_turn = Some(
+            serde_json::from_value(serde_json::json!({
+                "turnId":"turn", "state":"completed", "completedAt":"2026-04-01T00:00:00Z"
+            }))
+            .unwrap(),
+        );
+        // Never-visited history is not automatically unread.
+        assert!(!state.unread("env", &row));
+        state.visit("env", &row);
+        state
+            .marked_unread
+            .insert(("other-env".into(), row.id.clone()));
+        state.save_local().unwrap();
+        let mut restarted = State::default();
+        restarted.load_local(path).unwrap();
+        assert!(restarted.priority);
+        assert!(!restarted.unread("env", &row));
+        assert!(restarted.unread("other-env", &row));
+        restarted.visit("other-env", &row);
+        assert!(!restarted.unread("other-env", &row));
+    }
+
+    #[test]
+    fn sidebar_fixb_raised_hand_and_timer_wake_keep_original_early_timestamp() {
+        let now = DateTime::parse_from_rfc3339("2026-04-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut row = thread();
+        row.snoozed_at = Some("2026-04-01T09:00:00Z".into());
+        row.snoozed_until = Some("2026-04-01T13:00:00Z".into());
+        assert!(snoozed(&row, now));
+        row.has_pending_approvals = true;
+        assert!(
+            !snoozed(&row, now),
+            "approval must never be hidden on snoozed shelf"
+        );
+        row.has_pending_approvals = false;
+        row.latest_turn = Some(
+            serde_json::from_value(serde_json::json!({
+                "turnId":"turn", "state":"completed", "completedAt":"2026-04-01T11:00:00Z"
+            }))
+            .unwrap(),
+        );
+        let state = State::default();
+        assert!(state.woke("env", &row, now));
+        let early = woke_at(&row, now).unwrap();
+        assert_eq!(woke_at(&row, now + chrono::Duration::hours(2)), Some(early));
+        row.latest_turn = None;
+        assert_eq!(woke_at(&row, now), None);
+        assert_eq!(
+            woke_at(&row, now + chrono::Duration::hours(2)),
+            timestamp(row.snoozed_until.as_deref())
+        );
+    }
+
+    #[test]
+    fn sidebar_fixb_reconcile_drops_hidden_anchor_and_environment_selection() {
+        let mut state = State {
+            selection_environment: "env".into(),
+            selection: vec!["hidden".into(), "visible".into()],
+            selection_anchor: Some("hidden".into()),
+            ..Default::default()
+        };
+        state.reconcile_selection("env", &["visible".into()]);
+        assert_eq!(state.selection, vec!["visible"]);
+        assert!(state.selection_anchor.is_none());
+        state.reconcile_selection("other", &["visible".into()]);
+        assert!(state.selection.is_empty());
+    }
+
     fn thread() -> Thread {
         serde_json::from_value(json!({"id":"t","projectId":"p","title":"Test"})).unwrap()
     }
@@ -357,6 +1218,96 @@ mod tests {
                 ("pinned", vec!["pin-new", "pin-old"]),
                 ("active", vec!["new", "old", "unknown"]),
             ]
+        );
+    }
+
+    #[test]
+    fn sidebar_parity_policy_drafts_capabilities_and_busy_state() {
+        let now = Utc::now();
+        let caps = json!({"threadPinning":true,"threadSettlement":true,"threadSnooze":true});
+        for action in ["pin", "unpin", "archive", "settle", "snooze", "delete"] {
+            assert!(!thread_action_policy(None, action, now, &caps));
+        }
+        assert!(thread_action_policy(None, "rename", now, &caps));
+        assert!(thread_action_policy(None, "discard", now, &caps));
+        let mut row = thread();
+        assert!(!thread_action_policy(Some(&row), "pin", now, &json!({})));
+        row.session = Some(crate::shell::Session {
+            status: "running".into(),
+            last_error: None,
+        });
+        assert!(!thread_action_policy(Some(&row), "archive", now, &caps));
+        assert!(thread_action_policy(Some(&row), "snooze", now, &caps));
+        row.has_pending_approvals = true;
+        assert!(!thread_action_policy(Some(&row), "snooze", now, &caps));
+    }
+
+    #[test]
+    fn sidebar_parity_fractional_keys_stay_between_neighbors() {
+        for (before, after) in [
+            (None, None),
+            (Some("b"), Some("c")),
+            (None, Some("ab")),
+            (Some("z"), None),
+            (Some("bbb"), Some("bbc")),
+        ] {
+            let key = key_between(before, after).unwrap();
+            assert!(before.is_none_or(|before| before < key.as_str()));
+            assert!(after.is_none_or(|after| key.as_str() < after));
+            assert!(!key.ends_with('a'));
+        }
+        assert!(key_between(Some("a"), None).is_none());
+        assert!(key_between(Some("z"), Some("b")).is_none());
+    }
+
+    #[test]
+    fn sidebar_parity_anchor_resolves_source_and_instant_not_tail() {
+        let anchor = MessageAnchor {
+            environment: "e".into(),
+            thread_id: "t".into(),
+            source: "assistant".into(),
+            message_created_at: "2026-04-01T00:00:00Z".into(),
+        };
+        let thread = json!({"id":"t","messages":[
+            {"id":"u","role":"user","createdAt":"2026-04-01T00:00:00Z"},
+            {"id":"a","role":"assistant","createdAt":"2026-04-01T01:00:00+01:00"},
+            {"id":"tail","role":"assistant","createdAt":"2026-04-02T00:00:00Z"}
+        ]});
+        assert_eq!(
+            resolve_search_anchor(&anchor, &thread).as_deref(),
+            Some("a")
+        );
+        assert!(resolve_search_anchor(&anchor, &json!({"id":"other"})).is_none());
+    }
+
+    #[test]
+    fn sidebar_parity_unicode_highlights_are_original_byte_ranges() {
+        let text = "Écho éCHO 日本";
+        assert_eq!(match_ranges(text, "écho"), vec![0..5, 6..11]);
+        assert_eq!(match_ranges(text, "日本"), vec![12..18]);
+        assert!(match_ranges(text, "").is_empty());
+    }
+
+    #[test]
+    fn sidebar_parity_saved_order_overrides_activity_and_cache_invalidates() {
+        let now = Utc::now();
+        let mut first = thread();
+        first.id = "first".into();
+        first.active_order_key = Some("z".into());
+        first.latest_user_message_at = Some(now.to_rfc3339());
+        let mut second = thread();
+        second.id = "second".into();
+        second.active_order_key = Some("b".into());
+        let mut rows = vec![first, second];
+        let state = State::default();
+        assert_eq!(
+            state.grouped(&rows, Some(1), "p", View::Active, now, "test")[1].2[0].id,
+            "second"
+        );
+        rows[0].active_order_key = Some("a".into());
+        assert_eq!(
+            state.grouped(&rows, Some(2), "p", View::Active, now, "test")[1].2[0].id,
+            "first"
         );
     }
 

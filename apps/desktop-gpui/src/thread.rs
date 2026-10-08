@@ -2,10 +2,22 @@
 //! Preserve contract fields that this slice does not yet render at the adapter seam.
 use serde_json::{Value, json};
 
+// Re-selecting a thread replaces ThreadDetail; process-local revisions must
+// not collide with that instance's cached timeline at the same wire sequence.
+fn projection_revision() -> u64 {
+    static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Default)]
 pub struct ThreadDetail {
+    /// Local projection revision also changes for replacement snapshots at the same sequence.
+    pub revision: u64,
+    /// Contiguous latest-turn message updates since this cached revision.
+    /// Snapshots, historical changes and other event kinds force full preparation.
+    pub tail_change: Option<(u64, String)>,
     pub sequence: Option<u64>,
-    pub thread: Option<Value>,
+    pub thread: Option<std::sync::Arc<Value>>,
     pub synchronized: bool,
 }
 
@@ -432,7 +444,9 @@ impl ThreadDetail {
                 let sequence = required(snapshot, "snapshotSequence")?
                     .as_u64()
                     .ok_or("Invalid snapshot sequence")?;
-                self.thread = Some(thread.clone());
+                self.thread = Some(std::sync::Arc::new(thread.clone()));
+                self.tail_change = None;
+                self.revision = projection_revision();
                 self.sequence = Some(sequence);
                 self.synchronized = false;
             }
@@ -452,9 +466,39 @@ impl ThreadDetail {
                     return Ok(());
                 }
                 if let Some(thread) = &self.thread {
-                    self.thread = apply_event(thread, event)?;
+                    let kind = event["type"].as_str().unwrap_or("");
+                    let item = match kind {
+                        "thread.activity-appended" => &event["payload"]["activity"],
+                        "thread.proposed-plan-upserted" => &event["payload"]["proposedPlan"],
+                        _ => &event["payload"],
+                    };
+                    let tail = item["turnId"].as_str().filter(|turn| {
+                        matches!(
+                            kind,
+                            "thread.message-sent"
+                                | "thread.activity-appended"
+                                | "thread.proposed-plan-upserted"
+                        ) && thread["latestTurn"]["turnId"].as_str() == Some(*turn)
+                            && item["createdAt"]
+                                .as_str()
+                                .zip(thread["latestTurn"]["startedAt"].as_str())
+                                .is_some_and(|(created, started)| {
+                                    compare_date_time(created, started) != std::cmp::Ordering::Less
+                                })
+                    });
+                    let change = tail.map(|turn| {
+                        let base = self
+                            .tail_change
+                            .as_ref()
+                            .filter(|(_, previous)| previous == turn)
+                            .map_or(self.revision, |(base, _)| *base);
+                        (base, turn.to_owned())
+                    });
+                    self.thread = apply_event(thread, event)?.map(std::sync::Arc::new);
+                    self.tail_change = change;
                 }
                 self.sequence = Some(sequence);
+                self.revision = projection_revision();
             }
             _ => return Err("Unsupported thread stream item".into()),
         }

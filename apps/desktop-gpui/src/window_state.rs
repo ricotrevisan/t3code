@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub const SIDEBAR_WIDTH: (f32, f32, f32) = (208.0, 288.0, 480.0);
 pub const RIGHT_PANEL_WIDTH: (f32, f32, f32) = (280.0, 340.0, 640.0);
+pub const TERMINAL_HEIGHT: (f32, f32, f32) = (180.0, 260.0, 900.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -16,6 +17,7 @@ pub struct WindowState {
     pub sidebar_width: f32,
     pub right_panel_open: bool,
     pub right_panel_width: f32,
+    pub terminal_height: f32,
     pub follow_up_behavior: crate::queue::FollowUpBehavior,
 }
 
@@ -30,6 +32,7 @@ impl Default for WindowState {
             sidebar_width: SIDEBAR_WIDTH.1,
             right_panel_open: true,
             right_panel_width: RIGHT_PANEL_WIDTH.1,
+            terminal_height: TERMINAL_HEIGHT.1,
             follow_up_behavior: crate::queue::FollowUpBehavior::default(),
         }
     }
@@ -59,6 +62,7 @@ fn parse(text: &str) -> WindowState {
     let mut state: WindowState = serde_json::from_str(text).unwrap_or_default();
     state.sidebar_width = clamp_width(state.sidebar_width, SIDEBAR_WIDTH);
     state.right_panel_width = clamp_width(state.right_panel_width, RIGHT_PANEL_WIDTH);
+    state.terminal_height = clamp_width(state.terminal_height, TERMINAL_HEIGHT);
     state
 }
 
@@ -85,6 +89,19 @@ pub fn save(state: WindowState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_height_restart_legacy_and_clamped_restore() {
+        assert_eq!(parse("{}").terminal_height, TERMINAL_HEIGHT.1);
+        assert_eq!(parse(r#"{"terminal_height":1200}"#).terminal_height, TERMINAL_HEIGHT.2);
+        assert_eq!(parse(r#"{"terminal_height":10}"#).terminal_height, TERMINAL_HEIGHT.0);
+        assert_eq!(parse(r#"{"terminal_height":-1}"#).terminal_height, TERMINAL_HEIGHT.1);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("window.json");
+        let state = WindowState { terminal_height: 420.0, ..WindowState::default() };
+        save_to(&path, state).unwrap();
+        assert_eq!(parse(&std::fs::read_to_string(path).unwrap()).terminal_height, 420.0);
+    }
 
     #[test]
     fn follow_up_behavior_restart_and_legacy_default() {

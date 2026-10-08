@@ -8,7 +8,7 @@ use t3code_desktop_gpui::{commands, connection, project_actions, workspaces};
 impl NativeApp {
     pub(crate) fn clone_project(&mut self, cx: &mut Context<Self>) {
         if self.pending_actions > 0 {
-            self.set_status("Wait for the pending server receipt", cx);
+            self.report_progress("Wait for the pending server receipt", cx);
             cx.notify();
             return;
         }
@@ -19,7 +19,7 @@ impl NativeApp {
         ) {
             Ok(payload) => self.perform("projectClone.start", payload, None, cx),
             Err(error) => {
-                self.set_status(error, cx);
+                self.report_error(error, cx);
                 cx.notify();
             }
         }
@@ -38,7 +38,7 @@ impl NativeApp {
             match self.model_selection(previous, cx) {
                 Ok(selection) => Some(selection),
                 Err(error) => {
-                    self.set_status(error, cx);
+                    self.report_error(error, cx);
                     cx.notify();
                     return;
                 }
@@ -52,7 +52,7 @@ impl NativeApp {
 
     pub(crate) fn update_project(&mut self, remove: bool, cx: &mut Context<Self>) {
         let Some(id) = self.selected_project.clone() else {
-            self.set_status("Select a project first", cx);
+            self.report_error("Select a project first", cx);
             cx.notify();
             return;
         };
@@ -73,7 +73,7 @@ impl NativeApp {
                 self.dispatch(command, cx);
             }
             Err(error) => {
-                self.set_status(error, cx);
+                self.report_error(error, cx);
                 cx.notify();
             }
         }
@@ -81,17 +81,17 @@ impl NativeApp {
 
     pub(crate) fn project_actions(&mut self, mutation: Option<Value>, cx: &mut Context<Self>) {
         if self.action_busy {
-            self.set_status("Another action change is pending", cx);
+            self.report_progress("Another action change is pending", cx);
             cx.notify();
             return;
         }
         let Some(project) = self.selected_project.clone() else {
-            self.set_status("Select a project first", cx);
+            self.report_error("Select a project first", cx);
             cx.notify();
             return;
         };
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             cx.notify();
             return;
         };
@@ -104,7 +104,7 @@ impl NativeApp {
             .unwrap_or_default();
         let generation = self.generation;
         self.action_busy = true;
-        self.set_status("Reading project actions…", cx);
+        self.report_progress("Reading project actions…", cx);
         self.action_task = Some(cx.spawn(async move |entity, cx| {
             let saved_change = mutation.clone();
             let result = async {
@@ -130,6 +130,17 @@ impl NativeApp {
                     .await;
                 }
                 let current = project_actions::resolve(&settings, &project, &legacy);
+                if change["extra"].is_object()
+                    && current.iter().any(|script| {
+                        script["command"] == change["command"]
+                            || script["name"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .eq_ignore_ascii_case(change["name"].as_str().unwrap_or_default())
+                    })
+                {
+                    return Err("Action already exists; edit the saved action instead".into());
+                }
                 let scripts = match change["operation"].as_str() {
                     Some("inherit") => None,
                     Some("delete") => Some(
@@ -138,8 +149,8 @@ impl NativeApp {
                             .filter(|s| s["id"] != change["id"])
                             .collect(),
                     ),
-                    Some("save") => Some(
-                        project_actions::save(
+                    Some("save") => {
+                        let mut saved = project_actions::save(
                             &current,
                             change["previousId"].as_str(),
                             change["id"].as_str().unwrap_or_default(),
@@ -148,8 +159,29 @@ impl NativeApp {
                             change["setup"] == true,
                             change["wait"] == true,
                         )
-                        .map_err(str::to_owned)?,
-                    ),
+                        .map_err(str::to_owned)?;
+                        if let Some(icon) = change["icon"].as_str() {
+                            if !crate::settings_project_actions::ICONS.contains(&icon) {
+                                return Err("Choose a supported action icon".into());
+                            }
+                            if let Some(script) =
+                                saved.iter_mut().find(|script| script["id"] == change["id"])
+                            {
+                                script["icon"] = icon.into();
+                                if let Some(extra) = change["extra"].as_object() {
+                                    if let Some(value) = extra.get("previewUrl") {
+                                        script["previewUrl"] = value.clone();
+                                    }
+                                    script["autoOpenPreview"] =
+                                        (extra.get("previewUrl").is_some_and(Value::is_string)
+                                            && extra.get("autoOpenPreview")
+                                                == Some(&Value::Bool(true)))
+                                        .into();
+                                }
+                            }
+                        }
+                        Some(saved)
+                    }
                     _ => return Err("Unknown project action operation".into()),
                 };
                 connection::call(
@@ -185,7 +217,7 @@ impl NativeApp {
                         app.confirm_action_delete = None;
                         app.set_status("Project actions loaded from this environment", cx);
                     }
-                    Err(error) => app.set_status(error, cx),
+                    Err(error) => app.report_error(error, cx),
                 }
                 cx.notify();
             });
@@ -197,10 +229,10 @@ impl NativeApp {
         let name = self.action_name.read(cx).value().to_string();
         let command = self.action_command.read(cx).value().to_string();
         if name.trim().is_empty() || command.trim().is_empty() {
-            self.set_status("Action name and command are required", cx);
+            self.report_error("Action name and command are required", cx);
             cx.notify();
             return;
         }
-        self.project_actions(Some(json!({"operation":"save","previousId":self.action_edit_id,"id":self.action_edit_id.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string()),"name":name,"command":command,"setup":self.action_setup,"wait":self.action_wait})),cx);
+        self.project_actions(Some(json!({"operation":"save","previousId":self.action_edit_id,"id":self.action_edit_id.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string()),"name":name,"command":command,"setup":self.action_setup,"wait":self.action_wait,"icon":self.action_extras.icon})),cx);
     }
 }

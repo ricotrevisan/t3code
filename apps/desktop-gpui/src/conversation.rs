@@ -957,6 +957,8 @@ pub enum TimelineEntry {
     Message {
         message: Value,
         show_header: bool,
+        /// The first message anchors the turn folding control.
+        turn: Option<String>,
     },
     /// A settled turn's `Worked for …`, `Interrupted`, or `Failed` line.
     TurnStatus {
@@ -993,6 +995,187 @@ pub struct TimelineRow {
     pub entry: TimelineEntry,
 }
 
+/// Tool families used by both work summaries and semantic icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolFamily {
+    Command,
+    Search,
+    Edit,
+    Agent,
+    Other,
+}
+
+pub fn tool_family(name: &str) -> ToolFamily {
+    let name = name.to_ascii_lowercase();
+    if ["spawn", "agent", "delegate"]
+        .iter()
+        .any(|word| name.contains(word))
+    {
+        ToolFamily::Agent
+    } else if ["exec", "shell", "bash", "command", "terminal"]
+        .iter()
+        .any(|word| name.contains(word))
+    {
+        ToolFamily::Command
+    } else if ["search", "grep", "glob", "find"]
+        .iter()
+        .any(|word| name.contains(word))
+    {
+        ToolFamily::Search
+    } else if ["edit", "write", "patch"]
+        .iter()
+        .any(|word| name.contains(word))
+    {
+        ToolFamily::Edit
+    } else {
+        ToolFamily::Other
+    }
+}
+
+fn activity_time(item: &ActivityItem) -> &str {
+    let value = match item {
+        ActivityItem::Tool(call) => call.activities.first(),
+        ActivityItem::Activity(value) | ActivityItem::Error(value) => Some(value),
+    };
+    value
+        .and_then(|value| value["createdAt"].as_str())
+        .unwrap_or("")
+}
+
+fn item_family(item: Option<&ActivityItem>) -> ToolFamily {
+    match item {
+        Some(ActivityItem::Tool(call)) => tool_family(&call.name),
+        _ => ToolFamily::Other,
+    }
+}
+
+fn work_label(items: &[ActivityItem]) -> String {
+    let mut commands = 0;
+    let mut searches = 0;
+    let mut edits = 0;
+    for item in items {
+        if let ActivityItem::Tool(call) = item {
+            match tool_family(&call.name) {
+                ToolFamily::Command => commands += 1,
+                ToolFamily::Search => searches += 1,
+                ToolFamily::Edit => edits += 1,
+                _ => {}
+            }
+        }
+    }
+    if commands == items.len() {
+        format!("Ran {commands} commands")
+    } else if searches == items.len() {
+        format!("Ran {searches} searches")
+    } else if edits == items.len() {
+        format!("Made {edits} edits")
+    } else {
+        step_count(items.len())
+    }
+}
+
+/// Merge work at its first recorded timestamp, keeping lifecycle updates in
+/// their original call and never grouping across an intervening message/plan.
+fn interleave_turn_rows(rows: Vec<TimelineRow>) -> Vec<TimelineRow> {
+    let mut dated = Vec::new();
+    let mut footer = Vec::new();
+    let mut elapsed = None;
+    for row in rows {
+        match row.entry {
+            TimelineEntry::Activity {
+                turn,
+                items,
+                expanded,
+                latest,
+                label,
+            } => {
+                if label.starts_with("Worked for ") {
+                    elapsed = label.split(" · ").next().map(str::to_owned);
+                }
+                for item in items {
+                    let time = activity_time(&item).to_owned();
+                    let item_key = match &item {
+                        ActivityItem::Tool(call) => call.key.clone(),
+                        ActivityItem::Activity(value) | ActivityItem::Error(value) => {
+                            value["id"].as_str().unwrap_or("unknown").to_owned()
+                        }
+                    };
+                    dated.push((
+                        time,
+                        TimelineRow {
+                            key: format!("activity:{turn}:{item_key}"),
+                            entry: TimelineEntry::Activity {
+                                turn: turn.clone(),
+                                label: String::new(),
+                                items: vec![item],
+                                expanded,
+                                latest,
+                            },
+                        },
+                    ));
+                }
+            }
+            TimelineEntry::Message { ref message, .. } => {
+                dated.push((message["createdAt"].as_str().unwrap_or("").to_owned(), row));
+            }
+            TimelineEntry::Plan(ref plan) => {
+                dated.push((plan["createdAt"].as_str().unwrap_or("").to_owned(), row));
+            }
+            _ => footer.push(row),
+        }
+    }
+    dated.sort_by(|(a, _), (b, _)| match (parse(a), parse(b)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        _ => a.cmp(b),
+    });
+    let mut merged: Vec<TimelineRow> = Vec::new();
+    let mut first_activity = true;
+    for (_, mut row) in dated {
+        if let TimelineEntry::Activity {
+            turn, items, label, ..
+        } = &mut row.entry
+        {
+            if let Some(TimelineRow {
+                entry:
+                    TimelineEntry::Activity {
+                        items: prior,
+                        label: prior_label,
+                        ..
+                    },
+                ..
+            }) = merged.last_mut()
+                && item_family(prior.last()) == item_family(items.first())
+            {
+                prior.append(items);
+                *prior_label = work_label(prior);
+                continue;
+            }
+            if first_activity {
+                row.key = format!("activity:{turn}");
+                first_activity = false;
+            }
+            *label = work_label(items);
+        }
+        merged.push(row);
+    }
+    // Only the last work disclosure gets the unqualified latest selector.
+    let last_activity = merged
+        .iter()
+        .rposition(|row| matches!(row.entry, TimelineEntry::Activity { .. }));
+    for (index, row) in merged.iter_mut().enumerate() {
+        if let TimelineEntry::Activity { latest, label, .. } = &mut row.entry {
+            *latest &= Some(index) == last_activity;
+            if Some(index) == last_activity
+                && let Some(elapsed) = &elapsed
+            {
+                *label = format!("{elapsed} · {label}");
+            }
+        }
+    }
+    merged.extend(footer);
+    merged
+}
+
 /// Flattens a thread into timeline rows in display order: each turn's
 /// messages, its status, activity disclosure, plans, checkpoint, and working
 /// indicator, then the pending approval, the open user-input request, and the
@@ -1002,7 +1185,16 @@ pub fn timeline_rows(
     thread: &Value,
     expanded: &std::collections::HashMap<String, bool>,
 ) -> Vec<TimelineRow> {
+    timeline_rows_counted(thread, expanded).0
+}
+
+/// Return the actual number of turn preparations for performance regression tests.
+pub fn timeline_rows_counted(
+    thread: &Value,
+    expanded: &std::collections::HashMap<String, bool>,
+) -> (Vec<TimelineRow>, usize) {
     let groups = group_turns(thread);
+    let prepared_turns = groups.len();
     let visible = |activity: &Value| activity["kind"] != "worktree-setup";
     let has_files = |checkpoint: &Value| {
         checkpoint["files"]
@@ -1017,17 +1209,26 @@ pub fn timeline_rows(
         .rposition(|group| group.checkpoint.as_ref().is_some_and(has_files));
 
     let mut rows = Vec::new();
-    let mut push = |key: String, entry| rows.push(TimelineRow { key, entry });
+    macro_rules! push {
+        ($key:expr, $entry:expr $(,)?) => {
+            rows.push(TimelineRow {
+                key: $key,
+                entry: $entry,
+            })
+        };
+    }
     for (index, group) in groups.into_iter().enumerate() {
+        let turn_start = rows.len();
         let TurnGroup {
             key,
+            turn_id,
             messages,
             activities,
             plans,
             checkpoint,
             summary,
-            ..
         } = group;
+        let folded = expanded.get(&format!("fold:{key}")) == Some(&true);
         let activities: Vec<Value> = activities.into_iter().filter(visible).collect();
         let mut items = activity_items(&activities);
         for item in &mut items {
@@ -1038,30 +1239,34 @@ pub fn timeline_rows(
         let empty_reasoning =
             |message: &Value| message["role"] == "reasoning" && text(&message["text"]).is_none();
         for (position, message) in messages.into_iter().enumerate() {
-            if empty_reasoning(&message) {
+            if empty_reasoning(&message) || (folded && position > 0) {
                 continue;
             }
             let id = message["id"]
                 .as_str()
                 .map_or_else(|| format!("{key}:{position}"), str::to_owned);
-            push(
+            push!(
                 format!("message:{id}"),
                 TimelineEntry::Message {
                     message,
                     show_header: true,
+                    turn: (position == 0 && turn_id.is_some()).then(|| key.clone()),
                 },
             );
         }
+        if folded {
+            continue;
+        }
         let running = matches!(summary, Some((_, TurnState::Running)));
         match &summary {
-            Some((label, state)) if state.is_danger() => push(
+            Some((label, state)) if state.is_danger() => push!(
                 format!("status:{key}"),
                 TimelineEntry::TurnStatus {
                     label: label.clone(),
                     danger: true,
                 },
             ),
-            Some((label, TurnState::Completed)) if activities.is_empty() => push(
+            Some((label, TurnState::Completed)) if activities.is_empty() => push!(
                 format!("status:{key}"),
                 TimelineEntry::TurnStatus {
                     label: label.clone(),
@@ -1077,7 +1282,7 @@ pub fn timeline_rows(
                 }
                 _ => step_count(items.len()),
             };
-            push(
+            push!(
                 format!("activity:{key}"),
                 TimelineEntry::Activity {
                     turn: key.clone(),
@@ -1094,11 +1299,11 @@ pub fn timeline_rows(
                 .is_some_and(|text| !text.is_empty())
             {
                 let id = plan["id"].as_str().unwrap_or("unknown").to_owned();
-                push(format!("plan:{id}"), TimelineEntry::Plan(plan));
+                push!(format!("plan:{id}"), TimelineEntry::Plan(plan));
             }
         }
         if let Some(checkpoint) = checkpoint.filter(has_files) {
-            push(
+            push!(
                 format!("checkpoint:{key}"),
                 TimelineEntry::Checkpoint {
                     turn: key.clone(),
@@ -1108,14 +1313,16 @@ pub fn timeline_rows(
             );
         }
         if let Some((label, TurnState::Running)) = summary {
-            push(format!("working:{key}"), TimelineEntry::Working(label));
+            push!(format!("working:{key}"), TimelineEntry::Working(label));
         }
+        let prepared = interleave_turn_rows(rows.split_off(turn_start));
+        rows.extend(prepared);
     }
     if let Some(approval) = thread["activities"]
         .as_array()
         .and_then(|activities| pending_approval(activities))
     {
-        push(
+        push!(
             format!("approval:{}", approval.request_id),
             TimelineEntry::Approval(approval),
         );
@@ -1124,13 +1331,13 @@ pub fn timeline_rows(
         .as_array()
         .and_then(|activities| pending_user_input(activities))
     {
-        push(
+        push!(
             format!("user-input:{}", request.request_id),
             TimelineEntry::UserInput(request),
         );
     }
     if let Some(error) = thread["session"]["lastError"].as_str() {
-        push("error".to_owned(), TimelineEntry::Error(error.to_owned()));
+        push!("error".to_owned(), TimelineEntry::Error(error.to_owned()));
     }
     let mut previous_role = None;
     for row in &mut rows {
@@ -1138,6 +1345,7 @@ pub fn timeline_rows(
             TimelineEntry::Message {
                 message,
                 show_header,
+                ..
             } => {
                 let role = message["role"].as_str().map(str::to_owned);
                 *show_header = previous_role.is_none() || previous_role != role;
@@ -1147,7 +1355,109 @@ pub fn timeline_rows(
         };
         previous_role = role;
     }
-    rows
+    (rows, prepared_turns)
+}
+
+/// Prepare only a previously rendered latest turn for contiguous message appends.
+/// Raw projection filtering still walks the arrays, but historical turns are not
+/// grouped, sorted, parsed or prepared. Unsafe boundaries fall back to full preparation.
+pub fn timeline_tail_rows(
+    thread: &Value,
+    expanded: &std::collections::HashMap<String, bool>,
+    old: &[TimelineRow],
+    turn: &str,
+) -> Option<Vec<TimelineRow>> {
+    let start = old.iter().position(|row| {
+        matches!(&row.entry,
+        TimelineEntry::Message { turn: Some(key), .. } if key == turn)
+    })?;
+    let mut message_ids = std::collections::HashSet::new();
+    for (index, row) in old[start..].iter().enumerate() {
+        match &row.entry {
+            TimelineEntry::Message {
+                message,
+                turn: header,
+                ..
+            } => {
+                if header.as_ref().is_some_and(|id| id != turn)
+                    || message["turnId"].as_str().is_some_and(|id| id != turn)
+                    || (message["turnId"].is_null() && (index != 0 || message["role"] != "user"))
+                    || (message["turnId"].is_null()
+                        && thread["activities"]
+                            .as_array()
+                            .is_some_and(|items| items.iter().any(|item| item["turnId"].is_null())))
+                {
+                    return None;
+                }
+                message_ids.insert(message["id"].clone());
+            }
+            TimelineEntry::Activity { turn: key, .. }
+            | TimelineEntry::Checkpoint { turn: key, .. }
+                if key != turn =>
+            {
+                return None;
+            }
+            TimelineEntry::Plan(plan) if plan["turnId"] != turn => return None,
+            TimelineEntry::Approval(_) | TimelineEntry::UserInput(_) | TimelineEntry::Error(_) => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    let mut tail = serde_json::json!({"id":thread["id"], "latestTurn":thread["latestTurn"], "session":thread["session"]});
+    for key in ["messages", "activities", "proposedPlans", "checkpoints"] {
+        tail[key] = Value::Array(
+            thread[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|item| {
+                    item["turnId"] == turn
+                        || (key == "messages" && message_ids.contains(&item["id"]))
+                })
+                .cloned()
+                .collect(),
+        );
+    }
+    let mut prepared = timeline_rows(&tail, expanded);
+    // Full preparation carries role continuity across turn boundaries; the
+    // isolated tail starts with no previous role. Restore that boundary without
+    // re-preparing any historical turn.
+    if let Some(TimelineRow {
+        entry:
+            TimelineEntry::Message {
+                message,
+                show_header,
+                ..
+            },
+        ..
+    }) = prepared.first_mut()
+    {
+        let previous_role = start
+            .checked_sub(1)
+            .and_then(|index| match &old[index].entry {
+                TimelineEntry::Message { message, .. } => message["role"].as_str(),
+                _ => None,
+            });
+        *show_header = previous_role.is_none() || previous_role != message["role"].as_str();
+    }
+    let has_activity = prepared
+        .iter()
+        .any(|row| matches!(row.entry, TimelineEntry::Activity { .. }));
+    let has_checkpoint = prepared
+        .iter()
+        .any(|row| matches!(row.entry, TimelineEntry::Checkpoint { .. }));
+    let mut rows = old[..start].to_vec();
+    // New work in the tail retires the previous turn's 'latest' disclosure identity.
+    for row in &mut rows {
+        match &mut row.entry {
+            TimelineEntry::Activity { latest, .. } if has_activity => *latest = false,
+            TimelineEntry::Checkpoint { latest, .. } if has_checkpoint => *latest = false,
+            _ => {}
+        }
+    }
+    rows.extend(prepared);
+    Some(rows)
 }
 
 /// How a list showing `old` rows catches up with `new`: replace the rows in
@@ -1656,6 +1966,43 @@ mod tests {
     }
 
     #[test]
+    fn conversation_work_is_interleaved_and_never_grouped_across_a_message() {
+        let thread = json!({"messages":[
+            {"id":"u","role":"user","text":"go","createdAt":"2026-01-01T00:00:00Z"},
+            {"id":"a","role":"assistant","text":"progress","turnId":"t","createdAt":"2026-01-01T00:00:03Z"},
+            {"id":"b","role":"assistant","text":"done","turnId":"t","createdAt":"2026-01-01T00:00:06Z"}],
+            "activities":[
+            {"id":"c1","turnId":"t","kind":"tool.completed","createdAt":"2026-01-01T00:00:01Z","payload":{"title":"bash","toolCallId":"c1"}},
+            {"id":"c2","turnId":"t","kind":"tool.completed","createdAt":"2026-01-01T00:00:02Z","payload":{"title":"bash","toolCallId":"c2"}},
+            {"id":"c3","turnId":"t","kind":"tool.completed","createdAt":"2026-01-01T00:00:04Z","payload":{"title":"bash","toolCallId":"c3"}}]});
+        let rows = timeline_rows(&thread, &Default::default());
+        let keys: Vec<_> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(
+            &keys[..5],
+            &[
+                "message:u",
+                "activity:t",
+                "message:a",
+                "activity:t:c3",
+                "message:b"
+            ]
+        );
+        let TimelineEntry::Activity { label, items, .. } = &rows[1].entry else {
+            panic!("work row")
+        };
+        assert_eq!(label, "Ran 2 commands");
+        assert_eq!(items.len(), 2);
+        let folded = timeline_rows(&thread, &[("fold:t".into(), true)].into());
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].key, "message:u");
+        assert_eq!(
+            timeline_rows(&thread, &Default::default()),
+            rows,
+            "expanding restores chronological work"
+        );
+    }
+
+    #[test]
     fn timeline_rows_flatten_turns_into_one_row_per_entry() {
         let mut thread = fixture(
             json!({"turnId": "t2", "state": "running", "requestedAt": "2026-01-01T00:02:00Z"}),
@@ -1671,14 +2018,14 @@ mod tests {
                 "plan:p1",
                 "message:s1",
                 "message:u2",
-                "message:a2",
                 "activity:t2",
+                "message:a2",
                 "working:t2",
             ],
             "a checkpoint without files renders nothing, so it has no row"
         );
         assert!(matches!(
-            &rows[7].entry,
+            &rows[6].entry,
             TimelineEntry::Activity {
                 expanded: true,
                 latest: true,
@@ -1698,11 +2045,11 @@ mod tests {
             {"id": "a3", "role": "assistant", "text": "more", "turnId": "t2", "createdAt": "2026-01-01T00:02:20Z", "updatedAt": "2026-01-01T00:02:20Z"}
         ));
         let appended = timeline_rows(&thread, &Default::default());
-        assert_eq!(appended[7].key, "message:a3");
+        assert_eq!(appended[8].key, "message:a3");
         assert_eq!(
             diff_rows(&rows, &appended),
             RowsDiff {
-                replaced: 7..7,
+                replaced: 8..8,
                 inserted: 1,
                 changed: vec![]
             },
@@ -1716,12 +2063,12 @@ mod tests {
             RowsDiff {
                 replaced: 10..10,
                 inserted: 0,
-                changed: vec![6]
+                changed: vec![7]
             },
             "streaming text remeasures its row in place"
         );
         let collapsed = timeline_rows(&thread, &[("t2".to_owned(), false)].into());
-        assert_eq!(diff_rows(&streamed, &collapsed).changed, vec![8]);
+        assert_eq!(diff_rows(&streamed, &collapsed).changed, vec![6]);
         assert_eq!(
             diff_rows(&[], &collapsed),
             RowsDiff {
@@ -1755,6 +2102,7 @@ mod tests {
                 TimelineEntry::Message {
                     message,
                     show_header,
+                    ..
                 } => Some((message["id"].as_str().unwrap(), *show_header)),
                 _ => None,
             })

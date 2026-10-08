@@ -144,14 +144,14 @@ impl NativeApp {
         };
         // Resolve at click time, not from the editable action/clone/add forms.
         let Some(settings) = &self.project_settings else {
-            self.set_status("Refresh saved actions before running", cx);
+            self.report_error("Refresh saved actions before running", cx);
             return;
         };
         let Some(script) = project_actions::resolve(settings, &project.id, &project.scripts)
             .into_iter()
             .find(|script| script["id"] == id)
         else {
-            self.set_status("Action was removed; refresh actions", cx);
+            self.report_error("Action was removed; refresh actions", cx);
             return;
         };
         let Some(thread) =
@@ -159,7 +159,7 @@ impl NativeApp {
                 Some(&t.id) == self.selected_thread.as_ref() && t.project_id == project.id
             })
         else {
-            self.set_status("Select a saved thread to run an action", cx);
+            self.report_error("Select a saved thread to run an action", cx);
             return;
         };
         let Some(cwd) = self.selected_workspace() else {
@@ -201,7 +201,7 @@ impl NativeApp {
 
     fn start_action_run(&mut self, run: ActionRun, cx: &mut Context<Self>) {
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             return;
         };
         let key = run.key.clone();

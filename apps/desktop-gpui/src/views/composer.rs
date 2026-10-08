@@ -17,6 +17,21 @@ use crate::{
     SlashPrevious, SlashRun,
 };
 
+#[derive(Clone)]
+enum ComposerCommand {
+    Model,
+    Mode(&'static str),
+    Compact,
+    Insert(String),
+}
+
+#[derive(Clone)]
+struct CommandPick {
+    label: String,
+    description: String,
+    command: ComposerCommand,
+}
+
 impl NativeApp {
     pub(crate) fn render_follow_up_settings(
         &self,
@@ -27,6 +42,42 @@ impl NativeApp {
             .flex()
             .flex_col()
             .gap_2()
+            .child("Send shortcut (device-local)")
+            .child(
+                div().flex().flex_wrap().gap_1().children(
+                    [
+                        (
+                            t3code_desktop_gpui::drafts::SendShortcut::Enter,
+                            "Enter",
+                            "send-shortcut-enter",
+                        ),
+                        (
+                            t3code_desktop_gpui::drafts::SendShortcut::ModEnter,
+                            "⌘/Ctrl+Enter",
+                            "send-shortcut-mod-enter",
+                        ),
+                        (
+                            t3code_desktop_gpui::drafts::SendShortcut::ModEnterMultiline,
+                            "Modifier for multiline",
+                            "send-shortcut-multiline",
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(shortcut, label, id)| {
+                        Button::new(id)
+                            .debug_selector(move || id.into())
+                            .ghost()
+                            .small()
+                            .label(label)
+                            .selected(self.send_shortcut() == shortcut)
+                            .on_click(
+                                cx.listener(move |app, _, _, cx| {
+                                    app.set_send_shortcut(shortcut, cx)
+                                }),
+                            )
+                    }),
+                ),
+            )
             .child("Follow-up behavior (⌘⇧↩ uses the alternate)")
             .child(
                 div().flex().gap_2().children(
@@ -56,24 +107,153 @@ impl NativeApp {
             )
     }
 
-    fn slash_entries(&self, cx: &App) -> Vec<&'static palette::Entry> {
-        palette::slash_matches(
-            &self.composer.read(cx).value(),
-            self.selected_thread.is_some(),
-        )
-        .unwrap_or_default()
+    fn slash_entries(&self, cx: &App) -> Vec<CommandPick> {
+        let Some((_, marker, query)) = self.command_trigger(cx) else {
+            return Vec::new();
+        };
+        let mut entries = Vec::new();
+        let Some(provider) = self
+            .selected_provider(cx)
+            .filter(|provider| provider.selectable())
+        else {
+            return entries;
+        };
+        if marker == '/' {
+            entries.push(CommandPick {
+                label: "/model".into(),
+                description: "Choose provider and model".into(),
+                command: ComposerCommand::Model,
+            });
+            if provider.show_interaction_mode_toggle.unwrap_or(true) {
+                for (name, label) in [("plan", "/plan"), ("default", "/default")] {
+                    entries.push(CommandPick {
+                        label: label.into(),
+                        description: "Change interaction mode".into(),
+                        command: ComposerCommand::Mode(name),
+                    });
+                }
+            }
+            for command in provider.commands_for_cwd(self.selected_workspace().as_deref()) {
+                let Some(name) = command["name"].as_str() else {
+                    continue;
+                };
+                if provider
+                    .skills_for_cwd(self.selected_workspace().as_deref())
+                    .iter()
+                    .any(|skill| {
+                        skill["name"]
+                            .as_str()
+                            .is_some_and(|skill| skill.eq_ignore_ascii_case(name))
+                    })
+                {
+                    continue;
+                }
+                if matches!(name, "model" | "plan" | "default" | "usage-limits") {
+                    continue;
+                }
+                if name == "compact" && self.compact_disabled_reason(cx).is_some() {
+                    continue;
+                }
+                entries.push(CommandPick {
+                    label: format!("/{name}"),
+                    description: command["description"]
+                        .as_str()
+                        .or(command["input"]["hint"].as_str())
+                        .unwrap_or("Provider command")
+                        .into(),
+                    command: if name == "compact" {
+                        ComposerCommand::Compact
+                    } else {
+                        ComposerCommand::Insert(format!("/{name} "))
+                    },
+                });
+            }
+        }
+        for skill in provider.skills_for_cwd(self.selected_workspace().as_deref()) {
+            let Some(name) = skill["name"].as_str() else {
+                continue;
+            };
+            let name = name.trim();
+            entries.push(CommandPick {
+                label: if marker == '/' {
+                    format!("/skill:{name}")
+                } else {
+                    format!("${name}")
+                },
+                description: format!(
+                    "{}{}",
+                    skill["displayName"]
+                        .as_str()
+                        .filter(|name| !name.trim().is_empty())
+                        .map(|name| format!("{} · ", name.trim()))
+                        .unwrap_or_default(),
+                    skill["shortDescription"]
+                        .as_str()
+                        .or(skill["description"].as_str())
+                        .unwrap_or("Provider skill")
+                ),
+                command: ComposerCommand::Insert(format!("${name} ")),
+            });
+        }
+        let query = query.to_lowercase();
+        entries.retain(|entry| {
+            format!("{} {}", entry.label, entry.description)
+                .to_lowercase()
+                .contains(&query)
+        });
+        entries
     }
 
-    /// Runs the "/" menu row at `index`; with no such row the prompt is sent as typed.
+    /// Provider commands insert native invocation text; client builtins act locally.
     fn run_slash(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(command) = self.slash_entries(cx).get(index).map(|entry| entry.command) else {
-            self.send_prompt(window, cx);
+        let Some(command) = self
+            .slash_entries(cx)
+            .get(index)
+            .map(|entry| entry.command.clone())
+        else {
+            if self.composer_state.command_loading {
+                self.set_status("Wait for the workspace command catalog", cx);
+                cx.notify();
+            } else {
+                self.send_prompt(window, cx);
+            }
             return;
         };
+        let Some((range, _, _)) = self.command_trigger(cx) else {
+            return;
+        };
+        let replacement = match &command {
+            ComposerCommand::Insert(value) => value.as_str(),
+            _ => "",
+        };
+        self.composer.update(cx, |input, cx| {
+            if let Some(name) = replacement.strip_prefix('$').map(str::trim) {
+                let token = gpui_kit::component::input::InlineToken::new(
+                    format!("skill:{name}"),
+                    format!("${name}"),
+                );
+                if input
+                    .replace_range_with_token(range.clone(), token, window, cx)
+                    .is_ok()
+                {
+                    input.replace(" ", window, cx);
+                    return;
+                }
+            }
+            input.set_selected_range(range, cx);
+            input.replace(replacement, window, cx);
+        });
         self.slash_index = 0;
-        self.composer
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.execute_command(command, window, cx);
+        match command {
+            ComposerCommand::Model => self.open_model_catalog(window, cx),
+            ComposerCommand::Mode(mode) => {
+                self.change_thread_mode("thread.interaction-mode.set", "interactionMode", mode, cx)
+            }
+            ComposerCommand::Compact => self.compact_context(cx),
+            ComposerCommand::Insert(_) => {}
+        }
+        self.remember_composer_draft(cx);
+        cx.notify();
     }
 
     /// The "@" file menu, opening upward from the composer text.
@@ -144,12 +324,15 @@ impl NativeApp {
                 };
                 let view = app.read(cx);
                 let text = view.composer.read(cx).value();
-                let empty = text.is_empty();
-                let blank = text.trim().is_empty();
-                // Persistent storage currently exposes only a destructive pop, not a
-                // peek. Do not claim that it is empty based on the in-memory stack.
-                let no_stash = view.draft_store.is_none() && view.stash_memory.is_empty();
-                let persistent = view.draft_store.is_some();
+                let empty = text.trim().is_empty() && view.attachments.is_empty();
+                let blank = empty;
+                let entries = view.composer_stashes().to_vec();
+                let no_stash = entries.is_empty() && view.stash_memory.is_empty();
+                let busy = view.pending_actions > 0
+                    || view.attachment_drafts.uploading
+                    || view.attachment_drafts.stash_deleting
+                    || view.attachment_drafts.stash_writing;
+                let selected = view.selected_thread.is_some();
                 let stash_app = app.downgrade();
                 let restore_app = app.downgrade();
                 menu.item(
@@ -162,7 +345,7 @@ impl NativeApp {
                     })
                     .icon(IconName::Bookmark)
                     .action(Box::new(crate::StashPrompt))
-                    .disabled(blank)
+                    .disabled(blank || busy)
                     .on_click(move |_, window, cx| {
                         _ = stash_app.update(cx, |app, cx| app.stash_prompt(false, window, cx));
                     }),
@@ -177,7 +360,7 @@ impl NativeApp {
                             .child("Restore stashed prompt")
                     })
                     .icon(IconName::Undo2)
-                    .disabled(!empty || no_stash)
+                    .disabled(!empty || no_stash || busy || !selected)
                     .on_click(move |_, window, cx| {
                         _ = restore_app.update(cx, |app, cx| app.stash_prompt(true, window, cx));
                     }),
@@ -186,24 +369,74 @@ impl NativeApp {
                     menu.label("Stash or clear the current prompt first")
                 })
                 .when(empty && no_stash, |menu| menu.label("Nothing stashed yet"))
-                .when(empty && persistent, |menu| {
-                    menu.label("Restores the latest saved prompt, if any")
+                .label(format!("Stash · {} entries", entries.len()))
+                .when(busy, |menu| {
+                    menu.label("Wait for pending sends, uploads or deletions")
+                })
+                .when(!selected, |menu| menu.label("Select a thread to restore"))
+                .when(!entries.is_empty(), |mut menu| {
+                    for entry in entries.into_iter().rev() {
+                        let restore_app = app.downgrade();
+                        let delete_app = app.downgrade();
+                        let restore_id = entry.id.clone();
+                        let delete_id = entry.id.clone();
+                        let restore = PopupMenuItem::new(format!(
+                            "{} · {}",
+                            entry.snippet(),
+                            entry.created_at
+                        ))
+                        .icon(IconName::Bookmark)
+                        .disabled(!empty || busy || !selected)
+                        .on_click(move |_, window, cx| {
+                            _ = restore_app
+                                .update(cx, |app, cx| app.restore_stash(&restore_id, window, cx));
+                        });
+                        let delete = PopupMenuItem::new(format!("Delete: {}", entry.snippet()))
+                            .icon(IconName::Trash)
+                            .disabled(busy)
+                            .on_click(move |_, _, cx| {
+                                _ = delete_app
+                                    .update(cx, |app, cx| app.delete_stash(&delete_id, cx));
+                            });
+                        menu = menu.item(restore).item(delete);
+                    }
+                    menu
                 })
             })
     }
 
     pub(crate) fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        self.composer_state.release_retired_previews(cx, |image| {
+            self.conversation_presentation.media.values().any(|preview| {
+                matches!(preview, crate::views::message_media::MediaPreview::Ready(live) if live.id() == image.id())
+            })
+        });
         let muted_foreground = cx.theme().muted_foreground;
         let border = cx.theme().border;
         let muted = cx.theme().muted;
         let popover = cx.theme().popover;
-        let (runtime_mode, interaction_mode) = self.selected_modes();
+        let (mut runtime_mode, mut interaction_mode) = self.selected_modes();
+        if let Some(provider) = self.selected_provider(cx) {
+            let supported = provider.runtime_modes();
+            if !supported.contains(&runtime_mode.as_str())
+                && let Some(mode) = provider
+                    .default_runtime_mode
+                    .as_deref()
+                    .filter(|mode| supported.contains(mode))
+                    .or_else(|| supported.first().copied())
+            {
+                runtime_mode = mode.to_owned();
+            }
+            if provider.show_interaction_mode_toggle == Some(false) {
+                interaction_mode = "default".into();
+            }
+        }
         let full_access = runtime_mode == "full-access";
         let plan_mode = interaction_mode == "plan";
         let turn_running = self.turn_running();
         let active_model = self.active_model_label(cx);
         let composer_value = self.composer.read(cx).value().to_string();
-        let slash_entries = palette::slash_matches(&composer_value, self.selected_thread.is_some());
+        let slash_entries = self.command_trigger(cx).map(|_| self.slash_entries(cx));
         let mention_menu = self.mention_open(cx).then(|| self.render_mention_menu(cx));
         let thread_id = self.selected_thread.clone().unwrap_or_default();
         let queued = self.queues.messages(&thread_id);
@@ -226,6 +459,17 @@ impl NativeApp {
         };
         div()
             .debug_selector(|| "composer".into())
+            .capture_key_down(cx.listener(|app, event, window, cx| app.composer_key(event, window, cx)))
+            .capture_action(cx.listener(|app, action: &gpui_kit::component::input::Enter, window, cx| {
+                let key = if action.secondary { "cmd-enter" } else if action.shift { "shift-enter" } else { "enter" };
+                app.composer_action_key(key, window, cx);
+            }))
+            .capture_action(cx.listener(|app, _: &gpui_kit::component::input::MoveUp, window, cx| app.composer_action_key("up", window, cx)))
+            .capture_action(cx.listener(|app, _: &gpui_kit::component::input::MoveDown, window, cx| app.composer_action_key("down", window, cx)))
+            .on_drop::<gpui_kit::ExternalPaths>(cx.listener(|app, paths: &gpui_kit::ExternalPaths, _, cx| {
+                if let Some(scope) = app.attachment_scope() { app.attach_paths(scope, Some(paths.0.to_vec()), cx); }
+                else { app.report_error("Select a connected thread before dropping files", cx); cx.notify(); }
+            }))
             // While the "/" menu shows, arrows, Enter, and Escape drive it instead of the text.
             .when(slash_entries.is_some(), |view| {
                 view.key_context("NativeSlashMenu")
@@ -274,6 +518,7 @@ impl NativeApp {
             .p_3()
             .border_t_1()
             .border_color(border)
+            .when(composer_value.encode_utf16().count() > 120_000, |view| view.child(div().text_color(cx.theme().danger).child("Prompt exceeds the 120,000-character limit. Shorten or split before sending.")))
             .when(!queued.is_empty(), |view| {
                 view.child(
                     div()
@@ -339,6 +584,30 @@ impl NativeApp {
                         })),
                 )
             })
+            .when(self.composer_state.stash_picker, |view| {
+                view.child(div().id("shortcut-stash-picker").debug_selector(|| "shortcut-stash-picker".into())
+                    .flex().flex_col().gap_1().max_h(px(240.)).overflow_y_scroll()
+                    .when_some(self.composer_state.stash_focus.as_ref(), |view, focus| view.track_focus(focus))
+                    .on_key_down(cx.listener(|app, event: &gpui_kit::KeyDownEvent, window, cx| {
+                        match event.keystroke.key.as_str() {
+                            "up" | "down" => app.composer_state.stash_index = palette::step(app.composer_state.stash_index, app.composer_stashes().len(), event.keystroke.key == "down"),
+                            "enter" => { if let Some(entry) = app.composer_stashes().get(app.composer_state.stash_index) { let id = entry.id.clone(); app.restore_stash(&id, window, cx); } },
+                            "escape" => { app.composer_state.stash_picker = false; app.composer.update(cx, |input, cx| input.focus(window, cx)); },
+                            _ => return,
+                        }
+                        cx.stop_propagation(); cx.notify();
+                    }))
+                    .child("Choose a stashed prompt")
+                    .children(self.composer_stashes().iter().enumerate().map(|(index, entry)| {
+                        let id = entry.id.clone();
+                        Button::new(gpui_kit::SharedString::from(format!("shortcut-stash-{index}")))
+                            .debug_selector(move || format!("shortcut-stash-{index}"))
+                            .ghost().small().selected(index == self.composer_state.stash_index)
+                            .disabled(self.attachment_drafts.stash_writing)
+                            .label(format!("{} · {}", entry.snippet(), entry.created_at))
+                            .on_click(cx.listener(move |app, _, window, cx| app.restore_stash(&id, window, cx)))
+                    })))
+            })
             .child(
                 div()
                     .flex()
@@ -351,8 +620,17 @@ impl NativeApp {
                                 .child(menu),
                         ))
                     })
-                    .child(Textarea::new(&self.composer)),
+                    .child(Textarea::new(&self.composer).on_paste({
+                        let app = cx.entity().downgrade();
+                        move |clipboard, _, cx| app.update(cx, |app, cx| app.paste_composer(clipboard, cx)).unwrap_or(false)
+                    })),
             )
+            .when(self.composer_state.pending_paste.as_ref().is_some_and(|(scope, _)| scope.origin == self.environment_scope && Some(&scope.thread) == self.selected_thread.as_ref()), |view| {
+                view.child(div().flex().items_center().gap_2().child("Large text paste")
+                    .child(Button::new("paste-attach-text").debug_selector(|| "paste-attach-text".into()).ghost().small().label("Attach as text file").disabled(self.attachment_drafts.uploading).on_click(cx.listener(|app, _, window, cx| app.finish_large_paste(false, window, cx))))
+                    .child(Button::new("paste-as-text").debug_selector(|| "paste-as-text".into()).ghost().small().label("Paste as text").disabled(self.attachment_drafts.uploading).on_click(cx.listener(|app, _, window, cx| app.finish_large_paste(true, window, cx))))
+                    .child(Button::new("paste-cancel").debug_selector(|| "paste-cancel".into()).ghost().small().label("Cancel paste").disabled(self.attachment_drafts.uploading).on_click(cx.listener(|app, _, _, cx| { app.composer_state.pending_paste = None; cx.notify(); }))))
+            })
             .when(!self.attachments.is_empty(), |view| {
                 view.child(
                     div().flex().flex_wrap().gap_1().children(
@@ -375,6 +653,7 @@ impl NativeApp {
                                     .bg(muted)
                                     .text_xs()
                                     .text_color(muted_foreground)
+                                    .when_some(self.composer_state.previews.get(&(self.environment_scope.clone(), id.clone())), |view, preview| view.child(gpui_kit::img(preview.clone()).w(px(40.)).h(px(40.)).object_fit(gpui_kit::ObjectFit::Contain)))
                                     .child(name)
                                     .child(
                                         Button::new(gpui_kit::SharedString::from(format!(
@@ -409,13 +688,16 @@ impl NativeApp {
                         .bg(popover)
                         .border_1()
                         .border_color(border)
+                        .when(self.composer_state.command_loading, |view| view.child(div().text_xs().text_color(muted_foreground).child("Loading workspace commands and skills…")))
+                        .when_some(self.composer_state.command_error.as_ref(), |view, error| view.child(div().text_xs().text_color(cx.theme().danger).child(error.clone())))
+                        .child(Button::new("refresh-composer-catalog").debug_selector(|| "refresh-composer-catalog".into()).ghost().small().label("Refresh workspace catalog").on_click(cx.listener(|app, _, _, cx| app.refresh_composer_catalog(true, cx))))
                         .when(entries.is_empty(), |view| {
                             view.child(
                                 div()
                                     .px_2()
                                     .text_xs()
                                     .text_color(muted_foreground)
-                                    .child("No matching commands"),
+                                    .child(if self.selected_provider(cx).is_none_or(|provider| !provider.selectable()) { "Select an available provider to browse commands and skills" } else { "No matching commands or eligible skills" }),
                             )
                         })
                         .children(entries.into_iter().enumerate().map(|(index, entry)| {
@@ -423,7 +705,7 @@ impl NativeApp {
                             list_row(
                                 format!("slash-{label}"),
                                 None,
-                                label,
+                                format!("{} · {}", label, entry.description),
                                 index == self.slash_index,
                             )
                             .on_click(cx.listener(
@@ -440,7 +722,7 @@ impl NativeApp {
                     .items_center()
                     .gap_1()
                     .child(
-                        Button::new("attach")
+                        Button::new("attach").disabled(!self.connection_ready())
                             .debug_selector(|| "attach".into())
                             .icon(IconName::Paperclip)
                             .accessibility_label("Attach files")
@@ -465,30 +747,28 @@ impl NativeApp {
                                     muted_foreground
                                 }),
                             )
-                            .accessibility_label(if full_access {
-                                "Full access"
-                            } else {
-                                "Approval required"
-                            })
+                            .accessibility_label(format!("Runtime mode: {runtime_mode}"))
                             .ghost()
                             .small()
-                            .tooltip(if full_access {
-                                "Full access · click to require approval"
-                            } else {
-                                "Approval required · click to allow full access"
-                            })
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.change_thread_mode(
-                                    "thread.runtime-mode.set",
-                                    "runtimeMode",
-                                    if full_access {
-                                        "approval-required"
-                                    } else {
-                                        "full-access"
-                                    },
-                                    cx,
-                                )
-                            })),
+                            .disabled(self.selected_thread.is_none() || self.selected_provider(cx).is_none_or(|provider| !provider.selectable() || provider.runtime_modes().len() < 2) || self.pending_actions > 0 || !self.connection_ready())
+                            .tooltip(if self.selected_provider(cx).is_none() { "Load the provider catalog before changing permissions".to_owned() }
+                                else if self.pending_actions > 0 { "Wait for the pending server receipt".to_owned() }
+                                else if let Some(provider) = self.selected_provider(cx).filter(|provider| !provider.selectable()) { provider.explanation().to_owned() }
+                                else { format!("{runtime_mode} · provider-supported permission policies") })
+                            .dropdown_menu_with_anchor(Anchor::BottomLeft, {
+                                let app = cx.entity().downgrade();
+                                move |mut menu, _, cx| {
+                                    let Some(view) = app.upgrade() else { return menu; };
+                                    let modes = view.read(cx).selected_provider(cx).map(|provider| provider.runtime_modes().into_iter().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
+                                    for mode in modes {
+                                        let app = app.clone();
+                                        menu = menu.item(PopupMenuItem::new(mode.clone()).on_click(move |_, _, cx| {
+                                            _ = app.update(cx, |app, cx| app.change_thread_mode("thread.runtime-mode.set", "runtimeMode", &mode, cx));
+                                        }));
+                                    }
+                                    menu
+                                }
+                            }),
                     )
                     .child(
                         Button::new("interaction-mode")
@@ -506,7 +786,12 @@ impl NativeApp {
                             .ghost()
                             .small()
                             .selected(plan_mode)
-                            .tooltip(if plan_mode {
+                            .disabled(self.selected_thread.is_none() || self.selected_provider(cx).is_none_or(|provider| !provider.selectable() || !provider.show_interaction_mode_toggle.unwrap_or(true)) || self.pending_actions > 0 || !self.connection_ready())
+                            .tooltip(if self.selected_provider(cx).is_none_or(|provider| !provider.selectable() || !provider.show_interaction_mode_toggle.unwrap_or(true)) {
+                                "Plan mode is unavailable for this provider"
+                            } else if self.pending_actions > 0 {
+                                "Wait for the pending server receipt"
+                            } else if plan_mode {
                                 "Plan mode · click for default interaction"
                             } else {
                                 "Default interaction · click to plan first"
@@ -555,9 +840,8 @@ impl NativeApp {
                                     } else {
                                         format!("{} · choose provider and model", active_model)
                                     })
-                                    .on_click(cx.listener(|app, _, _, cx| {
-                                        app.catalog_open = !app.catalog_open;
-                                        cx.notify();
+                                    .on_click(cx.listener(|app, _, window, cx| {
+                                        app.open_model_catalog(window, cx);
                                     })),
                             ),
                     )
@@ -587,12 +871,36 @@ impl NativeApp {
                                             .xsmall()
                                             .w(px(32.)),
                                     )
+                                })
+                                .dropdown_menu_with_anchor(Anchor::BottomRight, {
+                                    let app = cx.entity().downgrade();
+                                    let details = snapshot.tooltip();
+                                    let payload = self.detail.thread.as_ref().and_then(|thread| thread["activities"].as_array()).and_then(|activities| activities.iter().rev().find(|activity| activity["kind"] == "context-window.updated")).map(|activity| activity["payload"].clone()).unwrap_or_default();
+                                    let automatic = payload["compactsAutomatically"] == true;
+                                    let threshold = payload["autoCompactThreshold"].as_f64();
+                                    move |mut menu, _, cx| {
+                                        menu = menu.label("Context window").label(details.clone());
+                                        for (field, label) in [("inputTokens", "Input"), ("cachedInputTokens", "Cached input"), ("outputTokens", "Output"), ("reasoningOutputTokens", "Reasoning output")] {
+                                            if let Some(tokens) = payload[field].as_f64().filter(|tokens| tokens.is_finite() && *tokens >= 0.) { menu = menu.label(format!("{label}: {} tokens", t3code_desktop_gpui::conversation::format_context_window_tokens(tokens))); }
+                                        }
+                                        if automatic {
+                                            menu = menu.label(threshold.map(|threshold| format!("Provider automatically compacts at {} tokens", t3code_desktop_gpui::conversation::format_context_window_tokens(threshold))).unwrap_or_else(|| "Provider automatically compacts as context fills".into()));
+                                        }
+                                        let Some(view) = app.upgrade() else { return menu; };
+                                        let reason = view.read(cx).compact_disabled_reason(cx);
+                                        let action_app = app.clone();
+                                        menu = menu.item(PopupMenuItem::new("Compact context").icon(IconName::Minimize).disabled(reason.is_some()).on_click(move |_, _, cx| {
+                                            _ = action_app.update(cx, |app, cx| app.compact_context(cx));
+                                        }));
+                                        if let Some(reason) = reason { menu = menu.label(reason); }
+                                        menu
+                                    }
                                 }),
                         )
                     })
                     // One slot: Send while idle, Stop while a turn runs.
                     .child(if turn_running {
-                        Button::new("stop-turn")
+                        Button::new("stop-turn").disabled(!self.connection_ready())
                             .debug_selector(|| "stop-turn".into())
                             .icon(IconName::Square)
                             .label("Stop")
@@ -611,12 +919,17 @@ impl NativeApp {
                             .small()
                             .primary()
                             .loading(self.pending_actions > 0)
-                            .disabled(
+                            .disabled((
                                 self.selected_thread.is_none()
                                     || self.checkout_transition_pending()
-                                    || self.composer.read(cx).value().trim().is_empty(),
-                            )
-                            .tooltip("Send the prompt (↩)")
+                                    || self.attachment_drafts.stash_writing
+                                    || self.attachment_drafts.uploading
+                                    || self.composer_state.pending_paste.as_ref().is_some_and(|(scope, _)| scope.origin == self.environment_scope && Some(&scope.thread) == self.selected_thread.as_ref())
+                                    || composer_value.encode_utf16().count() > 120_000
+                                    || (self.composer.read(cx).value().trim().is_empty()
+                                        && self.attachments.is_empty())
+                            ) || !self.connection_ready())
+                            .tooltip(if self.send_shortcut().requires_modifier(&composer_value) { "Send the prompt (⌘/Ctrl+↩)" } else { "Send the prompt (↩)" })
                             .on_click(cx.listener(|app, _, window, cx| app.send_prompt(window, cx)))
                     }),
             )

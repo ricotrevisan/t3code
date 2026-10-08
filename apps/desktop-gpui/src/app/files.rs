@@ -26,7 +26,7 @@ impl NativeApp {
             .file_editor
             .dirty(self.file_contents.read(cx).value().as_str())
         {
-            self.set_status(
+            self.report_error(
                 "Unsaved file edits: Save or Discard unsaved file edits before changing selection",
                 cx,
             );
@@ -38,6 +38,10 @@ impl NativeApp {
 
     pub(crate) fn invalidate_checkout_context(&mut self, cx: &mut Context<Self>) {
         self.cancel_branch_workflow(cx);
+        self.header_rename = Default::default();
+        self.editor_choice.open = false;
+        self.git_header.open = false;
+        self.git_header.epoch = self.git_header.epoch.wrapping_add(1);
         self.diffs.invalidate();
         self.file_listing_epoch += 1;
         self.file_epoch += 1;
@@ -83,7 +87,7 @@ impl NativeApp {
 
     pub(crate) fn list_files(&mut self, search: bool, cx: &mut Context<Self>) {
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             cx.notify();
             return;
         };
@@ -92,7 +96,7 @@ impl NativeApp {
             .as_ref()
             .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
         else {
-            self.set_status("Select a project first", cx);
+            self.report_error("Select a project first", cx);
             cx.notify();
             return;
         };
@@ -134,9 +138,9 @@ impl NativeApp {
                             app.file_listing_truncated = list.truncated;
                             app.set_status("Workspace entries loaded", cx);
                         }
-                        Err(_) => app.set_status("Invalid workspace listing", cx),
+                        Err(_) => app.report_error("Invalid workspace listing", cx),
                     },
-                    Err(error) => app.set_status(error, cx),
+                    Err(error) => app.report_error(error, cx),
                 }
                 cx.notify();
             });
@@ -146,7 +150,7 @@ impl NativeApp {
 
     pub(crate) fn search_contents(&mut self, cx: &mut Context<Self>) {
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             cx.notify();
             return;
         };
@@ -155,7 +159,7 @@ impl NativeApp {
             .as_ref()
             .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
         else {
-            self.set_status("Select a project first", cx);
+            self.report_error("Select a project first", cx);
             cx.notify();
             return;
         };
@@ -167,7 +171,7 @@ impl NativeApp {
         ) {
             Ok(payload) => payload,
             Err(error) => {
-                self.set_status(error, cx);
+                self.report_error(error, cx);
                 cx.notify();
                 return;
             }
@@ -191,21 +195,16 @@ impl NativeApp {
                 match result {
                     Ok(value) => match serde_json::from_value::<files::ContentResults>(value) {
                         Ok(results) => {
-                            app.set_status(
-                                results
-                                    .regex_fallback_error
-                                    .clone()
-                                    .map(|error| {
-                                        format!("Regex failed; showing literal matches: {error}")
-                                    })
-                                    .unwrap_or_else(|| "Workspace content results loaded".into()),
-                                cx,
-                            );
+                            if let Some(error) = results.regex_fallback_error.clone() {
+                                app.report_error(format!("Regex failed; showing literal matches: {error}"), cx);
+                            } else {
+                                app.set_status("Workspace content results loaded", cx);
+                            };
                             app.content_results = Some(results);
                         }
-                        Err(_) => app.set_status("Invalid workspace content results", cx),
+                        Err(_) => app.report_error("Invalid workspace content results", cx),
                     },
-                    Err(error) => app.set_status(error, cx),
+                    Err(error) => app.report_error(error, cx),
                 }
                 cx.notify();
             });
@@ -276,19 +275,19 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         if self.file_busy {
-            self.set_status("A file operation is already pending", cx);
+            self.report_progress("A file operation is already pending", cx);
             cx.notify();
             return;
         }
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             cx.notify();
             return;
         };
         let text = self.file_contents.read(cx).value().to_string();
         let target = if write {
             if !self.file_editor.writable() {
-                self.set_status(
+                self.report_error(
                     "Read a complete workspace-relative text file before saving",
                     cx,
                 );
@@ -312,14 +311,14 @@ impl NativeApp {
                             })
                 })
             {
-                self.set_status("The file belongs to a disconnected workspace", cx);
+                self.report_error("The file belongs to a disconnected workspace", cx);
                 cx.notify();
                 return;
             }
             self.file_editor.target.clone().unwrap()
         } else {
             if self.file_editor.dirty(&text) {
-                self.set_status("Unsaved file edits: save before reading another file", cx);
+                self.report_error("Unsaved file edits: save before reading another file", cx);
                 cx.notify();
                 return;
             }
@@ -328,13 +327,13 @@ impl NativeApp {
                 .as_ref()
                 .and_then(|id| self.shell.projects.iter().find(|project| &project.id == id))
             else {
-                self.set_status("Select a project first", cx);
+                self.report_error("Select a project first", cx);
                 cx.notify();
                 return;
             };
             let path = self.file_path.read(cx).value().trim().to_owned();
             if path.is_empty() {
-                self.set_status("Enter a file path", cx);
+                self.report_error("Enter a file path", cx);
                 cx.notify();
                 return;
             }
@@ -362,11 +361,11 @@ impl NativeApp {
                 if app.generation!=generation || app.file_epoch!=epoch || app.checkout_context()!=context { return; }
                 app.file_busy=false;
                 match result {
-                    Ok(_) if write=>{ app.file_editor.saved=text;app.set_status("File saved", cx); }
+                    Ok(_) if write=>{ app.file_editor.saved=text;app.report_success("File saved", cx); }
                     Ok(value)=>match serde_json::from_value::<files::Read>(value) {
                         Ok(read)=>{
                             if app.file_contents.read(cx).value().as_str()!=text {
-                                app.set_status("File response arrived after an edit; edits preserved. Save or discard before retrying.", cx);cx.notify();return;
+                                app.report_error("File response arrived after an edit; edits preserved. Save or discard before retrying.", cx);cx.notify();return;
                             }
                             app.file_contents.update(cx,|input,cx| {
                                 input.set_value(read.contents.clone(),window,cx);
@@ -381,9 +380,9 @@ impl NativeApp {
                             app.file_environment=app.environment_scope.clone();
                             app.file_editor.loaded(target.cwd,read);
                         }
-                        Err(_)=>app.set_status("Invalid file response; existing edits preserved", cx),
+                        Err(_)=>app.report_error("Invalid file response; existing edits preserved", cx),
                     },
-                    Err(error)=>app.set_status(error, cx),
+                    Err(error)=>app.report_error(error, cx),
                 }
                 cx.notify();
             }));
@@ -405,7 +404,7 @@ impl NativeApp {
                     &thread.id == id && Some(&thread.project_id) == self.selected_project.as_ref()
                 })
         }) {
-            self.set_status("Select a valid thread first", cx);
+            self.report_error("Select a valid thread first", cx);
             cx.notify();
             return;
         }
@@ -413,21 +412,17 @@ impl NativeApp {
             .selected_workspace()
             .filter(|path| !path.trim().is_empty())
         else {
-            self.set_status("Select a project or open a worktree first", cx);
+            self.report_error("Select a project or open a worktree first", cx);
             cx.notify();
             return;
         };
-        let editor = self
-            .available_editors
-            .iter()
-            .find(|editor| editor.as_str() == "zed")
-            .or_else(|| {
-                self.available_editors
-                    .iter()
-                    .find(|editor| editor.as_str() != "file-manager")
-            })
-            .cloned()
-            .unwrap_or_else(|| "zed".into());
+        if let Some(reason) = self.editor_unavailable_reason() {
+            self.report_error(reason, cx);
+            return;
+        }
+        let Some(editor) = self.preferred_editor() else {
+            return;
+        };
         self.perform(
             "shell.openInEditor",
             json!({"cwd": cwd, "editor": editor}),

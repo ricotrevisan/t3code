@@ -7,6 +7,14 @@ default-run = "t3code-desktop-gpui"
 
 [dependencies]
 gpui-kit = "=0.7.1"
+# Bounded first-frame thumbnails; already present transitively through GPUI.
+image = { version = "=0.25.10", default-features = false, features = [
+  "png",
+  "jpeg",
+  "gif",
+  "webp",
+] }
+alacritty_terminal = "=0.25.1"
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }

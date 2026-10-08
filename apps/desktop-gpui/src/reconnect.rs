@@ -27,6 +27,9 @@ pub struct Backoff {
     attempt: u32,
 }
 impl Backoff {
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
     pub fn reset(&mut self) {
         self.attempt = 0;
     }

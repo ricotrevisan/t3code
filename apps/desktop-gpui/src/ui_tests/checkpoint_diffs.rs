@@ -6,7 +6,7 @@ fn seed_checkpoints(app: &Entity<NativeApp>, cx: &mut VisualTestContext) {
             "checkpoints":[
                 {"checkpointTurnCount":1,"turnId":"one","completedAt":"2026-01-01T00:00:00Z","status":"ready","files":[{"path":"a.rs","additions":1,"deletions":1}]},
                 {"checkpointTurnCount":2,"turnId":"two","completedAt":"2026-01-01T00:01:00Z","status":"ready","files":[{"path":"b.rs","additions":1,"deletions":1}]}
-            ]}));
+            ]}).into());
         app.right_tab = RightTab::Changes;
         cx.notify();
     }));

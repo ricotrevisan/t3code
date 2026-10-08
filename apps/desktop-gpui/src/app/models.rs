@@ -1,11 +1,150 @@
 //! Model and mode selection, and provider sign-in.
 
 use crate::NativeApp;
-use gpui_kit::{App, Context, Window};
+use gpui_kit::{App, AppContext as _, Context, Window};
 use serde_json::{Value, json};
 use t3code_desktop_gpui::commands;
 
 impl NativeApp {
+    pub(crate) fn open_model_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.catalog_open = !self.catalog_open;
+        if self.catalog_open {
+            self.composer_state.catalog_provider = None;
+            self.composer_state.catalog_anchor = Some(gpui_kit::ScrollAnchor::for_handle(
+                self.composer_state.catalog_scroll.clone(),
+            ));
+            if self.composer_state.catalog_search.is_none() {
+                let input = cx.new(|cx| {
+                    crate::single_line_input(window, cx)
+                        .placeholder("Search models or provider instances…")
+                });
+                let subscription = cx.subscribe(&input, |app, input, event, cx| {
+                    if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                        app.composer_state.catalog_query = input.read(cx).value().to_lowercase();
+                        app.composer_state.catalog_index = 0;
+                        cx.notify();
+                    }
+                });
+                self.composer_state.catalog_search = Some(input);
+                self.composer_state.catalog_subscription = Some(subscription);
+            }
+            let input = self.composer_state.catalog_search.clone().unwrap();
+            input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+                input.focus(window, cx);
+            });
+        } else {
+            self.composer
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn catalog_rows(&self) -> Vec<(String, String)> {
+        let query = &self.composer_state.catalog_query;
+        self.provider_catalog
+            .iter()
+            .filter(|provider| {
+                provider.selectable()
+                    && self
+                        .composer_state
+                        .catalog_provider
+                        .as_ref()
+                        .is_none_or(|id| id == &provider.instance_id)
+            })
+            .flat_map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .filter(|model| {
+                        format!(
+                            "{} {} {} {}",
+                            provider.label(),
+                            provider.instance_id,
+                            model.name,
+                            model.slug
+                        )
+                        .to_lowercase()
+                        .contains(query)
+                    })
+                    .map(|model| (provider.instance_id.clone(), model.slug.clone()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn unavailable_model_options(&self, cx: &App) -> bool {
+        let Some(selection) = self.current_model_selection(cx) else {
+            return false;
+        };
+        let descriptors = self
+            .selected_provider(cx)
+            .and_then(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.slug == selection["model"])
+            })
+            .and_then(|model| model.capabilities["optionDescriptors"].as_array());
+        if descriptors.is_none() {
+            return false;
+        }
+        selection["options"].as_array().is_some_and(|options| {
+            options.iter().any(|saved| {
+                descriptors
+                    .and_then(|descriptors| {
+                        descriptors
+                            .iter()
+                            .find(|descriptor| descriptor["id"] == saved["id"])
+                    })
+                    .is_none_or(|descriptor| {
+                        if descriptor["type"] == "boolean" {
+                            !saved["value"].is_boolean()
+                        } else {
+                            !descriptor["options"].as_array().is_some_and(|choices| {
+                                choices.iter().any(|choice| choice["id"] == saved["value"])
+                            })
+                        }
+                    })
+            })
+        })
+    }
+
+    pub(crate) fn reset_model_options(&mut self, cx: &mut Context<Self>) {
+        let Some(mut selection) = self.current_model_selection(cx) else {
+            return;
+        };
+        selection.as_object_mut().unwrap().remove("options");
+        self.model_override = Some(selection.clone());
+        if let Some(draft) = self
+            .pending_threads
+            .iter_mut()
+            .find(|draft| Some(&draft.thread.id) == self.selected_thread.as_ref())
+        {
+            draft.thread.model_selection = selection;
+            if let Some(store) = &mut self.draft_store {
+                store.put_pending(&self.environment_scope, draft.clone());
+            }
+            self.schedule_draft_save(cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn current_model_selection(&self, cx: &App) -> Option<Value> {
+        let previous = self
+            .selected_thread
+            .as_ref()
+            .and_then(|id| {
+                self.shell
+                    .threads
+                    .iter()
+                    .chain(self.pending_threads.iter().map(|draft| &draft.thread))
+                    .find(|thread| &thread.id == id)
+            })
+            .map(|thread| &thread.model_selection)
+            .unwrap_or(&Value::Null);
+        self.model_selection(previous, cx).ok()
+    }
+
     pub(crate) fn model_selection(
         &self,
         previous: &Value,
@@ -42,7 +181,7 @@ impl NativeApp {
         let mut selection = match self.model_selection(previous, cx) {
             Ok(selection) => selection,
             Err(error) => {
-                self.set_status(error, cx);
+                self.report_error(error, cx);
                 cx.notify();
                 return;
             }
@@ -50,7 +189,9 @@ impl NativeApp {
         let descriptor = self
             .provider_catalog
             .iter()
-            .find(|provider| provider.instance_id == selection["instanceId"])
+            .find(|provider| {
+                provider.instance_id == selection["instanceId"] && provider.selectable()
+            })
             .and_then(|provider| {
                 provider
                     .models
@@ -67,7 +208,7 @@ impl NativeApp {
                         .is_some_and(|choices| choices.iter().any(|choice| choice["id"] == value)))
         });
         if !valid {
-            self.set_status("Model option is unavailable; refresh the catalog", cx);
+            self.report_error("Model option is unavailable; refresh the catalog", cx);
             cx.notify();
             return;
         }
@@ -102,12 +243,12 @@ impl NativeApp {
             .iter()
             .find(|provider| provider.instance_id == instance)
         else {
-            self.set_status("Provider instance no longer available", cx);
+            self.report_error("Provider instance no longer available", cx);
             cx.notify();
             return;
         };
         if !provider.selectable() || !provider.models.iter().any(|entry| entry.slug == model) {
-            self.set_status("Provider or model is unavailable; refresh its catalog", cx);
+            self.report_error("Provider or model is unavailable; refresh its catalog", cx);
             cx.notify();
             return;
         }
@@ -120,7 +261,7 @@ impl NativeApp {
                         || thread["modelSelection"]["model"] != model)
             })
         {
-            self.set_status("This provider requires a new thread for a model change", cx);
+            self.report_error("This provider requires a new thread for a model change", cx);
             cx.notify();
             return;
         }
@@ -131,7 +272,22 @@ impl NativeApp {
             input.set_value(model.to_owned(), window, cx)
         });
         self.catalog_open = false;
+        self.composer
+            .update(cx, |input, cx| input.focus(window, cx));
+        if self.command_trigger(cx).is_some() {
+            self.refresh_composer_catalog(false, cx);
+        }
         cx.notify();
+    }
+
+    pub(crate) fn selected_provider(
+        &self,
+        cx: &App,
+    ) -> Option<&t3code_desktop_gpui::providers::Provider> {
+        let instance = self.provider.read(cx).value();
+        self.provider_catalog
+            .iter()
+            .find(|provider| provider.instance_id == instance.as_str())
     }
 
     /// The effective runtime and interaction modes for the selected thread.
@@ -188,6 +344,25 @@ impl NativeApp {
         value: &str,
         cx: &mut Context<Self>,
     ) {
+        let allowed = self.selected_provider(cx).is_some_and(|provider| {
+            provider.selectable()
+                && match field {
+                    "runtimeMode" => provider.runtime_modes().contains(&value),
+                    "interactionMode" => {
+                        provider.show_interaction_mode_toggle.unwrap_or(true)
+                            && matches!(value, "default" | "plan")
+                    }
+                    _ => false,
+                }
+        });
+        if !allowed || self.pending_actions > 0 || self.checkout_transition_pending() {
+            self.report_error(
+                "Mode change unavailable for this provider or while an operation is pending",
+                cx,
+            );
+            cx.notify();
+            return;
+        }
         let Some(id) = self.selected_thread.clone() else {
             return;
         };
@@ -214,6 +389,11 @@ impl NativeApp {
 
     /// Begin a provider sign-in flow and surface its authorization URL.
     pub(crate) fn start_provider_auth(&mut self, instance_id: &str, cx: &mut Context<Self>) {
+        if let Some(state) = &self.auth_state
+            && let Some(previous) = state["instanceId"].as_str()
+        {
+            self.enqueue_subscription(t3code_desktop_gpui::connection::Command::Unsubscribe(format!("auth:{previous}")), cx);
+        }
         self.auth_state = None;
         self.perform(
             "provider.auth.start",
@@ -228,11 +408,15 @@ impl NativeApp {
         let Some(state) = self.auth_state.clone() else {
             return;
         };
+        if !crate::settings_provider::accepts_callback(&state) {
+            self.report_error("This sign-in flow does not accept a callback", cx);
+            return;
+        }
         let instance = state["instanceId"].as_str().unwrap_or_default().to_owned();
         let flow = state["flowId"].as_str().unwrap_or_default().to_owned();
         let callback = self.auth_callback.read(cx).value().trim().to_owned();
-        if callback.is_empty() {
-            self.set_status("Paste the callback URL first", cx);
+        if callback.is_empty() || callback.encode_utf16().count() > 16_384 {
+            self.report_error("Paste the callback URL first", cx);
             cx.notify();
             return;
         }

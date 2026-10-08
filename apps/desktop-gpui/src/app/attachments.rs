@@ -8,6 +8,50 @@ pub(crate) struct AttachmentDrafts {
     pub(crate) shelves: HashMap<(String, String), Vec<Value>>,
     // One body at a time, including across disconnect/reconnect.
     pub(crate) uploading: bool,
+    pub(crate) stashes: HashMap<String, Vec<t3code_desktop_gpui::drafts::StashEntry>>,
+    pub(crate) stash_deleting: bool,
+    pub(crate) stash_writing: bool,
+}
+
+pub(crate) enum AttachmentInput {
+    Path(std::path::PathBuf),
+    Bytes {
+        name: String,
+        bytes: Vec<u8>,
+        source: Option<Value>,
+    },
+}
+
+impl AttachmentInput {
+    pub(crate) fn name(&self) -> String {
+        match self {
+            Self::Path(path) => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned(),
+            Self::Bytes { name, .. } => name.clone(),
+        }
+    }
+    pub(crate) fn source(&self) -> Option<Value> {
+        match self {
+            Self::Bytes { source, .. } => source.clone(),
+            Self::Path(_) => None,
+        }
+    }
+    pub(crate) fn read(self, image: bool) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Path(path) => read_attachment(&path, image),
+            Self::Bytes { bytes, .. } => {
+                let limit = if image { 10 } else { 50 } * 1024 * 1024;
+                if bytes.is_empty() || bytes.len() > limit {
+                    Err("Clipboard attachment exceeds upload limits".into())
+                } else {
+                    Ok(bytes)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -54,7 +98,7 @@ pub(crate) fn upload_target(origin: &str, value: &Value) -> Result<(String, Stri
     let id = value["attachmentId"].as_str().ok_or_else(invalid)?;
     if id.trim().is_empty()
         || id.trim() != id
-        || id.chars().count() > 256
+        || id.encode_utf16().count() > 256
         || id.chars().any(char::is_control)
     {
         return Err(invalid());
@@ -81,7 +125,7 @@ pub(crate) fn upload_target(origin: &str, value: &Value) -> Result<(String, Stri
         .strip_prefix("/api/attachments/upload/")
         .ok_or_else(invalid)?;
     let parts: Vec<_> = token.split('.').collect();
-    if relative.len() > 4096
+    if relative.encode_utf16().count() > 4096
         || parts.len() != 2
         || parts.iter().any(|part| {
             part.is_empty()

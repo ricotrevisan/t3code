@@ -11,7 +11,80 @@ struct EnvironmentDrafts {
     #[serde(default)]
     pending_threads: BTreeMap<String, PendingThread>,
     drafts: BTreeMap<String, String>,
-    stash: Vec<String>,
+    #[serde(default)]
+    resources: BTreeMap<String, Vec<serde_json::Value>>,
+    stash: Vec<StashEntry>,
+}
+
+/// A stash owns its uploaded references; these never remain on the cleared draft.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(from = "StoredStash")]
+pub struct StashEntry {
+    pub id: String,
+    pub created_at: String,
+    pub prompt: String,
+    pub attachments: Vec<serde_json::Value>,
+    pub context: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredStash {
+    Legacy(String),
+    Record {
+        id: String,
+        created_at: String,
+        prompt: String,
+        #[serde(default)]
+        attachments: Vec<serde_json::Value>,
+        #[serde(default)]
+        context: Option<serde_json::Value>,
+    },
+}
+
+impl From<StoredStash> for StashEntry {
+    fn from(stored: StoredStash) -> Self {
+        match stored {
+            StoredStash::Legacy(prompt) => Self::new(prompt, Vec::new()),
+            StoredStash::Record {
+                id,
+                created_at,
+                prompt,
+                attachments,
+                context,
+            } => Self {
+                id,
+                created_at,
+                prompt,
+                attachments,
+                context,
+            },
+        }
+    }
+}
+
+impl StashEntry {
+    pub fn new(prompt: String, attachments: Vec<serde_json::Value>) -> Self {
+        let context = crate::mentions::message_context(&prompt).1;
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: crate::commands::now(),
+            prompt,
+            attachments,
+            context,
+        }
+    }
+    pub fn snippet(&self) -> String {
+        let text = self.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return format!("({} attachments)", self.attachments.len());
+        }
+        let mut snippet: String = text.chars().take(90).collect();
+        if text.chars().count() > 90 {
+            snippet.push('…');
+        }
+        snippet
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -22,9 +95,26 @@ pub struct PendingThread {
     pub run_setup_script: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SendShortcut {
+    #[default]
+    Enter,
+    ModEnter,
+    ModEnterMultiline,
+}
+
+impl SendShortcut {
+    pub fn requires_modifier(self, prompt: &str) -> bool {
+        self == Self::ModEnter || (self == Self::ModEnterMultiline && prompt.contains(['\n', '\r']))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Document {
     version: u8,
+    #[serde(default)]
+    send_shortcut: SendShortcut,
     environments: BTreeMap<String, EnvironmentDrafts>,
 }
 
@@ -50,13 +140,17 @@ impl Drafts {
                     return Err(io::Error::other("Draft file exceeds 16 MiB"));
                 }
                 let document: Document = serde_json::from_slice(&data).map_err(io::Error::other)?;
-                if document.version != 1 {
+                if !matches!(document.version, 1 | 2) {
                     return Err(io::Error::other("Unsupported draft version"));
                 }
-                document
+                Document {
+                    version: 2,
+                    ..document
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Document {
-                version: 1,
+                version: 2,
+                send_shortcut: Default::default(),
                 environments: Default::default(),
             },
             Err(error) => return Err(error),
@@ -67,6 +161,14 @@ impl Drafts {
             revision: 0,
             committed: Default::default(),
         })
+    }
+
+    pub fn send_shortcut(&self) -> SendShortcut {
+        self.document.send_shortcut
+    }
+    pub fn set_send_shortcut(&mut self, shortcut: SendShortcut) {
+        self.document.send_shortcut = shortcut;
+        self.revision += 1;
     }
 
     pub fn pending_threads(&self, environment: &str) -> Vec<PendingThread> {
@@ -114,26 +216,79 @@ impl Drafts {
         }
     }
     pub fn stash(&mut self, environment: &str, text: String) {
-        if !text.trim().is_empty() {
+        self.stash_record(environment, StashEntry::new(text, Vec::new()));
+    }
+    pub fn stash_record(&mut self, environment: &str, record: StashEntry) {
+        if record.prompt.trim().is_empty()
+            && record.attachments.is_empty()
+            && record.context.is_none()
+        {
+            return;
+        }
+        self.revision += 1;
+        self.document
+            .environments
+            .entry(environment.into())
+            .or_default()
+            .stash
+            .push(record);
+    }
+    pub fn stashes(&self, environment: &str) -> &[StashEntry] {
+        self.document
+            .environments
+            .get(environment)
+            .map(|e| e.stash.as_slice())
+            .unwrap_or_default()
+    }
+    pub fn resources(&self, environment: &str, thread: &str) -> Vec<serde_json::Value> {
+        self.document
+            .environments
+            .get(environment)
+            .and_then(|state| state.resources.get(thread))
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub fn consume_resources(
+        &mut self,
+        environment: &str,
+        thread: &str,
+        sent: &[serde_json::Value],
+    ) {
+        if let Some(state) = self.document.environments.get_mut(environment)
+            && let Some(refs) = state.resources.get_mut(thread)
+        {
+            refs.retain(|item| !sent.iter().any(|sent| sent["id"] == item["id"]));
+            if refs.is_empty() {
+                state.resources.remove(thread);
+            }
             self.revision += 1;
-            self.document
-                .environments
-                .entry(environment.into())
-                .or_default()
-                .stash
-                .push(text);
         }
     }
-    pub fn unstash(&mut self, environment: &str) -> Option<String> {
-        let result = self
-            .document
+    /// One document revision transfers the stash into durable draft ownership.
+    pub fn restore_record(
+        &mut self,
+        environment: &str,
+        thread: &str,
+        id: &str,
+    ) -> Option<StashEntry> {
+        let record = self.take_stash(environment, id)?;
+        self.set(environment, thread, record.prompt.clone());
+        self.document
             .environments
-            .get_mut(environment)
-            .and_then(|e| e.stash.pop());
-        if result.is_some() {
-            self.revision += 1;
-        }
-        result
+            .get_mut(environment)?
+            .resources
+            .insert(thread.into(), record.attachments.clone());
+        Some(record)
+    }
+    pub fn take_stash(&mut self, environment: &str, id: &str) -> Option<StashEntry> {
+        let state = self.document.environments.get_mut(environment)?;
+        let index = state.stash.iter().position(|entry| entry.id == id)?;
+        self.revision += 1;
+        Some(state.stash.remove(index))
+    }
+    pub fn unstash(&mut self, environment: &str) -> Option<String> {
+        let id = self.stashes(environment).last()?.id.clone();
+        self.take_stash(environment, &id).map(|entry| entry.prompt)
     }
     pub fn write_snapshot(&self) -> io::Result<Write> {
         Ok(Write {
@@ -245,7 +400,7 @@ mod tests {
         fs::write(&path, "broken").unwrap();
         assert!(Drafts::open(path.clone()).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "broken");
-        fs::write(&path, r#"{"version":2,"environments":{}}"#).unwrap();
+        fs::write(&path, r#"{"version":3,"environments":{}}"#).unwrap();
         assert!(Drafts::open(path).is_err());
     }
     #[test]
@@ -260,6 +415,44 @@ mod tests {
         old.persist().unwrap();
         assert_eq!(Drafts::open(path).unwrap().get("local", "t"), "New");
     }
+    #[test]
+    fn version_one_string_stashes_migrate_without_losing_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        fs::write(&path, r#"{"version":1,"environments":{"local":{"drafts":{"t":"keep"},"stash":["old one","世界"]}}}"#).unwrap();
+        let mut store = Drafts::open(path.clone()).unwrap();
+        assert_eq!(store.stashes("local").len(), 2);
+        let record = StashEntry::new(
+            "[main.rs](src/main.rs)".into(),
+            vec![serde_json::json!({"id":"owned"})],
+        );
+        let id = record.id.clone();
+        store.stash_record("local", record);
+        store.write_snapshot().unwrap().persist().unwrap();
+        let mut restored = Drafts::open(path).unwrap();
+        assert_eq!(restored.get("local", "t"), "keep");
+        assert!(restored.stashes("remote").is_empty());
+        let entry = restored.take_stash("local", &id).unwrap();
+        assert_eq!(entry.attachments[0]["id"], "owned");
+        assert_eq!(entry.context.unwrap()["records"][0]["path"], "src/main.rs");
+        assert_eq!(restored.unstash("local").unwrap(), "世界");
+        assert_eq!(restored.unstash("local").unwrap(), "old one");
+        assert_eq!(restored.document.version, 2);
+    }
+
+    #[test]
+    fn send_shortcut_is_device_local_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let mut store = Drafts::open(path.clone()).unwrap();
+        store.set_send_shortcut(SendShortcut::ModEnterMultiline);
+        store.write_snapshot().unwrap().persist().unwrap();
+        let restored = Drafts::open(path).unwrap();
+        assert_eq!(restored.send_shortcut(), SendShortcut::ModEnterMultiline);
+        assert!(!restored.send_shortcut().requires_modifier("one line"));
+        assert!(restored.send_shortcut().requires_modifier("two\nlines"));
+    }
+
     #[test]
     fn clearing_one_draft_preserves_other_threads() {
         let directory = tempfile::tempdir().unwrap();

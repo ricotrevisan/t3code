@@ -1,4 +1,5 @@
 use gpui_kit::component::{
+    Sizable,
     button::{Button, ButtonVariants as _},
     input::Input,
 };
@@ -22,16 +23,21 @@ impl NativeApp {
                     .child(
                         Button::new("custom-snooze")
                             .label("Snooze")
+                            .small()
                             .secondary()
                             .on_click(cx.listener(|app, _, _, cx| app.snooze_custom(cx))),
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(field("Provider instance", Input::new(&self.provider), cx))
-                    .child(field("Model", Input::new(&self.model), cx)),
+                div().flex().items_center().gap_2().child("Model").child(
+                    Button::new("thread-model-picker")
+                        .label(self.active_model_label(cx))
+                        .ghost()
+                        .small()
+                        .on_click(
+                            cx.listener(|app, _, window, cx| app.open_model_catalog(window, cx)),
+                        ),
+                ),
             )
     }
 }

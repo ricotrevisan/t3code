@@ -23,15 +23,24 @@ use t3code_desktop_gpui::commands;
 gpui_kit::actions!(
     native,
     [
+        UndoThreadNavigation,
+        ThreadSearchSubmit,
+        ThreadSearchNext,
+        ThreadSearchPrevious,
+        ThreadSearchCancel,
         ContentSubmit,
         ContentNext,
         ContentPrevious,
         OpenFiles,
         OpenContentSearch,
+        OpenPreferredEditor,
         TogglePalette,
         ClosePalette,
         PaletteNext,
         PalettePrevious,
+        BranchNext,
+        BranchPrevious,
+        BranchPick,
         SlashNext,
         SlashPrevious,
         SlashRun,
@@ -48,10 +57,14 @@ gpui_kit::actions!(
         PreviousThread,
         NextThread,
         OpenSettings,
+        ToggleTerminal,
         ToggleRightPanel,
         ToggleSidebar,
         SteerPrompt,
-        QuitNative
+        QuitNative,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset
     ]
 );
 
@@ -111,7 +124,27 @@ enum InspectorSection {
 }
 
 mod app;
+#[path = "app/connection_health_config.rs"]
+mod server_config_projection;
+#[path = "surfaces/agents/view.rs"]
+mod runtime_agents;
+#[path = "surfaces/terminal/mod.rs"]
+mod runtime_terminal;
+mod conversation_presentation;
+mod composer_state;
+mod composer_thumbnail;
 mod theme;
+mod settings_appearance;
+mod settings_preferences;
+mod settings_keybindings;
+mod settings_environments;
+mod settings_provider;
+mod settings_palette;
+mod settings_projects;
+mod settings_project_actions;
+#[cfg(test)]
+#[path = "ui_tests/settings_fixc.rs"]
+mod settings_fixc;
 #[cfg(test)]
 mod ui_tests;
 mod views;
@@ -126,6 +159,9 @@ struct NativeApp {
     palette_open: bool,
     palette_query: Entity<InputState>,
     palette_index: usize,
+    palette_cache: std::cell::RefCell<settings_palette::Cache>,
+    palette_scroll: gpui_kit::UniformListScrollHandle,
+    settings_shortcut_focus: FocusHandle,
     /// Highlighted row of the composer's "/" menu.
     slash_index: usize,
     /// The composer's "@" token (byte range and query) whose file menu is open.
@@ -140,11 +176,21 @@ struct NativeApp {
     archived_shell: shell::Shell,
     detail: thread::ThreadDetail,
     diffs: app::diffs::DiffState,
+    agents_surface: runtime_agents::SurfaceState,
+    terminal_drawer: runtime_terminal::Drawer,
     status: String,
+    status_kind: notifications::Outcome,
+    connection_phase: connection::Phase,
+    environment_name: Option<String>,
     storage_error: Option<String>,
     selected_project: Option<String>,
     selected_thread: Option<String>,
     sidebar_view: sidebar::View,
+    sidebar_state: sidebar::State,
+    server_config: server_config_projection::Projection,
+    thread_undo: app::thread_undo::UndoState,
+    sidebar_clock: Option<Task<()>>,
+    sidebar_rename: Entity<InputState>,
     snooze_wake: Option<Task<()>>,
     custom_snooze: Entity<InputState>,
     confirm_delete: Option<String>,
@@ -169,7 +215,15 @@ struct NativeApp {
     model_override: Option<Value>,
     provider_catalog: Vec<providers::Provider>,
     catalog_open: bool,
+    composer_state: composer_state::ComposerState,
     settings_open: bool,
+    settings_query: Entity<InputState>,
+    settings_provider_details: Vec<Value>,
+    settings_provider_task: Option<Task<()>>,
+    subscription_enqueues: std::collections::HashMap<String, Task<()>>,
+    settings_provider_busy: Option<u64>,
+    directory_browser: settings_projects::DirectoryBrowser,
+    action_extras: settings_project_actions::ActionExtras,
     /// Activity disclosures the user toggled, keyed by turn.
     activity_expanded: std::collections::HashMap<String, bool>,
     inspector_open: bool,
@@ -180,6 +234,10 @@ struct NativeApp {
     sidebar_split: Entity<ResizableState>,
     workspace_split: Entity<ResizableState>,
     thread_menu_open: bool,
+    git_header: app::git_actions::GitHeader,
+    git_picker: app::git_picker::PickerNavigation,
+    editor_choice: app::git_editors::EditorChoice,
+    header_rename: app::git_identity::HeaderRename,
     /// The sidebar row whose secondary click opened the thread menu, and the
     /// pointer position it opens at. None while the header menu is open.
     thread_menu_row: Option<(String, Point<Pixels>)>,
@@ -190,6 +248,7 @@ struct NativeApp {
     conversation_scroll: gpui_kit::ListState,
     /// The rows `conversation_scroll` currently holds, diffed on each render.
     conversation_rows: std::rc::Rc<Vec<t3code_desktop_gpui::conversation::TimelineRow>>,
+    conversation_presentation: conversation_presentation::ConversationPresentation,
     /// The open user-input request the answer drafts below belong to.
     user_input_request: Option<String>,
     /// Chosen option values and custom-answer inputs, by question id.
@@ -289,6 +348,7 @@ struct NativeApp {
 
 impl NativeApp {
     fn new(window: &mut Window, cx: &mut Context<Self>, auto_connect: bool) -> Self {
+        theme::observe(window, cx);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
@@ -339,6 +399,9 @@ impl NativeApp {
                 app.search_threads(cx);
             }
         })];
+        subscriptions.push(cx.subscribe(&search, |app, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) { app.thread_search_changed(cx); }
+        }));
         subscriptions.push(
             cx.subscribe_in(
                 &content_query,
@@ -404,20 +467,10 @@ impl NativeApp {
                 |app, _, event, window, cx| match event {
                     InputEvent::Change => {
                         app.palette_index = 0;
+                        app.palette_scroll.scroll_to_item(0, gpui_kit::ScrollStrategy::Nearest);
                         cx.notify();
                     }
-                    InputEvent::PressEnter { .. } => {
-                        if let Some(entry) = palette::matching(
-                            &app.palette_query.read(cx).value(),
-                            app.selected_thread.is_some(),
-                        )
-                        .get(app.palette_index)
-                        {
-                            let command = entry.command;
-                            app.close_palette(window, cx);
-                            app.execute_command(command, window, cx);
-                        }
-                    }
+                    InputEvent::PressEnter { .. } => app.submit_palette(window, cx),
                     _ => {}
                 },
             ),
@@ -482,6 +535,7 @@ impl NativeApp {
             app.window_active = window.is_window_active();
             if app.window_active {
                 app.clear_notification_badge(cx);
+                app.refresh_notification_authorization(cx);
             }
         }));
         subscriptions.push(cx.observe_window_bounds(window, |app, window, cx| {
@@ -498,6 +552,9 @@ impl NativeApp {
             palette_open: false,
             palette_query,
             palette_index: 0,
+            palette_cache: Default::default(),
+            palette_scroll: gpui_kit::UniformListScrollHandle::new(),
+            settings_shortcut_focus: cx.focus_handle(),
             slash_index: 0,
             mention: None,
             mention_entries: vec![],
@@ -510,11 +567,21 @@ impl NativeApp {
             archived_shell: shell::Shell::default(),
             detail: thread::ThreadDetail::default(),
             diffs: app::diffs::DiffState::default(),
+            agents_surface: runtime_agents::SurfaceState::default(),
+            terminal_drawer: runtime_terminal::Drawer::new(window, cx),
             status: "Not connected".into(),
+            status_kind: notifications::Outcome::Info,
+            connection_phase: connection::Phase::Offline,
+            environment_name: None,
             storage_error: None,
             selected_project: None,
             selected_thread: None,
             sidebar_view: sidebar::View::Active,
+            sidebar_state: sidebar::State::default(),
+            server_config: server_config_projection::Projection::default(),
+            thread_undo: app::thread_undo::UndoState::default(),
+            sidebar_clock: None,
+            sidebar_rename: cx.new(|cx| single_line_input(window, cx).placeholder("Thread title")),
             snooze_wake: None,
             custom_snooze,
             confirm_delete: None,
@@ -538,7 +605,15 @@ impl NativeApp {
             model,
             model_override: None,
             provider_catalog: vec![],
+            settings_query: Self::create_settings_query(window, cx),
+            settings_provider_details: vec![],
+            settings_provider_task: None,
+            subscription_enqueues: Default::default(),
+            settings_provider_busy: None,
+            directory_browser: settings_projects::DirectoryBrowser::default(),
+            action_extras: settings_project_actions::ActionExtras::default(),
             catalog_open: false,
+            composer_state: Default::default(),
             settings_open: false,
             activity_expanded: Default::default(),
             inspector_open: true,
@@ -557,6 +632,7 @@ impl NativeApp {
                 list
             },
             conversation_rows: Default::default(),
+            conversation_presentation: Default::default(),
             user_input_request: None,
             user_input_selected: Default::default(),
             user_input_custom: Default::default(),
@@ -568,6 +644,10 @@ impl NativeApp {
             }),
             right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
+            git_header: Default::default(),
+            git_picker: Default::default(),
+            editor_choice: app::git_editors::EditorChoice::restore(),
+            header_rename: Default::default(),
             saved_window: None,
             context_meter_hidden: false,
             notification_preferences: notifications::Preferences::default(),
@@ -680,7 +760,9 @@ impl NativeApp {
             app.sidebar_width = state.sidebar_width;
             app.inspector_open = state.right_panel_open;
             app.inspector_width = state.right_panel_width;
+            app.terminal_drawer.height = state.terminal_height;
             app.saved_window = Some(state);
+            if let Err(error) = app.sidebar_state.load_local(drafts::default_path().with_file_name("sidebar.json")) { app.storage_error = Some(format!("Sidebar preferences cannot be read: {error}")); }
             match drafts::Drafts::open(drafts::default_path()) {
                 Ok(store) => app.draft_store = Some(store),
                 Err(_) => app.storage_error = Some(
@@ -689,6 +771,7 @@ impl NativeApp {
                 ),
             }
             app.connect(cx);
+            app.refresh_notification_authorization(cx);
         }
         app
     }
@@ -705,10 +788,12 @@ impl Drop for NativeApp {
             eprintln!("Could not flush native drafts during shutdown");
         }
         self.remember_layout();
+        if let Err(error) = self.sidebar_state.save_local() { eprintln!("Could not flush sidebar preferences: {error}"); }
         if let Some(mut state) = self.saved_window {
             state.follow_up_behavior = self.follow_up_behavior;
             state.context_meter_hidden = self.context_meter_hidden;
             state.notifications = self.notification_preferences;
+            state.terminal_height = self.terminal_drawer.height;
             window_state::save(state);
         }
     }
@@ -716,6 +801,8 @@ impl Drop for NativeApp {
 
 impl Render for NativeApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.clamp_terminal_height(_window);
+        self.terminal_synchronize(cx);
         let background = cx.theme().background;
         let foreground = cx.theme().foreground;
         // Workspace: the conversation is primary; controls live in the inspector.
@@ -755,6 +842,7 @@ impl Render for NativeApp {
                                 .child(self.render_thread_header(cx))
                                 .child(self.render_conversation(cx))
                                 .child(self.render_composer(cx))
+                                .children(self.render_terminal(cx))
                                 .child(self.render_status_bar(cx))
                                 .children(self.render_toasts(cx))
                                 .into_any_element(),
@@ -778,6 +866,7 @@ impl Render for NativeApp {
             .relative()
             .key_context("NativeApp")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|app, _: &UndoThreadNavigation, _, cx| app.undo_thread_navigation(cx)))
             .on_action(cx.listener(|app, _: &ContentSubmit, window, cx| {
                 if app
                     .content_results
@@ -793,6 +882,7 @@ impl Render for NativeApp {
             .on_action(
                 cx.listener(|app, _: &ContentPrevious, _, cx| app.move_content_hit(false, cx)),
             )
+            .on_action(cx.listener(|app, _: &OpenPreferredEditor, _, cx| app.open_in_editor(cx)))
             .on_action(cx.listener(|app, _: &OpenFiles, window, cx| {
                 app.execute_command(palette::Command::Files, window, cx)
             }))
@@ -811,7 +901,9 @@ impl Render for NativeApp {
                 app.execute_command(palette::Command::NewThread, window, cx)
             }))
             .on_action(cx.listener(|app, _: &StashPrompt, window, cx| {
-                app.execute_command(palette::Command::Stash, window, cx)
+                let restore = app.composer.read(cx).value().trim().is_empty()
+                    && app.attachments.is_empty();
+                app.stash_prompt(restore, window, cx)
             }))
             .on_action(
                 cx.listener(|app, _: &ToggleSettle, _, cx| app.toggle_thread_property(false, cx)),
@@ -823,6 +915,11 @@ impl Render for NativeApp {
             // unhandled keystroke can never fall through to text insertion after a send.
             .on_action(cx.listener(|_, _: &gpui_kit::component::input::Enter, _, _| {}))
             .on_action(cx.listener(|app, _: &DismissOverlay, window, cx| {
+                if app.git_header.open {
+                    app.dismiss_git_header(cx);
+                    app.focus.focus(window, cx);
+                    return;
+                }
                 if !app.dismiss_overlay(window, cx) {
                     cx.propagate();
                 }
@@ -835,11 +932,16 @@ impl Render for NativeApp {
             .on_action(
                 cx.listener(|app, _: &NextThread, window, cx| app.step_thread(true, window, cx)),
             )
+            .on_action(cx.listener(|app, _: &ZoomIn, window, cx| app.change_scale(Some(1), window, cx)))
+            .on_action(cx.listener(|app, _: &ZoomOut, window, cx| app.change_scale(Some(-1), window, cx)))
+            .on_action(cx.listener(|app, _: &ZoomReset, window, cx| app.change_scale(None, window, cx)))
             .on_action(cx.listener(|app, _: &OpenSettings, _, cx| {
                 app.settings_open = !app.settings_open;
+                if app.settings_open { app.refresh_settings_providers(false, cx); }
                 cx.notify();
             }))
             .on_action(cx.listener(|app, _: &SteerPrompt, window, cx| app.steer_prompt(window, cx)))
+            .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| app.toggle_terminal(window, cx)))
             .on_action(cx.listener(|app, _: &ToggleRightPanel, _, cx| {
                 app.set_inspector_open(!app.inspector_open, cx)
             }))
@@ -893,8 +995,14 @@ impl Render for NativeApp {
 }
 
 fn bind_native_keys(cx: &mut App) {
+    runtime_terminal::keys::bind(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-q", QuitNative, None),
+        KeyBinding::new("cmd-z", UndoThreadNavigation, Some("NativeApp && !Input")),
+        KeyBinding::new("enter", ThreadSearchSubmit, Some("NativeApp > NativeThreadSearch > Input")),
+        KeyBinding::new("down", ThreadSearchNext, Some("NativeApp > NativeThreadSearch > Input")),
+        KeyBinding::new("up", ThreadSearchPrevious, Some("NativeApp > NativeThreadSearch > Input")),
+        KeyBinding::new("escape", ThreadSearchCancel, Some("NativeApp > NativeThreadSearch > Input")),
         KeyBinding::new(
             "enter",
             ContentSubmit,
@@ -911,6 +1019,7 @@ fn bind_native_keys(cx: &mut App) {
             Some("NativeApp > NativeContentSearch > Input"),
         ),
         KeyBinding::new("cmd-p", OpenFiles, Some("NativeApp")),
+        KeyBinding::new("cmd-o", OpenPreferredEditor, Some("NativeApp")),
         KeyBinding::new("cmd-shift-f", OpenContentSearch, Some("NativeApp")),
         KeyBinding::new("cmd-k", TogglePalette, Some("NativeApp")),
         KeyBinding::new("cmd-s", StashPrompt, Some("NativeApp")),
@@ -922,6 +1031,10 @@ fn bind_native_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-[", PreviousThread, Some("NativeApp")),
         KeyBinding::new("cmd-shift-]", NextThread, Some("NativeApp")),
         KeyBinding::new("cmd-,", OpenSettings, Some("NativeApp")),
+        KeyBinding::new("cmd-=", ZoomIn, Some("NativeApp")),
+        KeyBinding::new("cmd--", ZoomOut, Some("NativeApp")),
+        KeyBinding::new("cmd-0", ZoomReset, Some("NativeApp")),
+        KeyBinding::new("cmd-j", ToggleTerminal, Some("NativeApp")),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some("NativeApp")),
         KeyBinding::new("cmd-b", ToggleSidebar, Some("NativeApp")),
         KeyBinding::new("cmd-shift-enter", SteerPrompt, Some("NativeApp")),
@@ -935,6 +1048,10 @@ fn bind_native_keys(cx: &mut App) {
             DismissOverlay,
             Some("NativeApp > NativeBranchPicker > Input"),
         ),
+        KeyBinding::new("escape", DismissOverlay, Some("NativeApp > NativeBranchBrowse > Input")),
+        KeyBinding::new("down", BranchNext, Some("NativeApp > NativeBranchBrowse > Input")),
+        KeyBinding::new("up", BranchPrevious, Some("NativeApp > NativeBranchBrowse > Input")),
+        KeyBinding::new("enter", BranchPick, Some("NativeApp > NativeBranchBrowse > Input")),
         KeyBinding::new(
             "down",
             PaletteNext,
@@ -955,6 +1072,7 @@ fn bind_native_keys(cx: &mut App) {
         KeyBinding::new("tab", MentionPick, Some("NativeMentionMenu > Input")),
         KeyBinding::new("escape", MentionClose, Some("NativeMentionMenu > Input")),
     ]);
+    settings_keybindings::init(cx);
 }
 
 fn main() {
@@ -991,6 +1109,7 @@ fn main() {
                         gpui_kit::MenuItem::action("Commands", TogglePalette),
                         gpui_kit::MenuItem::action("Settings", OpenSettings),
                         gpui_kit::MenuItem::action("Toggle sidebar", ToggleSidebar),
+                        gpui_kit::MenuItem::action("Toggle terminal", ToggleTerminal),
                         gpui_kit::MenuItem::action("Toggle right panel", ToggleRightPanel),
                         gpui_kit::MenuItem::action("Workspace files", OpenFiles),
                         gpui_kit::MenuItem::action("Search contents", OpenContentSearch),

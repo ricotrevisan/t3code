@@ -5,7 +5,7 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{Anchor, Context, anchored, deferred, div, prelude::*, px};
-use t3code_desktop_gpui::notifications;
+use t3code_desktop_gpui::{connection::Phase, notifications};
 
 use crate::NativeApp;
 
@@ -23,6 +23,13 @@ impl NativeApp {
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
             .unwrap_or_else(|| self.environment_scope.clone());
+        let environment_label = format!(
+            "{} · {}",
+            self.environment_name
+                .as_deref()
+                .unwrap_or(&environment_host),
+            self.connection_state_text()
+        );
         let worktree_path = self.selected_thread_worktree();
         let status_worktree = worktree_path
             .as_deref()
@@ -32,8 +39,8 @@ impl NativeApp {
                     .find(|segment| !segment.is_empty())
             })
             .map(str::to_owned);
-        let status_is_error = notifications::is_error(&self.status);
-        let status_text = notifications::status_bar_text(self.commands.is_some(), &self.status);
+        let status_is_error = self.status_kind == notifications::Outcome::Error;
+        let status_text = self.status_text();
         div()
             .id("status-bar")
             .debug_selector(|| "status-bar".into())
@@ -55,25 +62,52 @@ impl NativeApp {
                     // Intrinsic chip widths must not steal the message's lane.
                     .gap_1()
                     .flex_1()
+                    .flex_grow(3.)
                     .min_w_0()
-                    .child(div().flex_shrink_0().w(px(8.)).h(px(8.)).rounded_full().bg(
-                        if self.commands.is_some() {
-                            green
-                        } else {
-                            muted_foreground
-                        },
-                    ))
                     .child(
-                        div().flex_1().min_w_0().child(
+                        div()
+                            .id("connection-status-dot")
+                            .debug_selector(|| "connection-status-dot".into())
+                            .flex_shrink_0()
+                            .w(px(8.))
+                            .h(px(8.))
+                            .rounded_full()
+                            .tooltip({
+                                let text = format!(
+                                    "{} · {}",
+                                    self.connection_state_text(),
+                                    self.environment_scope
+                                );
+                                move |window, cx| {
+                                    let text = text.clone();
+                                    Tooltip::element(move |_, _| div().child(text.clone()))
+                                        .build(window, cx)
+                                }
+                            })
+                            .bg(match &self.connection_phase {
+                                Phase::Ready if self.connection_ready() => green,
+                                Phase::Connecting
+                                | Phase::Authenticating
+                                | Phase::Syncing
+                                | Phase::Reconnecting { .. } => warning,
+                                Phase::Error(_) => danger,
+                                _ => muted_foreground,
+                            }),
+                    )
+                    .child(
+                        // Host identity takes priority over optional branch/model labels.
+                        // Keep zero-basis lanes so very long hosts still shrink on resize.
+                        div().flex_1().flex_grow(6.).min_w_0().child(
                             Button::new("environment-chip")
                                 .debug_selector(|| "environment-chip".into())
                                 .icon(gpui_kit::assets::IconName::Settings)
-                                .label(environment_host)
+                                .label(environment_label)
                                 .ghost()
                                 .xsmall()
                                 .w_full()
                                 .tooltip(format!(
-                                    "Open connection settings · {}",
+                                    "Open connection settings · {} · {}",
+                                    self.connection_state_text(),
                                     self.environment_scope
                                 ))
                                 .on_click(cx.listener(|app, _, _, cx| {
@@ -122,7 +156,22 @@ impl NativeApp {
                     .gap_2()
                     .flex_1()
                     .flex_grow(1.25)
-                    .min_w_0()
+                    .min_w_48()
+                    .when(
+                        matches!(self.connection_phase, Phase::Reconnecting { .. }),
+                        |view| {
+                            view.child(
+                                Button::new("connection-retry-now")
+                                    .debug_selector(|| "connection-retry-now".into())
+                                    .label("Retry now")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(
+                                        cx.listener(|app, _, _, cx| app.retry_connection_now(cx)),
+                                    ),
+                            )
+                        },
+                    )
                     .when(busy, |view| {
                         view.child(div().flex_shrink_0().text_color(warning).child("Working…"))
                     })
@@ -131,7 +180,7 @@ impl NativeApp {
                             .id("status-message")
                             .debug_selector(|| "status-message".into())
                             .flex_1()
-                            .min_w_0()
+                            .min_w(gpui_kit::rems(7.))
                             .truncate()
                             .text_color(if status_is_error {
                                 danger
@@ -171,7 +220,7 @@ impl NativeApp {
             .flex()
             .flex_col()
             .flex_1()
-            .min_w_0()
+            .min_w_8()
             .when(open, |view| {
                 view.child(deferred(
                     anchored()

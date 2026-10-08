@@ -7,8 +7,11 @@ use crate::shell::Thread;
 /// How long an info or success toast stays before its scheduled dismissal.
 /// Error toasts stay until the user closes them.
 pub const TOAST_LIFETIME: Duration = Duration::from_secs(5);
-/// The stack keeps the newest toasts; older ones drop off the top.
+/// Soft limit for transient toasts; errors are retained until explicitly closed.
 pub const MAX_TOASTS: usize = 4;
+pub const MAX_ERROR_TOASTS: usize = 16;
+pub const MAX_TOAST_BYTES: usize = 2048;
+pub const VISIBLE_TOASTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastKind {
@@ -21,17 +24,75 @@ pub enum ToastKind {
 pub struct Toast {
     pub id: u64,
     pub kind: ToastKind,
+    pub count: u64,
     pub message: String,
     /// The thread an "Open thread" action selects.
     pub thread: Option<String>,
 }
 
-/// Whether a status-bar outcome reports a failure.
-pub fn is_error(status: &str) -> bool {
-    let status = status.to_lowercase();
-    ["failed", "error", "rejected", "could not", "cannot"]
-        .iter()
-        .any(|word| status.contains(word))
+/// Keep a UTF-8-safe diagnostic excerpt, not arbitrarily large RPC output.
+pub fn cap_message(mut message: String) -> String {
+    if message.len() > MAX_TOAST_BYTES {
+        let mut end = MAX_TOAST_BYTES - '…'.len_utf8();
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        message.push('…');
+    }
+    message
+}
+
+/// Overflow keeps a durable count (id 0), not an unbounded diagnostic archive.
+/// Repeated excerpts coalesce; explicit dismissal is the only error expiry.
+pub fn retain_toast(toasts: &mut Vec<Toast>, mut toast: Toast) {
+    toast.message = cap_message(toast.message);
+    // Do not retain or create an action with a pathological thread identifier.
+    toast.thread = toast.thread.filter(|id| id.len() <= MAX_TOAST_BYTES);
+    if let Some(prior) = toasts.iter_mut().find(|prior| {
+        prior.id != 0
+            && prior.kind == toast.kind
+            && prior.message == toast.message
+            && prior.thread == toast.thread
+    }) {
+        prior.count = prior.count.saturating_add(1);
+        return;
+    }
+    if toast.kind == ToastKind::Error
+        && toasts
+            .iter()
+            .filter(|t| t.kind == ToastKind::Error && t.id != 0)
+            .count()
+            >= MAX_ERROR_TOASTS
+    {
+        if let Some(summary) = toasts.iter_mut().find(|t| t.id == 0) {
+            summary.count = summary.count.saturating_add(1);
+        } else {
+            toasts.push(Toast {
+                id: 0,
+                kind: ToastKind::Error,
+                count: 1,
+                message: "Additional errors (diagnostic retention limit reached)".into(),
+                thread: None,
+            });
+        }
+        return;
+    }
+    toasts.push(toast);
+    if toasts.iter().filter(|t| t.kind != ToastKind::Error).count() > MAX_TOASTS
+        && let Some(index) = toasts.iter().position(|t| t.kind != ToastKind::Error)
+    {
+        toasts.remove(index);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Outcome {
+    #[default]
+    Info,
+    Progress,
+    Success,
+    Error,
 }
 
 /// The status bar's right-hand text: the last status message, prefixed with
@@ -243,6 +304,31 @@ mod tests {
         assert_eq!(status_bar_text(false, ""), "Offline");
     }
 
+    #[test]
+    fn fixa_errors_bound_bytes_coalesce_and_keep_overflow_count() {
+        let mut toasts = vec![];
+        for id in 1..=1000 {
+            retain_toast(
+                &mut toasts,
+                Toast {
+                    id,
+                    kind: ToastKind::Error,
+                    count: 1,
+                    message: format!("{id}:{}", "💥".repeat(10000)),
+                    thread: None,
+                },
+            );
+        }
+        assert_eq!(toasts.len(), MAX_ERROR_TOASTS + 1);
+        assert!(toasts.iter().all(|t| t.message.len() <= MAX_TOAST_BYTES));
+        assert_eq!(toasts.iter().map(|t| t.count).sum::<u64>(), 1000);
+        let mut repeated = toasts[0].clone();
+        repeated.id = 1001;
+        retain_toast(&mut toasts, repeated);
+        assert_eq!(toasts[0].count, 2);
+        assert_eq!(toasts.iter().map(|t| t.count).sum::<u64>(), 1001);
+    }
+
     fn thread_event(prior: &Thread, next: &Thread) -> Option<Event> {
         let mut tracker = Tracker::default();
         tracker.baseline(std::iter::once(prior));
@@ -425,12 +511,5 @@ mod tests {
             Some("t-1".into())
         );
         assert_eq!(thread_from_tag(&receipt_tag, "https://two"), None);
-    }
-
-    #[test]
-    fn failure_wording_marks_errors() {
-        assert!(is_error("Could not read a.png: denied"));
-        assert!(is_error("Projection failed — reconnect required"));
-        assert!(!is_error("Worktree created"));
     }
 }

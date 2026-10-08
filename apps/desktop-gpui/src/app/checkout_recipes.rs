@@ -95,7 +95,7 @@ impl NativeApp {
                 .map_err(std::io::Error::other)
                 .and_then(|bytes| super::checkout_operations::persist(&path, &bytes));
             if let Err(error) = result {
-                self.set_status(format!("Could not save checkout recipe: {error}"), cx);
+                self.report_error(format!("Could not save checkout recipe: {error}"), cx);
             }
         }
         cx.notify();
@@ -150,7 +150,7 @@ impl NativeApp {
         }
         let base = self.worktree_ref.read(cx).value().trim().to_owned();
         if self.prepare_new_worktree && base.is_empty() {
-            self.set_status("Select a base branch for the new worktree", cx);
+            self.report_error("Select a base branch for the new worktree", cx);
             return true;
         }
         let Some(root) = self.selected_workspace() else {
@@ -163,7 +163,7 @@ impl NativeApp {
             value
         });
         self.set_materialized_recipe(recipe, cx);
-        self.set_status("First-send checkout recipe updated; message retained", cx);
+        self.report_success("First-send checkout recipe updated; message retained", cx);
         true
     }
 }

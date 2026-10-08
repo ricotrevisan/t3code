@@ -1,10 +1,11 @@
+use gpui_kit::base::Disableable;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _,
+    ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
     input::{Input, Textarea},
 };
-use gpui_kit::{Context, div, prelude::*, px};
+use gpui_kit::{Context, div, prelude::*, rems};
 
 use super::field;
 use crate::NativeApp;
@@ -33,6 +34,7 @@ impl NativeApp {
                             .ghost()
                             .selected(self.content_options.case_sensitive)
                             .label("Case sensitive")
+                            .small()
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.content_options.case_sensitive =
                                     !app.content_options.case_sensitive;
@@ -44,6 +46,7 @@ impl NativeApp {
                             .ghost()
                             .selected(self.content_options.whole_word)
                             .label("Whole word")
+                            .small()
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.content_options.whole_word = !app.content_options.whole_word;
                                 app.search_contents(cx);
@@ -54,6 +57,7 @@ impl NativeApp {
                             .ghost()
                             .selected(self.content_options.use_regex)
                             .label("Regex")
+                            .small()
                             .on_click(cx.listener(|app, _, _, cx| {
                                 app.content_options.use_regex = !app.content_options.use_regex;
                                 app.search_contents(cx);
@@ -61,6 +65,7 @@ impl NativeApp {
                     )
                     .child(
                         Button::new("search-contents")
+                            .disabled(!self.connection_ready())
                             .debug_selector(|| "search-contents".into())
                             .label("Search contents")
                             .secondary()
@@ -82,7 +87,7 @@ impl NativeApp {
                         div()
                             .id("content-result-list")
                             .track_scroll(&self.content_scroll)
-                            .max_h(px(160.))
+                            .max_h(rems(160. / 14.))
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
@@ -124,6 +129,7 @@ impl NativeApp {
                     .gap_2()
                     .child(
                         Button::new("list-files")
+                            .disabled(!self.connection_ready())
                             .debug_selector(|| "list-files".into())
                             .label("Browse directory")
                             .secondary()
@@ -131,6 +137,7 @@ impl NativeApp {
                     )
                     .child(
                         Button::new("search-files")
+                            .disabled(!self.connection_ready())
                             .debug_selector(|| "search-files".into())
                             .label("Search file paths")
                             .secondary()
@@ -143,7 +150,7 @@ impl NativeApp {
             .child(
                 div()
                     .id("file-entry-list")
-                    .max_h(px(160.))
+                    .max_h(rems(160. / 14.))
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
@@ -177,6 +184,7 @@ impl NativeApp {
                     .gap_2()
                     .child(
                         Button::new("read-file")
+                            .disabled(!self.connection_ready())
                             .debug_selector(|| "read-file".into())
                             .label("Read file")
                             .secondary()
@@ -186,6 +194,7 @@ impl NativeApp {
                     )
                     .child(
                         Button::new("save-file")
+                            .disabled(!self.connection_ready())
                             .debug_selector(|| "save-file".into())
                             .label("Save file")
                             .primary()
@@ -224,6 +233,12 @@ impl NativeApp {
                         cx.notify();
                     })),
             )
-            .child(field("Contents", Textarea::new(&self.file_contents), cx))
+            .child(field(
+                "Contents",
+                Textarea::new(&self.file_contents)
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(self.code_font_size(cx)),
+                cx,
+            ))
     }
 }

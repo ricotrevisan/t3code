@@ -83,8 +83,93 @@ pub fn message_context(text: &str) -> (String, Option<Value>) {
         cursor = end;
     }
     out.push_str(&text[cursor..]);
+    let mut with_skills = String::with_capacity(out.len());
+    let mut skill_names: Vec<String> = Vec::new();
+    let mut cursor = 0;
+    for (range, name) in skill_tokens(&out) {
+        let number = match skill_names.iter().position(|known| known == &name) {
+            Some(index) => index + 1,
+            None if records.len() < MAX_RECORDS => {
+                skill_names.push(name.clone());
+                records.push(json!({"version":1,"kind":"skill","contextId":format!("skill_{}",skill_names.len()),"label":format!("${name}"),"name":name}));
+                skill_names.len()
+            }
+            None => continue,
+        };
+        with_skills.push_str(&out[cursor..range.start]);
+        with_skills.push_str(&format!("[${name}](t3-context://v1/skill/skill_{number})"));
+        cursor = range.end;
+    }
+    with_skills.push_str(&out[cursor..]);
     let context = (!records.is_empty()).then(|| json!({"version": 1, "records": records}));
-    (out, context)
+    (with_skills, context)
+}
+
+/// Committed dollar tokens, excluding money/exponents, match the reference
+/// inline tokenizer. Uncommitted tokens at the caret remain ordinary text.
+pub fn skill_tokens(text: &str) -> Vec<(Range<usize>, String)> {
+    let mut tokens = Vec::new();
+    for (start, ch) in text.char_indices() {
+        if ch != '$'
+            || !text[..start]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+        {
+            continue;
+        }
+        let rest = &text[start + 1..];
+        let Some(length) = rest.find(char::is_whitespace) else {
+            continue;
+        };
+        let name = &rest[..length];
+        if name.is_empty()
+            || name.encode_utf16().count() > 198
+            || !name.starts_with(|ch: char| ch.is_ascii_alphanumeric())
+            || !name.bytes().any(|ch| ch.is_ascii_alphabetic())
+            || !name
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || b":_-".contains(&ch))
+        {
+            continue;
+        }
+        let number_end = name
+            .find(|ch: char| !ch.is_ascii_digit() && ch != '_')
+            .unwrap_or(name.len());
+        let suffix = name[number_end..].to_lowercase();
+        if number_end > 0
+            && (matches!(suffix.as_str(), "" | "k" | "m" | "b" | "t")
+                || suffix.strip_prefix('e').is_some_and(|rest| {
+                    !rest.is_empty() && rest.bytes().all(|ch| ch.is_ascii_digit())
+                }))
+        {
+            continue;
+        }
+        tokens.push((start..start + 1 + length, name.to_owned()));
+    }
+    tokens
+}
+
+/// Workspace-link spans for the native editor's atomic annotations. Labels and
+/// external links are validated by the same parser used when sending.
+pub fn file_tokens(text: &str) -> Vec<(Range<usize>, String)> {
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while let Some(offset) = text[index..].find('[') {
+        let start = index + offset;
+        if text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace)
+            && let Some((end, path)) = file_link_at(text, start)
+        {
+            tokens.push((start..end, path));
+            index = end;
+        } else {
+            index = start + 1;
+        }
+    }
+    tokens
 }
 
 /// The file link starting at `start` (a `[`), as its end and decoded path, when
@@ -95,7 +180,7 @@ fn file_link_at(text: &str, start: usize) -> Option<(usize, String)> {
     let mut units = 0;
     let label_end = loop {
         let (offset, char) = chars.next()?;
-        units += 1;
+        units += char.len_utf16();
         if units > MAX_LINK_LABEL_CHARS + 1 {
             return None;
         }
@@ -103,7 +188,11 @@ fn file_link_at(text: &str, start: usize) -> Option<(usize, String)> {
             ']' => break start + 1 + offset + 1,
             '\\' => match chars.next()? {
                 (_, '\n' | '\r') => return None,
-                (_, escaped) => label.push(escaped),
+                (_, escaped) => {
+                    units += escaped.len_utf16();
+                    if units > MAX_LINK_LABEL_CHARS + 1 { return None; }
+                    label.push(escaped);
+                }
             },
             _ => label.push(char),
         }
@@ -125,7 +214,7 @@ fn file_link_at(text: &str, start: usize) -> Option<(usize, String)> {
     let path = percent_decode(encoded).unwrap_or_else(|| encoded.to_owned());
     let path_ok = !path.is_empty()
         && path.trim() == path
-        && path.chars().count() <= MAX_PATH_CHARS
+        && path.encode_utf16().count() <= MAX_PATH_CHARS
         && !has_external_scheme(&path);
     (path_ok && label == basename(&path)).then_some((end, path))
 }
@@ -175,7 +264,11 @@ fn sanitize_label(label: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let cleaned: String = cleaned.chars().take(MAX_LABEL_CHARS).collect();
+    let mut units = 0;
+    let cleaned: String = cleaned.chars().take_while(|c| {
+        units += c.len_utf16();
+        units <= MAX_LABEL_CHARS
+    }).collect();
     if cleaned.is_empty() {
         "mention".to_owned()
     } else {
@@ -186,6 +279,21 @@ fn sanitize_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intw_mention_paths_and_labels_use_utf16_limits() {
+        let path = format!("{}/file.rs", "😀".repeat(1024));
+        let link = file_link(&path);
+        let (text, context) = message_context(&link);
+        assert_eq!(text, link);
+        assert!(context.is_none(), "oversize path must stay a plain link, not a dropped context record");
+        let label = "😀".repeat(101);
+        let link = file_link(&format!("src/{label}"));
+        let (_, context) = message_context(&link);
+        let context = context.unwrap();
+        assert_eq!(context["records"][0]["label"].as_str().unwrap().encode_utf16().count(), 200);
+        assert_eq!(context["records"][0]["path"], format!("src/{label}"));
+    }
 
     fn record(number: usize, label: &str, path: &str) -> Value {
         json!({"version":1,"kind":"mention","contextId":format!("mention_{number}"),"label":label,"path":path})
@@ -245,6 +353,17 @@ mod tests {
         for text in ["", "plain [brackets] and (parens) @src", "a [b](c d)"] {
             assert_eq!(message_context(text), (text.to_owned(), None));
         }
+    }
+
+    #[test]
+    fn committed_skills_are_structured_and_money_is_not_context() {
+        let (text, context) = message_context("Use $ui and $2spec with $ui for $20k and $1e6 ");
+        assert_eq!(
+            text,
+            "Use [$ui](t3-context://v1/skill/skill_1) and [$2spec](t3-context://v1/skill/skill_2) with [$ui](t3-context://v1/skill/skill_1) for $20k and $1e6 "
+        );
+        assert_eq!(context.unwrap()["records"].as_array().unwrap().len(), 2);
+        assert!(message_context("Use $uncommitted").1.is_none());
     }
 
     #[test]

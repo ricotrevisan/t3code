@@ -6,6 +6,31 @@ use serde_json::json;
 use t3code_desktop_gpui::{connection, workspaces};
 
 impl NativeApp {
+    pub(crate) fn next_checkout_label(&self) -> String {
+        if self.prepare_new_worktree {
+            return "Next new thread: new worktree".into();
+        }
+        match self
+            .new_thread_checkout
+            .as_ref()
+            .filter(|(project, _, _)| Some(project) == self.selected_project.as_ref())
+        {
+            Some((_, branch, Some(path))) => format!("Next new thread: {branch} · {path}"),
+            Some((_, branch, None)) => format!("Next new thread: {branch} · project root"),
+            None => "Next new thread: project root".into(),
+        }
+    }
+
+    pub(crate) fn is_next_checkout(&self, row: &workspaces::Ref) -> bool {
+        self.new_thread_checkout
+            .as_ref()
+            .is_some_and(|(project, branch, path)| {
+                Some(project) == self.selected_project.as_ref()
+                    && branch == &row.name
+                    && (path.is_none() || path == &row.worktree_path)
+            })
+    }
+
     pub(crate) fn selected_setup(&self) -> Option<workspaces::SetupProgress> {
         self.setup_progress.clone().or_else(|| {
             self.detail
@@ -30,7 +55,7 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         if self.selected_thread.is_some() && self.selected_workspace().is_none() {
-            self.set_status(
+            self.report_error(
                 "The selected checkout is unavailable; select a valid thread",
                 cx,
             );
@@ -56,7 +81,7 @@ impl NativeApp {
         // This is a plan for New Thread, not permission to stop or update the
         // selected thread (or switch a shared physical checkout underneath it).
         if self.checkout_transition_pending() || self.worktree_busy {
-            self.set_status("Wait for the checkout operation to finish", cx);
+            self.report_progress("Wait for the checkout operation to finish", cx);
             return;
         }
         let root = project.workspace_root.clone();
@@ -77,14 +102,14 @@ impl NativeApp {
             .filter(|row| row.current)
             .and_then(|_| self.selected_workspace());
         let Some(cwd) = path.or(current_path).filter(|path| !path.trim().is_empty()) else {
-            self.set_status(
+            self.report_error(
                 "Choose an existing worktree or create a separate worktree for the next thread",
                 cx,
             );
             return;
         };
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             return;
         };
         let context = self.checkout_context();
@@ -93,7 +118,7 @@ impl NativeApp {
         self.worktree_epoch += 1;
         let epoch = self.worktree_epoch;
         self.worktree_busy = true;
-        self.set_status("Verifying checkout for the next new thread", cx);
+        self.report_progress("Verifying checkout for the next new thread", cx);
         self.worktree_task = Some(cx.spawn(async move |entity, cx| {
             let result = connection::call(
                 &sender,
@@ -138,7 +163,7 @@ impl NativeApp {
                             cx,
                         );
                     }
-                    Err(error) => app.set_status(error, cx),
+                    Err(error) => app.report_error(error, cx),
                 }
                 cx.notify();
             });
@@ -157,7 +182,7 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         if self.selected_thread.is_some() && self.selected_workspace().is_none() {
-            self.set_status(
+            self.report_error(
                 "The selected checkout is unavailable; select a valid thread",
                 cx,
             );
@@ -175,7 +200,7 @@ impl NativeApp {
                 .any(|thread| &thread.id == id)
                 && !self.shell.threads.iter().any(|thread| &thread.id == id)
         }) {
-            self.set_status(
+            self.report_error(
                 "Restore the archived thread before changing its checkout",
                 cx,
             );
@@ -193,7 +218,7 @@ impl NativeApp {
             return;
         };
         if self.worktree_busy {
-            self.set_status("Wait for the worktree operation to finish", cx);
+            self.report_progress("Wait for the worktree operation to finish", cx);
             return;
         }
         let (id, project_id) = (thread.id.clone(), thread.project_id.clone());
@@ -272,7 +297,7 @@ impl NativeApp {
             return;
         }
         if self.pending_actions > 0 {
-            self.set_status("Wait for the pending server receipt", cx);
+            self.report_progress("Wait for the pending server receipt", cx);
             cx.notify();
             return;
         }
@@ -287,7 +312,7 @@ impl NativeApp {
                     .iter()
                     .any(|thread| thread.id == draft.thread.id)
         }) else {
-            self.set_status("Select an unsent draft to change its checkout", cx);
+            self.report_error("Select an unsent draft to change its checkout", cx);
             cx.notify();
             return;
         };
@@ -301,7 +326,7 @@ impl NativeApp {
         };
         let base = self.worktree_ref.read(cx).value().trim().to_owned();
         if self.prepare_new_worktree && base.is_empty() {
-            self.set_status("Select a base branch for the new worktree", cx);
+            self.report_error("Select a base branch for the new worktree", cx);
             cx.notify();
             return;
         }
@@ -326,7 +351,7 @@ impl NativeApp {
         }
         self.invalidate_checkout_context(cx);
         self.schedule_draft_save(cx);
-        self.set_status("Draft checkout updated; message retained", cx);
+        self.report_success("Draft checkout updated; message retained", cx);
         cx.notify();
     }
 
@@ -335,14 +360,14 @@ impl NativeApp {
             && self.selected_thread.is_some()
             && self.selected_workspace().is_none()
         {
-            self.set_status(
+            self.report_error(
                 "The selected checkout is unavailable; select a valid thread",
                 cx,
             );
             return;
         }
         if self.worktree_busy {
-            self.set_status("Wait for the worktree operation to finish", cx);
+            self.report_progress("Wait for the worktree operation to finish", cx);
             cx.notify();
             return;
         }
@@ -352,12 +377,12 @@ impl NativeApp {
             .iter()
             .find(|p| Some(&p.id) == self.selected_project.as_ref())
         else {
-            self.set_status("Select a project first", cx);
+            self.report_error("Select a project first", cx);
             cx.notify();
             return;
         };
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             cx.notify();
             return;
         };
@@ -390,7 +415,7 @@ impl NativeApp {
             ) {
                 Ok(value) => value,
                 Err(error) => {
-                    self.set_status(error, cx);
+                    self.report_error(error, cx);
                     cx.notify();
                     return;
                 }
@@ -403,7 +428,7 @@ impl NativeApp {
                     .chain(self.archived_shell.threads.iter())
                     .any(|t| t.worktree_path.as_deref() == Some(path.as_str()))
                 {
-                    self.set_status("Move threads out of this worktree before removing it", cx);
+                    self.report_error("Move threads out of this worktree before removing it", cx);
                     return;
                 }
                 if self.confirm_worktree_removal.as_ref() != Some(&path) {
@@ -418,7 +443,7 @@ impl NativeApp {
                 json!({"cwd":cwd,"path":path,"force":false})
             }
             _ => {
-                self.set_status("Enter a branch or worktree path", cx);
+                self.report_error("Enter a branch or worktree path", cx);
                 cx.notify();
                 return;
             }
@@ -471,7 +496,7 @@ impl NativeApp {
                                 }
                                 Err(_) => {
                                     app.refs_error = Some("Invalid branch listing".into());
-                                    app.set_status("Invalid branch listing", cx)
+                                    app.report_error("Invalid branch listing", cx)
                                 }
                             }
                         } else {
@@ -479,7 +504,7 @@ impl NativeApp {
                             match tag.as_str() {
                                 "vcs.createWorktree" => app.report_success("Worktree created", cx),
                                 "vcs.removeWorktree" => app.report_success("Worktree removed", cx),
-                                _ => app.set_status("Worktree operation completed", cx),
+                                _ => app.report_success("Worktree operation completed", cx),
                             }
                             app.worktree_outcome = Some(value);
                             app.refs.clear();
@@ -490,7 +515,7 @@ impl NativeApp {
                         if tag == "vcs.listRefs" {
                             app.refs_error = Some(error.clone());
                         }
-                        app.set_status(error, cx)
+                        app.report_error(error, cx)
                     }
                 };
                 cx.notify();
@@ -539,9 +564,20 @@ impl NativeApp {
     /// Commit, push, and open a pull request for the selected thread. Streams the
     /// server's progress events and reports the server's result toast when the
     /// action finishes.
+    #[cfg(test)]
     pub(crate) fn push_and_create_pr(&mut self, cx: &mut Context<Self>) {
+        self.run_git_action("commit_push_pr", true, cx);
+    }
+
+    pub(crate) fn run_git_action(
+        &mut self,
+        action: &str,
+        feature_branch: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let action = action.to_owned();
         let Some(id) = self.selected_thread.clone() else {
-            self.set_status("Select a thread first", cx);
+            self.report_error("Select a thread first", cx);
             cx.notify();
             return;
         };
@@ -555,7 +591,7 @@ impl NativeApp {
                 thread.id == id && Some(&thread.project_id) == self.selected_project.as_ref()
             })
         {
-            self.set_status("Select a valid thread first", cx);
+            self.report_error("Select a valid thread first", cx);
             cx.notify();
             return;
         }
@@ -563,33 +599,63 @@ impl NativeApp {
             .selected_workspace()
             .filter(|path| !path.trim().is_empty())
         else {
-            self.set_status("Select a project or open a worktree first", cx);
+            self.report_error("Select a project or open a worktree first", cx);
             cx.notify();
             return;
         };
         let Some(sender) = self.commands.clone() else {
-            self.set_status("Not connected", cx);
+            self.report_error("Not connected", cx);
             cx.notify();
             return;
         };
         let generation = self.generation;
         let context = self.checkout_context();
         self.pending_actions += 1;
-        self.set_status("Running git action\u{2026}", cx);
+        self.git_header.progress.clear();
+        self.git_header.error = None;
+        self.git_header.status = None;
+        self.git_header.open = true;
+        self.git_header.context = Some(context.clone());
+        let commit_message = self.git_header.commit_message.take();
+        let file_paths = self.git_header.file_paths.take();
+        let mut payload = json!({
+            "actionId": uuid::Uuid::new_v4().to_string(),
+            "cwd": cwd,
+            "action": action,
+            "featureBranch": feature_branch,
+            "threadId": id,
+        });
+        if let Some(message) = commit_message {
+            payload["commitMessage"] = json!(message);
+        }
+        if let Some(paths) = file_paths {
+            payload["filePaths"] = json!(paths);
+        }
+        self.report_progress("Running git action\u{2026}", cx);
         cx.notify();
         cx.spawn(async move |entity, cx| {
-            let result = connection::call_stream(
-                &sender,
-                "git.runStackedAction",
-                json!({
-                    "actionId": uuid::Uuid::new_v4().to_string(),
-                    "cwd": cwd,
-                    "action": "commit_push_pr",
-                    "featureBranch": true,
-                    "threadId": id,
-                }),
-            )
-            .await;
+            let stream = connection::call_stream_live(&sender, "git.runStackedAction", payload).await;
+            let result = match stream {
+                Err(error) => Err(error),
+                Ok(stream) => {
+                    let mut last = None;
+                    loop {
+                        match stream.recv().await {
+                            Ok(Ok(Some(event))) => {
+                                last = Some(event.clone());
+                                let _ = entity.update(cx, |app, cx| {
+                                    if app.generation == generation && app.checkout_context() == context {
+                                        app.record_git_progress(&event, cx);
+                                    }
+                                });
+                            }
+                            Ok(Ok(None)) => break Ok(last.into_iter().collect::<Vec<_>>()),
+                            Ok(Err(error)) => break Err(error),
+                            Err(_) => break Err("Connection lost before git receipt; outcome unknown. Refresh status before retrying.".into()),
+                        }
+                    }
+                }
+            };
             let _ = entity.update(cx, |app, cx| {
                 app.pending_actions = app.pending_actions.saturating_sub(1);
                 if app.generation != generation || app.checkout_context() != context {
@@ -598,7 +664,7 @@ impl NativeApp {
                 }
                 match result {
                     Ok(events) => match events.last() {
-                        Some(event) if event["kind"] == "action_failed" => app.set_status(
+                        Some(event) if event["kind"] == "action_failed" => app.report_error(
                             format!(
                                 "Git action failed: {}",
                                 event["message"].as_str().unwrap_or("unknown error")
@@ -614,9 +680,12 @@ impl NativeApp {
                             };
                             app.report_success(&status, cx);
                         }
-                        _ => app.set_status("Git action failed: ended without a result", cx),
+                        _ => app.report_error("Git action failed: ended without a result", cx),
                     },
-                    Err(error) => app.set_status(error, cx),
+                    Err(error) => {
+                        app.git_header.error = Some(error.clone());
+                        app.report_error(error, cx);
+                    }
                 }
                 cx.notify();
             });

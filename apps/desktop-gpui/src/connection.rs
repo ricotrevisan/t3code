@@ -13,8 +13,50 @@ use std::{
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
+/// Transport state is independent of the command sender's lifetime.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Phase {
+    #[default]
+    Offline,
+    Connecting,
+    Authenticating,
+    Syncing,
+    Ready,
+    Reconnecting {
+        attempt: u32,
+        retry_in: Duration,
+        reason: String,
+    },
+    Error(String),
+}
+impl Phase {
+    pub fn ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+    pub fn label(&self) -> String {
+        match self {
+            Self::Offline => "Offline".into(),
+            Self::Connecting => "Connecting…".into(),
+            Self::Authenticating => "Authenticating…".into(),
+            Self::Syncing => "Synchronizing…".into(),
+            Self::Ready => "Connected · synchronized".into(),
+            Self::Reconnecting {
+                attempt,
+                retry_in,
+                reason,
+            } => format!(
+                "Reconnecting · attempt {attempt} · retry in {}s · {reason}",
+                retry_in.as_millis().div_ceil(1000)
+            ),
+            Self::Error(reason) => format!("Connection failed · {reason}"),
+        }
+    }
+}
+
 pub enum Update {
+    Phase(Phase),
     Status(String),
+    Error(String),
     Resynchronizing,
     Shell(Box<ShellItem>),
     Thread {
@@ -60,6 +102,7 @@ impl MutationGate {
 }
 
 pub enum Command {
+    RetryNow,
     Subscribe {
         key: String,
         tag: String,
@@ -82,6 +125,12 @@ pub enum Command {
         tag: String,
         payload: Value,
         reply: async_channel::Sender<Result<Vec<Value>, String>>,
+    },
+    /// One-shot stream: never registered for reconnect replay.
+    CallStreamLive {
+        tag: String,
+        payload: Value,
+        events: async_channel::Sender<Result<Option<Value>, String>>,
     },
     Upload {
         url: String,
@@ -146,6 +195,25 @@ pub async fn call_mutation(
 }
 
 /// Run a streaming RPC and collect every emitted value until the stream exits.
+/// Live chunks followed by Ok(None) on success. Channel closure before that
+/// receipt means an unknown outcome; callers must not automatically retry.
+pub async fn call_stream_live(
+    commands: &async_channel::Sender<Command>,
+    tag: &str,
+    payload: Value,
+) -> Result<async_channel::Receiver<Result<Option<Value>, String>>, String> {
+    let (events, receiver) = async_channel::unbounded();
+    commands
+        .send(Command::CallStreamLive {
+            tag: tag.into(),
+            payload,
+            events,
+        })
+        .await
+        .map_err(|_| "Not connected".to_owned())?;
+    Ok(receiver)
+}
+
 pub async fn call_stream(
     commands: &async_channel::Sender<Command>,
     tag: &str,
@@ -166,7 +234,7 @@ pub async fn call_stream(
         .map_err(|_| "Connection lost before receipt; RPC outcome is unknown".to_owned())?
 }
 
-/// PUT bytes to a signed upload URL on the connection's runtime.
+/// POST bytes to a signed upload URL on the connection's runtime.
 pub async fn upload(
     commands: &async_channel::Sender<Command>,
     url: String,
@@ -253,8 +321,9 @@ pub fn start_session(options: ConnectionOptions) -> Session {
         {
             Ok(runtime) => runtime,
             Err(_) => {
-                let _ = sender
-                    .send_blocking(Update::Status("Could not start connection runtime".into()));
+                let _ = sender.send_blocking(Update::Phase(Phase::Error(
+                    "Could not start connection runtime".into(),
+                )));
                 return;
             }
         };
@@ -275,7 +344,11 @@ pub fn start_session(options: ConnectionOptions) -> Session {
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn connect(options: &ConnectionOptions) -> Result<Socket, Failure> {
+async fn connect(
+    options: &ConnectionOptions,
+    updates: &async_channel::Sender<Update>,
+) -> Result<Socket, Failure> {
+    let _ = updates.send(Update::Phase(Phase::Authenticating)).await;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
@@ -337,6 +410,7 @@ async fn connect(options: &ConnectionOptions) -> Result<Socket, Failure> {
         .append_pair("clientOs", "macOS")
         .append_pair("clientAppVersion", env!("CARGO_PKG_VERSION"))
         .append_pair("connectionMethod", "direct");
+    let _ = updates.send(Update::Phase(Phase::Connecting)).await;
     let (socket, _) = tokio::time::timeout(
         Duration::from_secs(15),
         tokio_tungstenite::connect_async(socket_url.as_str()),
@@ -359,9 +433,11 @@ fn supported_subscription(tag: &str) -> bool {
     matches!(
         tag,
         "subscribeProjectClones"
+            | "subscribeServerConfig"
             | "subscribeWorktreeSetup"
             | "orchestration.subscribeThread"
             | "terminal.attach"
+            | "provider.auth.subscribe"
     )
 }
 async fn reject_disconnected(
@@ -370,6 +446,7 @@ async fn reject_disconnected(
     subscriptions: &mut Subscriptions,
 ) {
     match command {
+        Command::RetryNow => {}
         Command::Subscribe { key, tag, payload } => {
             if supported_subscription(&tag) {
                 subscriptions.insert(key, (tag, payload));
@@ -393,6 +470,11 @@ async fn reject_disconnected(
                     "Disconnected; request was not sent. Retry after synchronization.".into(),
                 ))
                 .await;
+        }
+        Command::CallStreamLive { events, .. } => {
+            let _ = events.try_send(Err(
+                "Disconnected; request was not sent. Retry after synchronization.".into(),
+            ));
         }
         Command::CallStream { reply, .. } => {
             let _ = reply
@@ -421,9 +503,9 @@ async fn supervise(
     let mut backoff = Backoff::default();
     loop {
         let _ = sender.send(Update::Resynchronizing).await;
-        let _ = sender.send(Update::Status("Authorizing…".into())).await;
+        let _ = sender.send(Update::Phase(Phase::Connecting)).await;
         // Commands arriving during authorization must not wait and later execute unexpectedly.
-        let connection = connect(&options);
+        let connection = connect(&options, sender);
         tokio::pin!(connection);
         let result = loop {
             tokio::select! {
@@ -433,9 +515,7 @@ async fn supervise(
         };
         let failure = match result {
             Ok(socket) => {
-                let _ = sender
-                    .send(Update::Status("Loading projects and threads…".into()))
-                    .await;
+                let _ = sender.send(Update::Phase(Phase::Syncing)).await;
                 let mut reached_sync = false;
                 let result = run_selected_session(
                     socket,
@@ -471,23 +551,33 @@ async fn supervise(
             reject_disconnected(command, &mut selected, &mut subscriptions).await;
         }
         if !failure.retryable {
-            let _ = sender.send(Update::Status(failure.message.into())).await;
+            let _ = sender
+                .send(Update::Phase(Phase::Error(failure.message.into())))
+                .await;
             return;
         }
         let delay = backoff.delay();
         let _ = sender.send(Update::Resynchronizing).await;
-        let _ = sender
-            .send(Update::Status(format!(
-                "{} · reconnecting",
-                failure.message
-            )))
-            .await;
-        let wait = tokio::time::sleep(delay);
+        let deadline = tokio::time::Instant::now() + delay;
+        let mut ticks = tokio::time::interval(Duration::from_secs(1));
+        let wait = tokio::time::sleep_until(deadline);
         tokio::pin!(wait);
         loop {
             tokio::select! {
                 _=&mut wait => break,
-                command=requests.recv(), if !requests.is_closed() => { if let Ok(command)=command { reject_disconnected(command,&mut selected,&mut subscriptions).await; } }
+                _=ticks.tick() => {
+                    let _ = sender.send(Update::Phase(Phase::Reconnecting {
+                        attempt: backoff.attempt(),
+                        retry_in: deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        reason: failure.message.into(),
+                    })).await;
+                }
+                command=requests.recv(), if !requests.is_closed() => {
+                    if let Ok(command)=command {
+                        if matches!(command, Command::RetryNow) { break; }
+                        reject_disconnected(command,&mut selected,&mut subscriptions).await;
+                    }
+                }
             }
         }
     }
@@ -551,15 +641,45 @@ where
     run_session(socket, sender, &requests).await
 }
 
+/// One aggregate receipt for an ordered terminal write batch.
+struct WriteReceipt {
+    remaining: usize,
+    error: Option<String>,
+    reply: async_channel::Sender<Result<Value, String>>,
+}
+
+pub fn terminal_chunks(data: &str) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let (mut start, mut units) = (0, 0);
+    for (offset, c) in data.char_indices() {
+        if units + c.len_utf16() > 65_536 {
+            chunks.push(&data[start..offset]);
+            start = offset;
+            units = 0;
+        }
+        units += c.len_utf16();
+    }
+    if start < data.len() { chunks.push(&data[start..]); }
+    chunks
+}
+
+async fn upload_body(url: &str, content_type: &str, bytes: Vec<u8>) -> Result<(), String> {
+    reqwest::Client::new().post(url).header("content-type", content_type)
+        .body(bytes).send().await.and_then(|response| response.error_for_status())
+        .map(|_| ()).map_err(|error| format!("Upload failed: {error}"))
+}
+
 enum Pending {
     Shell,
     Thread(String),
     Subscription(String),
     Call(async_channel::Sender<Result<Value, String>>),
+    Write(std::sync::Arc<std::sync::Mutex<WriteReceipt>>),
     CallStream(
         async_channel::Sender<Result<Vec<Value>, String>>,
         Vec<Value>,
     ),
+    LiveStream(async_channel::Sender<Result<Option<Value>, String>>),
 }
 
 #[cfg(test)]
@@ -638,6 +758,7 @@ where
             command = commands.recv(), if commands_open => {
                 let command = match command { Ok(command) => command, Err(_) => { commands_open = false; continue; } };
                 match command {
+                    Command::RetryNow => {},
                     Command::Subscribe { key,tag,payload } => {
                         if !supported_subscription(&tag) {
                             sender.send(Update::Subscription { key, item:Err("Unsupported read subscription".into()) }).await.map_err(|_| "Client closed")?;
@@ -682,9 +803,25 @@ where
                             let _=reply.send(Err("History is not synchronized; request was not sent".into())).await;
                             continue;
                         }
-                        send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
-                        pending.insert(RequestId::String(next_id.to_string()), Pending::Call(reply));
-                        next_id += 1;
+                        if tag == "terminal.write" {
+                            let chunks = terminal_chunks(payload["data"].as_str().unwrap_or_default());
+                            if chunks.is_empty() { let _ = reply.send(Ok(Value::Null)).await; continue; }
+                            let receipt = std::sync::Arc::new(std::sync::Mutex::new(WriteReceipt {
+                                remaining: chunks.len(), error: None, reply,
+                            }));
+                            // One transport iteration: subsequent input cannot overtake this batch.
+                            for data in chunks {
+                                let mut input = payload.clone();
+                                input["data"] = data.into();
+                                send(&mut socket, protocol::request(next_id, &tag, input)).await?;
+                                pending.insert(RequestId::String(next_id.to_string()), Pending::Write(receipt.clone()));
+                                next_id += 1;
+                            }
+                        } else {
+                            send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
+                            pending.insert(RequestId::String(next_id.to_string()), Pending::Call(reply));
+                            next_id += 1;
+                        }
                     }
                     Command::CallMutation { tag, payload, gate, reply } => {
                         if reply.is_closed() { gate.cancel_before_send(); }
@@ -703,6 +840,16 @@ where
                         pending.insert(RequestId::String(next_id.to_string()), Pending::Call(reply));
                         next_id += 1;
                     }
+                    Command::CallStreamLive { tag, payload, events } => {
+                        if events.is_closed() { continue; }
+                        if !synchronized || pending.values().any(|p| matches!(p, Pending::LiveStream(_))) {
+                            let _ = events.try_send(Err("Not synchronized or another live git action is in flight; request was not sent".into()));
+                            continue;
+                        }
+                        send(&mut socket, protocol::request(next_id, &tag, payload)).await?;
+                        pending.insert(RequestId::String(next_id.to_string()), Pending::LiveStream(events));
+                        next_id += 1;
+                    }
                     Command::CallStream { tag, payload, reply } => {
                         if reply.is_closed() { continue; }
                         if !synchronized {
@@ -716,15 +863,7 @@ where
                     Command::Upload { url, content_type, bytes, reply } => {
                         // Uploads do not use the socket; run on the runtime and reply when done.
                         tokio::spawn(async move {
-                            let result = reqwest::Client::new()
-                                .put(&url)
-                                .header("content-type", content_type)
-                                .body(bytes)
-                                .send()
-                                .await
-                                .and_then(|response| response.error_for_status())
-                                .map(|_| ())
-                                .map_err(|error| format!("Upload failed: {error}"));
+                            let result = upload_body(&url, &content_type, bytes).await;
                             let _ = reply.send(result).await;
                         });
                     }
@@ -759,8 +898,9 @@ where
                                         },
                                         Pending::Thread(thread_id) => { sender.send(Update::Thread { thread_id: thread_id.clone(), item: value }).await.map_err(|_| "Client closed")?; },
                                         Pending::Subscription(key) => { sender.send(Update::Subscription { key:key.clone(),item:Ok(value) }).await.map_err(|_| "Client closed")?; },
-                                        Pending::Call(_) => return Err("Unary RPC returned a stream chunk"),
+                                        Pending::Call(_) | Pending::Write(_) => return Err("Unary RPC returned a stream chunk"),
                                         Pending::CallStream(_, collected) => collected.push(value),
+                                        Pending::LiveStream(events) => { let _ = events.try_send(Ok(Some(value))); },
                                     }
                                 }
                             } else if !cancelled.contains(&request_id) { return Err("Unexpected RPC request ID"); }
@@ -775,6 +915,22 @@ where
                                     let result = match exit { RpcExit::Success { value } => Ok(value), RpcExit::Failure { cause } => Err(rpc_failure(&cause)) };
                                     let _ = reply.send(result).await;
                                 }
+                                Pending::Write(receipt) => {
+                                    let completed = {
+                                        let mut receipt = receipt.lock().unwrap();
+                                        if let RpcExit::Failure { cause } = exit {
+                                            receipt.error.get_or_insert_with(|| rpc_failure(&cause));
+                                        }
+                                        receipt.remaining -= 1;
+                                        (receipt.remaining == 0).then(|| (receipt.reply.clone(),
+                                            receipt.error.take().map_or(Ok(Value::Null), Err)))
+                                    };
+                                    if let Some((reply, result)) = completed { let _ = reply.send(result).await; }
+                                }
+                                Pending::LiveStream(events) => {
+                                    let result = match exit { RpcExit::Success { .. } => Ok(None), RpcExit::Failure { cause } => Err(rpc_failure(&cause)) };
+                                    let _ = events.try_send(result);
+                                }
                                 Pending::CallStream(reply, collected) => {
                                     let result = match exit { RpcExit::Success { .. } => Ok(collected), RpcExit::Failure { cause } => Err(rpc_failure(&cause)) };
                                     let _ = reply.send(result).await;
@@ -785,7 +941,7 @@ where
                                 }
                                 Pending::Thread(_) => {
                                     let status = match exit { RpcExit::Success { .. } => "Thread subscription ended".to_owned(), RpcExit::Failure { cause } => rpc_failure(&cause) };
-                                    sender.send(Update::Status(status)).await.map_err(|_| "Client closed")?;
+                                    sender.send(Update::Error(status)).await.map_err(|_| "Client closed")?;
                                 }
                                 Pending::Shell => return Err("Shell subscription ended or failed; reconnect to synchronize"),
                             }
@@ -851,6 +1007,12 @@ fn safe_error_detail(detail: &str) -> String {
 #[cfg(test)]
 #[path = "reconnect_tests.rs"]
 mod reconnect_tests;
+#[cfg(test)]
+#[path = "connection_intw.rs"]
+mod intw_tests;
+#[cfg(test)]
+#[path = "connection_intw_auth.rs"]
+mod intw_auth_tests;
 
 #[cfg(test)]
 mod tests {
@@ -936,11 +1098,13 @@ mod tests {
         let mut failed = false;
         while let Ok(update) = receiver.recv().await {
             match update {
-                Update::Status(status) => {
+                Update::Status(status)
+                | Update::Error(status)
+                | Update::Phase(Phase::Error(status)) => {
                     assert!(!status.contains("private-secret"));
                     failed |= status.contains("Authorization rejected");
                 }
-                Update::Resynchronizing => {}
+                Update::Resynchronizing | Update::Phase(_) => {}
                 Update::Shell(_) | Update::Thread { .. } | Update::Subscription { .. } => {
                     panic!("unauthorized connection delivered shell state")
                 }
@@ -1188,6 +1352,91 @@ mod subscription_tests {
     ) -> Value {
         let message = socket.next().await.unwrap().unwrap();
         serde_json::from_str(message.to_text().unwrap()).unwrap()
+    }
+    #[tokio::test]
+    async fn header_pol_live_stream_delivers_before_exit_and_rejects_second_call() {
+        let (client, server) = tokio::io::duplex(16384);
+        let client =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let mut server =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let (updates, rx) = async_channel::bounded(16);
+        let (commands, requests) = async_channel::bounded(16);
+        let task = tokio::spawn(async move { run_session(client, &updates, &requests).await });
+        let shell = receive(&mut server).await;
+        server
+            .send(Message::Text(
+                json!({"_tag":"Chunk","requestId":shell["id"],"values":[{"kind":"synchronized"}]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        rx.recv().await.unwrap();
+        assert_eq!(receive(&mut server).await["_tag"], "Ack");
+        let live = call_stream_live(
+            &commands,
+            "git.runStackedAction",
+            json!({"cwd":"/checkout"}),
+        )
+        .await
+        .unwrap();
+        let sent = receive(&mut server).await;
+        let event = json!({"kind":"phase_started","phase":"commit","label":"Committing"});
+        server
+            .send(Message::Text(
+                json!({"_tag":"Chunk","requestId":sent["id"],"values":[event]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(live.recv().await.unwrap().unwrap(), Some(event));
+        assert_eq!(receive(&mut server).await["_tag"], "Ack");
+        let second = call_stream_live(&commands, "git.runStackedAction", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            second
+                .recv()
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("not sent")
+        );
+        server.send(Message::Text(json!({"_tag":"Exit","requestId":sent["id"],"exit":{"_tag":"Success","value":null}}).to_string().into())).await.unwrap();
+        assert_eq!(live.recv().await.unwrap().unwrap(), None);
+        let next = call_stream_live(&commands, "git.runStackedAction", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            receive(&mut server).await["id"],
+            "3",
+            "rejected action never allocated a wire ID"
+        );
+        server.close(None).await.unwrap();
+        assert_eq!(task.await.unwrap(), Err("Server disconnected"));
+        assert!(
+            next.recv().await.is_err(),
+            "disconnect closes the stream without a success receipt"
+        );
+    }
+    #[tokio::test]
+    async fn header_pol_disconnected_live_mutation_is_not_saved_for_replay() {
+        let (events, rx) = async_channel::unbounded();
+        let mut subscriptions = Subscriptions::new();
+        reject_disconnected(
+            Command::CallStreamLive {
+                tag: "git.runStackedAction".into(),
+                payload: json!({}),
+                events,
+            },
+            &mut None,
+            &mut subscriptions,
+        )
+        .await;
+        assert!(rx.recv().await.unwrap().unwrap_err().contains("not sent"));
+        assert!(subscriptions.is_empty());
     }
     #[tokio::test]
     async fn read_subscription_replacement_cancels_old_stream_and_rejects_mutation_tags() {

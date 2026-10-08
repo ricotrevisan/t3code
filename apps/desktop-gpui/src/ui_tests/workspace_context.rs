@@ -72,10 +72,10 @@ fn assert_action_cwds(
         app.update(cx, |app, cx| app.push_and_create_pr(cx));
     });
     cx.run_until_parked();
-    let connection::Command::CallStream {
+    let connection::Command::CallStreamLive {
         tag,
         mut payload,
-        reply,
+        events,
     } = requests.try_recv().unwrap()
     else {
         panic!("expected git RPC");
@@ -89,11 +89,10 @@ fn assert_action_cwds(
             "cwd":cwd,"action":"commit_push_pr","featureBranch":true,"threadId":id
         })
     );
-    reply
-        .send_blocking(Ok(vec![json!({
-            "kind":"action_finished","result":{"toast":{"title":"Done"}}
-        })]))
-        .unwrap();
+    events.send_blocking(Ok(Some(json!({
+        "kind":"action_finished","result":{"toast":{"title":"Done"}}
+    })))).unwrap();
+    events.send_blocking(Ok(None)).unwrap();
     cx.run_until_parked();
     assert!(requests.try_recv().is_err());
     assert_eq!(app.read_with(cx, |app, _| app.pending_actions), 0);
@@ -122,20 +121,20 @@ fn workspace_actions_honor_worktree_detail_override_and_explicit_null(cx: &mut T
     assert_action_cwds(&app, cx, &requests, "u", "/tmp/shell-worktree");
     cx.update(|_, cx| {
         app.update(cx, |app, _| {
-            app.detail.thread = Some(json!({"id":"u","worktreePath":"/tmp/detail-worktree"}));
+            app.detail.thread = Some(json!({"id":"u","worktreePath":"/tmp/detail-worktree"}).into());
         })
     });
     assert_action_cwds(&app, cx, &requests, "u", "/tmp/detail-worktree");
     cx.update(|_, cx| {
         app.update(cx, |app, _| {
-            app.detail.thread = Some(json!({"id":"u","worktreePath":null}));
+            app.detail.thread = Some(json!({"id":"u","worktreePath":null}).into());
         })
     });
     assert_action_cwds(&app, cx, &requests, "u", "/tmp/other-project");
     // Detail for another thread must not replace the selected shell checkout.
     cx.update(|_, cx| {
         app.update(cx, |app, _| {
-            app.detail.thread = Some(json!({"id":"t","worktreePath":"/tmp/stale-detail"}));
+            app.detail.thread = Some(json!({"id":"t","worktreePath":"/tmp/stale-detail"}).into());
         })
     });
     assert_action_cwds(&app, cx, &requests, "u", "/tmp/shell-worktree");
@@ -174,7 +173,7 @@ fn workspace_actions_resolve_pending_and_archived_threads(cx: &mut TestAppContex
     assert_action_cwds(&app, cx, &requests, "u", "/tmp/archived-worktree");
     cx.update(|_, cx| {
         app.update(cx, |app, _| {
-            app.detail.thread = Some(json!({"id":"u","worktreePath":null}));
+            app.detail.thread = Some(json!({"id":"u","worktreePath":null}).into());
         })
     });
     assert_action_cwds(&app, cx, &requests, "u", "/tmp/other-project");
@@ -196,7 +195,7 @@ fn workspace_actions_send_no_rpc_for_invalid_selected_context(cx: &mut TestAppCo
                 app.selected_project = project.map(str::to_owned);
                 app.selected_thread = thread.map(str::to_owned);
                 // Stale detail and next-thread checkout must not rescue invalid selection.
-                app.detail.thread = Some(json!({"id":"t","worktreePath":"/tmp/stale-detail"}));
+                app.detail.thread = Some(json!({"id":"t","worktreePath":"/tmp/stale-detail"}).into());
                 app.new_thread_checkout =
                     Some(("p".into(), "main".into(), Some("/tmp/next-checkout".into())));
                 app.workspace.update(cx, |input, cx| {
@@ -218,7 +217,7 @@ fn workspace_actions_send_no_rpc_for_invalid_selected_context(cx: &mut TestAppCo
         app.update(cx, |app, cx| {
             app.selected_project = Some("p".into());
             app.selected_thread = Some("t".into());
-            app.detail.thread = Some(json!({"id":"t","worktreePath":"  "}));
+            app.detail.thread = Some(json!({"id":"t","worktreePath":"  "}).into());
             app.workspace.update(cx, |input, cx| {
                 input.set_value("/tmp/wrong-clone-destination", window, cx)
             });

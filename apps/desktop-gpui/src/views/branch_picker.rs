@@ -64,7 +64,7 @@ impl NativeApp {
                                 .small()
                                 .primary()
                                 .label("Adopt / retry metadata")
-                                .disabled(op.running || op.destination.is_none())
+                                .disabled(op.running || op.destination.is_none() || !self.connection_ready())
                                 .on_click(cx.listener(|app, _, window, cx| {
                                     app.retry_checkout_metadata(window, cx)
                                 })),
@@ -123,6 +123,9 @@ impl NativeApp {
                     .child(div().text_xs().text_color(muted_foreground).child(
                         "Unsent drafts only. Local uses the root, never the typed base. Worktree prepares from the saved base when sent."
                     )))
+                .when(page == BranchWorkflow::Environment, |view| view
+                    .child(gpui_kit::component::switch::Switch::new("picker-origin").small().label("Start from origin").checked(self.start_from_origin).on_click(cx.listener(|app, value: &bool, _, cx| { app.start_from_origin = *value; cx.notify(); })))
+                    .child(gpui_kit::component::switch::Switch::new("picker-setup").small().label("Run setup script").checked(self.run_setup_script).on_click(cx.listener(|app, value: &bool, _, cx| { app.run_setup_script = *value; cx.notify(); }))))
                 .when(busy, |view| view.child(div().text_sm().child("Preparing checkout…")))
                 .when_some(self.branch_workflow_error.as_deref().or(restriction), |view, error| view.child(
                     div().debug_selector(|| "branch-workflow-error".into()).text_sm().text_color(cx.theme().danger).child(error.to_owned())
@@ -132,16 +135,16 @@ impl NativeApp {
                         .on_click(cx.listener(|app, _, window, cx| app.show_branch_workflow(BranchWorkflow::Browse, window, cx))))
                     .when(page == BranchWorkflow::Create, |view| view.child(
                         Button::new("branch-workflow-create").debug_selector(|| "branch-workflow-create".into()).primary().small().label(if self.branch_workflow_error.is_some() { "Retry" } else { "Create branch" })
-                            .disabled(busy || restriction.is_some() || self.checkout_transition_pending())
+                            .disabled(busy || restriction.is_some() || self.checkout_transition_pending() || !self.connection_ready())
                             .on_click(cx.listener(|app, _, window, cx| app.run_branch_workflow(false, window, cx)))
                     ))
                     .when(page != BranchWorkflow::Create, |view| view
-                        .child(Button::new("branch-workflow-local").debug_selector(|| "branch-workflow-local".into()).ghost().small().label("Local").selected(page == BranchWorkflow::Environment && !self.prepare_new_worktree).disabled(busy || restriction.is_some() || self.checkout_transition_pending())
+                        .child(Button::new("branch-workflow-local").debug_selector(|| "branch-workflow-local".into()).ghost().small().label("Local").selected(page == BranchWorkflow::Environment && !self.prepare_new_worktree).disabled(busy || restriction.is_some() || self.checkout_transition_pending() || !self.connection_ready())
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 if page == BranchWorkflow::Environment { app.select_branch_environment(false, window, cx); }
                                 else { app.run_branch_workflow(false, window, cx); }
                             })))
-                        .child(Button::new("branch-workflow-worktree").debug_selector(|| "branch-workflow-worktree".into()).primary().small().label("Worktree").selected(page == BranchWorkflow::Environment && self.prepare_new_worktree).disabled(busy || restriction.is_some() || self.checkout_transition_pending())
+                        .child(Button::new("branch-workflow-worktree").debug_selector(|| "branch-workflow-worktree".into()).primary().small().label("Worktree").selected(page == BranchWorkflow::Environment && self.prepare_new_worktree).disabled(busy || restriction.is_some() || self.checkout_transition_pending() || !self.connection_ready())
                             .on_click(cx.listener(move |app, _, window, cx| {
                                 if page == BranchWorkflow::Environment { app.select_branch_environment(true, window, cx); }
                                 else { app.run_branch_workflow(true, window, cx); }
@@ -174,6 +177,16 @@ impl NativeApp {
                 list_row(id, None, row.name.clone(), false)
                     .check_icon(IconName::Check)
                     .confirmed(is_current)
+                    .selected(
+                        index
+                            == if self.git_picker.query
+                                == self.branch_query.read(cx).value().as_str()
+                            {
+                                self.git_picker.index
+                            } else {
+                                0
+                            },
+                    )
                     .when_some(row.worktree_path.clone(), |item, path| {
                         item.tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
                             .suffix(|_, _| Icon::new(IconName::FolderGit).xsmall())
@@ -186,7 +199,16 @@ impl NativeApp {
         div()
             .id("branch-picker")
             .debug_selector(|| "branch-picker".into())
-            .key_context("NativeBranchPicker")
+            .key_context("NativeBranchBrowse")
+            .on_action(
+                cx.listener(|app, _: &crate::BranchNext, _, cx| app.step_branch_picker(true, cx)),
+            )
+            .on_action(cx.listener(|app, _: &crate::BranchPrevious, _, cx| {
+                app.step_branch_picker(false, cx)
+            }))
+            .on_action(cx.listener(|app, _: &crate::BranchPick, window, cx| {
+                app.activate_branch_picker(window, cx)
+            }))
             .occlude()
             .map(|view| if upward { view.mb_1() } else { view.mt_1() })
             .w(px(300.))
@@ -201,9 +223,22 @@ impl NativeApp {
             .shadow_lg()
             .when_some(recovery, |view, recovery| view.child(recovery))
             .child(Input::new(&self.branch_query).small())
+            .when(self.prepare_new_worktree, |view| {
+                view.child(
+                    gpui_kit::component::switch::Switch::new("picker-base-origin")
+                        .small()
+                        .label("Start from origin")
+                        .checked(self.start_from_origin)
+                        .on_click(cx.listener(|app, value: &bool, _, cx| {
+                            app.start_from_origin = *value;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 div()
                     .id("branch-picker-rows")
+                    .track_scroll(&self.git_picker.scroll)
                     .max_h(px(320.))
                     .overflow_y_scroll()
                     .flex()

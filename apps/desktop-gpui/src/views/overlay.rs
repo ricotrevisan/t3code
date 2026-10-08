@@ -1,5 +1,5 @@
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::{AnyElement, Context, anchored, deferred, div, prelude::*, px};
+use gpui_kit::{AnyElement, Context, anchored, deferred, div, prelude::*, rems};
 
 use crate::NativeApp;
 
@@ -26,7 +26,7 @@ impl NativeApp {
                 .flex()
                 .justify_center()
                 .items_start()
-                .pt(px(72.))
+                .pt(rems(72. / 14.))
                 .child(panel)
         };
         Some(

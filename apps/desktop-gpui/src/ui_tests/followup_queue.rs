@@ -503,7 +503,7 @@ fn session_and_matching_start_failure_receipts_unstall_without_new_turn(cx: &mut
                 app.apply_queue_subscription(&key, Ok(background_tool("live", 11)), cx).unwrap();
                 return;
             }
-            let mut detail = app.detail.thread.clone().unwrap();
+            let mut detail = app.detail.thread.as_ref().unwrap().as_ref().clone();
             match marker {
                 "session" => detail["session"]["updatedAt"] = json!("2026-01-01T00:00:03Z"),
                 "turn-timestamp" => detail["latestTurn"]["completedAt"] = json!("2026-01-01T00:00:03Z"),

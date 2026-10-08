@@ -1,12 +1,11 @@
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable,
+    ActiveTheme as _, Disableable, Sizable,
     button::{Button, ButtonVariants as _},
     input::Input,
     radio::{Radio, RadioGroup},
     switch::Switch,
 };
-use gpui_kit::{Context, FontWeight, div, prelude::*, px};
-use serde_json::json;
+use gpui_kit::{Context, FontWeight, div, prelude::*, rems};
 use t3code_desktop_gpui::{credentials, notification_platform, notifications};
 
 use crate::NativeApp;
@@ -28,14 +27,19 @@ impl NativeApp {
                 .text_color(muted_foreground)
                 .child(label)
         };
+        let search = self.settings_query.read(cx).value().to_lowercase();
+        let matches =
+            |terms: &str| search.is_empty() || terms.to_lowercase().contains(search.trim());
         self.settings_open.then(|| {
             div()
                 .id("settings")
                 .debug_selector(|| "settings".into())
                 .key_context("NativeSettings")
+                .track_focus(&self.settings_shortcut_focus)
                 .occlude()
-                .w(px(640.))
-                .max_h(px(620.))
+                .w(rems(640. / 14.))
+                .max_w_full()
+                .max_h(gpui_kit::relative(0.85))
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
@@ -46,6 +50,7 @@ impl NativeApp {
                 .border_1()
                 .border_color(border)
                 .shadow_lg()
+                .child(Input::new(&self.settings_query))
                 .child(
                     div()
                         .flex()
@@ -69,14 +74,18 @@ impl NativeApp {
                                 })),
                         ),
                 )
-                .child(
+                .when(matches("connection pairing credentials follow up queue general send key confirmations archive delete unpin timestamp"), |view| view.child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_2()
+                        .child(section("GENERAL"))
                         .child(self.render_follow_up_settings(cx))
+                        .child(self.render_general_preferences(cx))
                         .child(section("CONNECTION"))
+                        .child(div().text_xs().child(self.connection_state_text()))
                         .child(Input::new(&self.server))
+                        .child(self.render_saved_environments(cx))
                         .child(
                             div()
                                 .debug_selector(|| "pairing-input".into())
@@ -100,7 +109,7 @@ impl NativeApp {
                                     Button::new("settings-connect")
                                         .label("Connect / retry")
                                         .secondary()
-                                        .on_click(cx.listener(|app, _, _, cx| app.connect(cx))),
+                                        .on_click(cx.listener(|app, _, _, cx| app.retry_connection_now(cx))),
                                 )
                                 .child(
                                     Button::new("settings-disconnect")
@@ -147,8 +156,8 @@ impl NativeApp {
                                         ),
                                 ),
                         ),
-                )
-                .child(
+                ))
+                .when(matches("providers models authentication version capabilities"), |view| view.child(
                     div()
                         .flex()
                         .flex_col()
@@ -164,6 +173,7 @@ impl NativeApp {
                         })
                         .children(self.provider_catalog.iter().map(|provider| {
                             let instance_id = provider.instance_id.clone();
+                            let details = self.settings_provider_details.iter().find(|value| value["__nativeGeneration"].as_u64() == Some(self.generation) && value["instanceId"].as_str() == Some(&instance_id));
                             div()
                                 .flex()
                                 .flex_col()
@@ -185,7 +195,17 @@ impl NativeApp {
                                                 .child(provider.explanation().to_owned()),
                                         ),
                                 )
-                                .child(
+                                .when_some(details, |view, details| view.child(div().text_xs().text_color(muted_foreground).child(crate::settings_provider::details(details))))
+                                .when_some(details.filter(|details| details["__nativeConfiguration"].is_object()), |view, _| {
+                                    let id = instance_id.clone();
+                                    let enabled = provider.enabled;
+                                    view.child(Switch::new(gpui_kit::SharedString::from(format!("provider-enabled-{id}")))
+                                        .label("Enabled on this environment").checked(enabled).small()
+                                        .disabled(self.settings_provider_busy == Some(self.generation) || !self.connection_ready())
+                                        .on_click(cx.listener(move |app, enabled: &bool, _, cx| app.set_provider_enabled(&id, *enabled, cx))))
+                                })
+                                .when(provider.enabled && provider.installed && provider.status != "ready" && details.is_some_and(crate::settings_provider::can_sign_in)
+                                    && self.auth_state.as_ref().is_none_or(|state| state["instanceId"] != instance_id || !crate::settings_provider::auth_active(state)), |view| view.child(
                                     Button::new(gpui_kit::SharedString::from(format!(
                                         "provider-signin-{instance_id}"
                                     )))
@@ -194,19 +214,21 @@ impl NativeApp {
                                         move || format!("provider-signin-{id}")
                                     })
                                     .label("Sign in")
+                                    .disabled(self.settings_provider_busy == Some(self.generation) || !self.connection_ready())
                                     .ghost()
                                     .small()
                                     .on_click(cx.listener(move |app, _, _, cx| {
                                         app.start_provider_auth(&instance_id, cx)
                                     })),
-                                )
+                                ))
                         }))
                         .child(
                             Button::new("settings-refresh-providers")
                                 .label("Reload providers")
+                                .disabled((self.settings_provider_busy == Some(self.generation)) || !self.connection_ready())
                                 .secondary()
                                 .on_click(cx.listener(|app, _, _, cx| {
-                                    app.perform("server.getConfig", json!({}), None, cx)
+                                    app.refresh_settings_providers(true, cx)
                                 })),
                         )
                         .when_some(self.auth_state.clone(), |view, state| {
@@ -227,10 +249,11 @@ impl NativeApp {
                                         state["message"].as_str().unwrap_or("")
                                     )))
                                     .when_some(
-                                        state["authorizationUrl"].as_str().map(str::to_owned),
+                                        crate::settings_provider::browser_url(&state).map(str::to_owned),
                                         |view, url| {
                                             view.child(
                                                 Button::new("provider-auth-open")
+                                                    .debug_selector(|| "provider-auth-open".into())
                                                     .label("Open authorization page")
                                                     .secondary()
                                                     .on_click(cx.listener(move |_, _, _, cx| {
@@ -239,25 +262,42 @@ impl NativeApp {
                                             )
                                         },
                                     )
-                                    .child(Input::new(&self.auth_callback))
+                                    .when(state["interaction"]["type"] == "deviceCode", |view| {
+                                        let code = state["interaction"]["userCode"].as_str().unwrap_or_default().to_owned();
+                                        view.child(div().text_sm().child(format!("Verification code: {code}")))
+                                            .child(Button::new("provider-auth-copy-code").debug_selector(|| "provider-auth-copy-code".into())
+                                                .label("Copy verification code").secondary().on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(code.clone()));
+                                                })))
+                                    })
+                                    .when(state["interaction"]["type"] == "terminal", |view| view.child(div().text_sm().child(state["interaction"]["output"].as_str().unwrap_or_default().to_owned())))
+                                    .when(matches!(state["interaction"]["type"].as_str(), Some("terminal" | "credentials")) || (state["interaction"]["type"] == "browser" && state["interaction"]["requiresConsent"] == true), |view| view.child(div().text_sm().child("This authentication method is not supported here. Complete it in provider settings in the web client.")))
+                                    .when(crate::settings_provider::auth_active(&state), |view| view.child(
+                                        Button::new("provider-auth-cancel").label("Cancel sign-in").ghost().disabled(!self.connection_ready())
+                                            .on_click(cx.listener(|app, _, _, cx| app.cancel_provider_auth(cx)))))
+                                    .when(crate::settings_provider::accepts_callback(&state), |view| view.child(Input::new(&self.auth_callback))
                                     .child(
-                                        Button::new("provider-auth-complete")
+                                        Button::new("provider-auth-complete").disabled(!self.connection_ready())
                                             .debug_selector(|| "provider-auth-complete".into())
                                             .label("Complete sign-in")
                                             .primary()
                                             .on_click(cx.listener(|app, _, _, cx| {
                                                 app.complete_provider_auth(cx)
                                             })),
-                                    ),
+                                    )),
                             )
                         }),
-                )
-                .child(
+                ))
+                .when(matches("usage limits quotas credits subscription providers"), |view| view.child(
+                    t3code_desktop_gpui::surfaces::usage::render(
+                        self.server_config.config(self.generation).unwrap_or(&serde_json::Value::Null), cx)))
+                .when(matches("notifications appearance light dark system font typography context meter theme contrast prose code"), |view| view.child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
                         .child(section("NOTIFICATIONS"))
+                        .child(div().debug_selector(|| "settings-notification-status".into()).text_xs().text_color(muted_foreground).child(self.notification_state_text()))
                         .child(RadioGroup::vertical("settings-notification-mode")
                             .selected_index(notifications::NotificationMode::ALL.iter().position(|mode| *mode == self.notification_preferences.mode))
                             .disabled(!notification_platform::Platform::supported())
@@ -280,13 +320,33 @@ impl NativeApp {
                             if notification_platform::Platform::supported() {
                                 "Device-local preferences. Desktop alerts require the bundled app and macOS notification permission (System Settings → Notifications). Sounds use distinct system tones."
                             } else {
-                                "Desktop notifications, sound, and badge are unavailable on this platform; in-app notifications remain available."
+                                "Device-local preferences. In-app notifications remain available for other threads."
                             }))
                         .child(section("APPEARANCE"))
-                        .child(div().text_sm().child("One Dark (Zed)"))
-                        .child(div().text_xs().text_color(muted_foreground).child(
-                            "The native client ships Zed's One Dark palette with semantic tokens.",
-                        ))
+                        .child(self.render_typography_preferences(cx))
+                        .child(RadioGroup::horizontal("settings-appearance")
+                            .selected_index(crate::settings_appearance::Appearance::ALL.iter().position(|mode| *mode == crate::settings_appearance::current(cx).appearance))
+                            .children(crate::settings_appearance::Appearance::ALL.into_iter().enumerate().map(|(index, mode)| Radio::new(("appearance-mode", index)).label(mode.label())))
+                            .on_click(cx.listener(|app, index: &usize, window, cx| {
+                                if let Err(error) = crate::theme::update(window, cx, |preferences| preferences.appearance = crate::settings_appearance::Appearance::ALL[*index]) {
+                                    app.report_error(format!("Could not save appearance: {error}"), cx);
+                                }
+                                cx.notify();
+                            })))
+                        .child(div().text_xs().text_color(muted_foreground).child("Zed One Light / One Dark · device-local"))
+                        .child(div().flex().items_center().gap_2()
+                            .child(div().text_sm().child(format!("UI font: {} px", crate::settings_appearance::current(cx).font_size)))
+                            .children([(-1., "Smaller"), (1., "Larger")].into_iter().enumerate().map(|(index, (delta, label))| {
+                                Button::new(("settings-font", index)).label(label).ghost().small()
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        if let Err(error) = crate::theme::update(window, cx, |preferences| preferences.font_size += delta) {
+                                            app.report_error(format!("Could not save appearance: {error}"), cx);
+                                        }
+                                        cx.notify();
+                                    }))
+                            }))
+                            .child(Button::new("settings-zoom-reset").label("Reset zoom").ghost().small()
+                                .on_click(cx.listener(|app, _, window, cx| app.change_scale(None, window, cx)))))
                         .child(
                             div()
                                 .debug_selector(|| "settings-context-meter".into())
@@ -302,42 +362,26 @@ impl NativeApp {
                                         })),
                                 ),
                         ),
-                )
-                .child(
+                ))
+                .when(matches("keybindings keyboard shortcuts"), |view| view.child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
                         .child(section("KEYBINDINGS"))
-                        .children(
-                            [
-                                ("⌘K", "Command palette"),
-                                ("⌘N", "New thread"),
-                                ("↩", "Send or queue prompt (⇧↩ for a newline)"),
-                                ("⌘⇧↩", "Interrupt the turn and send the prompt"),
-                                ("⌘⇧[ / ⌘⇧]", "Previous / next thread"),
-                                ("⌘B", "Toggle sidebar"),
-                                ("⌘⌥B", "Toggle right panel"),
-                                ("⌘,", "Settings"),
-                                ("⌘P", "Workspace files"),
-                                ("Esc", "Close the open menu or panel"),
-                                ("⌘S", "Stash prompt"),
-                                ("⌘⇧F", "Search workspace contents"),
-                                ("⌘⇧S", "Toggle settlement"),
-                                ("⌘⇧P", "Toggle pin"),
-                            ]
-                            .into_iter()
-                            .map(|(keys, label)| {
-                                div()
-                                    .flex()
-                                    .justify_between()
-                                    .text_sm()
-                                    .child(label)
-                                    .child(div().text_color(muted_foreground).child(keys))
-                            }),
-                        ),
-                )
-                .child(
+                        .child(self.render_keybinding_preferences(cx))
+                        .children(cx.key_bindings().borrow().bindings().filter(|binding| {
+                            binding.predicate().is_some_and(|predicate| predicate.to_string().contains("Native"))
+                        }).map(|binding| {
+                            let keys = binding.keystrokes().iter().map(|stroke| stroke.to_string()).collect::<Vec<_>>().join(" ");
+                            let label = binding.action().name().to_owned();
+                            let context = binding.predicate().map(|predicate| predicate.to_string()).unwrap_or_default();
+                            div().flex().flex_col().gap_1()
+                                .child(div().flex().justify_between().text_sm().child(label).child(div().text_color(muted_foreground).child(keys)))
+                                .child(div().text_xs().text_color(muted_foreground).child(context))
+                        }))
+                ))
+                .when(matches("about version"), |view| view.child(
                     div()
                         .flex()
                         .flex_col()
@@ -347,7 +391,7 @@ impl NativeApp {
                         .child(div().text_xs().text_color(muted_foreground).child(
                             "Experimental native slice; feature parity is still being evaluated.",
                         )),
-                )
+                ))
         })
     }
 }

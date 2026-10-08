@@ -5,19 +5,38 @@ use gpui_kit::{Context, Window};
 use t3code_desktop_gpui::{notifications, shell};
 
 impl NativeApp {
-    /// Shows `status` in the status bar; a failure also raises an error toast.
+    /// Plain status is neutral information, never inferred from message wording.
     pub(crate) fn set_status(&mut self, status: impl Into<String>, cx: &mut Context<Self>) {
-        self.status = status.into();
-        if notifications::is_error(&self.status) {
-            let message = self.status.clone();
-            self.push_toast(notifications::ToastKind::Error, message, None, cx);
-        }
+        self.report_outcome(notifications::Outcome::Info, status, cx);
     }
 
-    /// Reports a finished destructive or long operation in the status bar and a toast.
+    pub(crate) fn report_error(&mut self, status: impl Into<String>, cx: &mut Context<Self>) {
+        self.report_outcome(notifications::Outcome::Error, status, cx);
+    }
+
+    pub(crate) fn report_progress(&mut self, status: impl Into<String>, cx: &mut Context<Self>) {
+        self.report_outcome(notifications::Outcome::Progress, status, cx);
+    }
+
     pub(crate) fn report_success(&mut self, status: &str, cx: &mut Context<Self>) {
-        self.set_status(status, cx);
-        self.push_toast(notifications::ToastKind::Success, status.into(), None, cx);
+        self.report_outcome(notifications::Outcome::Success, status, cx);
+    }
+
+    /// Typed seam for helpers that carry outcomes from multiple asynchronous branches.
+    pub(crate) fn report_outcome(
+        &mut self,
+        outcome: notifications::Outcome,
+        status: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.status = notifications::cap_message(status.into());
+        self.status_kind = outcome;
+        let kind = match outcome {
+            notifications::Outcome::Error => notifications::ToastKind::Error,
+            notifications::Outcome::Success => notifications::ToastKind::Success,
+            notifications::Outcome::Info | notifications::Outcome::Progress => return,
+        };
+        self.push_toast(kind, self.status.clone(), None, cx);
     }
 
     /// Adds a toast unless the same one is showing. Errors stay until closed; the
@@ -29,24 +48,18 @@ impl NativeApp {
         thread: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .toasts
-            .iter()
-            .any(|toast| toast.kind == kind && toast.message == message && toast.thread == thread)
-        {
-            return;
-        }
         self.toast_id += 1;
         let id = self.toast_id;
-        self.toasts.push(notifications::Toast {
-            id,
-            kind,
-            message,
-            thread,
-        });
-        if self.toasts.len() > notifications::MAX_TOASTS {
-            self.toasts.remove(0);
-        }
+        notifications::retain_toast(
+            &mut self.toasts,
+            notifications::Toast {
+                id,
+                kind,
+                count: 1,
+                message,
+                thread,
+            },
+        );
         if kind != notifications::ToastKind::Error {
             cx.spawn(async move |app, cx| {
                 cx.background_executor()
@@ -78,6 +91,29 @@ impl NativeApp {
         self.toasts.retain(|toast| toast.thread.is_none());
     }
 
+    pub(crate) fn refresh_notification_authorization(&mut self, cx: &mut Context<Self>) {
+        let receiver = self.notification_platform.probe_authorization();
+        let authorization_epoch = self.notification_platform.authorization_epoch();
+        let generation = self.generation;
+        // A later delivery must win over a probe begun before its permission prompt.
+        let deliveries = self.notification_platform.delivery_epoch();
+        cx.spawn(async move |app, cx| {
+            if let Ok(authorization) = receiver.recv().await {
+                let _ = app.update(cx, |app, cx| {
+                    if app.generation == generation
+                        && app.notification_platform.authorization_epoch() == authorization_epoch
+                        && app.notification_platform.delivery_epoch() == deliveries
+                    {
+                        app.notification_platform
+                            .record_authorization(authorization);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn set_notification_preferences(
         &mut self,
         preferences: notifications::Preferences,
@@ -97,6 +133,7 @@ impl NativeApp {
             // persist an older preference after a newer one.
             t3code_desktop_gpui::window_state::save(*state);
         }
+        self.refresh_notification_authorization(cx);
         cx.notify();
     }
 
@@ -111,11 +148,15 @@ impl NativeApp {
             _ => None,
         };
         let removed = matches!(&item, shell::ShellItem::ThreadRemoved { .. });
+        let synchronized = matches!(&item, shell::ShellItem::Synchronized);
         let baseline =
             matches!(&item, shell::ShellItem::Snapshot { .. }) || !self.shell.synchronized;
         let checkout = self.checkout_context();
         let branch = self.selected_thread_branch();
         self.shell.apply(item)?;
+        if synchronized {
+            self.connection_phase = t3code_desktop_gpui::connection::Phase::Ready;
+        }
         if self.checkout_context() != checkout || self.selected_thread_branch() != branch {
             self.invalidate_checkout_context(cx);
             self.set_status(
@@ -175,7 +216,17 @@ impl NativeApp {
                         }
                     } else {
                         cx.dismiss_system_notification(&delivery.tag);
+                        if delivery.is_current()
+                            && app.environment_scope == scope
+                            && !matches!(
+                                outcome,
+                                DeliveryOutcome::Accepted | DeliveryOutcome::Invalidated
+                            )
+                        {
+                            app.report_error(app.notification_state_text(), cx);
+                        }
                     }
+                    cx.notify();
                 });
             })
             .detach();

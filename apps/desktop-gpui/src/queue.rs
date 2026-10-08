@@ -42,6 +42,15 @@ pub struct QueuedMessage {
 impl QueuedMessage {
     /// The `thread.turn.start` this message sends.
     pub fn start_command(&self, thread_id: &str) -> Result<Value, &'static str> {
+        if self.text.trim().is_empty() && !self.attachments.is_empty() {
+            let mut command = commands::command("thread.turn.start", thread_id);
+            command["message"] = serde_json::json!({"messageId":commands::id(),"role":"user","text":self.text,"attachments":self.attachments});
+            command["modelSelection"] = self.model_selection.clone();
+            command["runtimeMode"] = serde_json::json!(self.runtime_mode);
+            command["interactionMode"] = serde_json::json!(self.interaction_mode);
+            command["createdAt"] = serde_json::json!(commands::now());
+            return Ok(command);
+        }
         commands::start_turn(
             thread_id,
             &self.text,
@@ -67,6 +76,7 @@ struct ThreadQueue {
     observed_detail: Option<String>,
     observed_tool: Option<String>,
     tools: HashMap<u64, Option<String>>,
+    source_plans: HashMap<u64, Value>,
     consumed_tools: HashSet<String>,
     /// Rejected messages require explicit retry or removal.
     held: HashSet<u64>,
@@ -139,11 +149,20 @@ impl Queues {
         }
         let message = queue.messages.remove(index);
         queue.tools.remove(&id);
+        queue.source_plans.remove(&id);
         queue.held.remove(&id);
         self.forget_if_empty(thread_id);
         Some(message)
     }
 
+    pub fn set_source_plan(&mut self, thread_id: &str, id: u64, source: Value) {
+        if let Some(queue) = self.threads.get_mut(thread_id) {
+            queue.source_plans.insert(id, source);
+        }
+    }
+    pub fn source_plan(&self, thread_id: &str, id: u64) -> Option<Value> {
+        self.threads.get(thread_id)?.source_plans.get(&id).cloned()
+    }
     pub fn held(&self, thread_id: &str) -> bool {
         self.threads.get(thread_id).is_some_and(|queue| {
             queue
@@ -271,6 +290,7 @@ impl Queues {
         if accepted {
             queue.messages.retain(|message| message.id != id);
             queue.tools.remove(&id);
+            queue.source_plans.remove(&id);
             queue.awaiting_turn =
                 queue.observed == queue.baseline && queue.observed_detail == queue.baseline_detail;
         } else {

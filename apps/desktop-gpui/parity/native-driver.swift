@@ -37,7 +37,7 @@ func output(_ value: [String: Any]) {
 let args = CommandLine.arguments
 if args.count < 3 { fail("Usage: swift native-driver.swift <owned-native-pid> <inspect|click|scroll|type|key|capture|close> [arguments]") }
 guard let pid = pid_t(args[1]), let app = NSRunningApplication(processIdentifier: pid),
-      app.executableURL?.lastPathComponent == "t3code-desktop-gpui" else { fail("Target is not the experimental native T3 client") }
+      ["t3code-desktop-gpui", "T3 Code Native"].contains(app.executableURL?.lastPathComponent ?? "") else { fail("Target is not the experimental native T3 client") }
 guard AXIsProcessTrusted() else { fail("Grant Accessibility to the execution host in macOS settings") }
 let command = args[2]
 let screenLocked = (CGSessionCopyCurrentDictionary() as? [String:Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
@@ -112,8 +112,26 @@ case "type":
     output(["scope": "native OS input dispatch", "action": "type", "utf16_length": utf16.count, "pid": pid])
 case "key":
     guard args.count == 4 else { fail("key requires a supported command shortcut, up, down, enter, tab or escape") }
-    let keys: [String: (CGKeyCode, CGEventFlags)] = ["cmd-a":(0,.maskCommand), "cmd-c":(8,.maskCommand), "cmd-v":(9,.maskCommand), "cmd-k":(40,.maskCommand), "cmd-p":(35,.maskCommand), "cmd-shift-f":(3,[.maskCommand,.maskShift]), "up":(126,[]), "down":(125,[]), "enter":(36,[]), "tab":(48,[]), "escape":(53,[])]
-    guard let (code, flags) = keys[args[3]] else { fail("Unsupported key") }
+    let keys: [String: (CGKeyCode, CGEventFlags)] = ["cmd-a":(0,.maskCommand), "cmd-c":(8,.maskCommand), "cmd-v":(9,.maskCommand), "cmd-k":(40,.maskCommand), "cmd-p":(35,.maskCommand), "cmd-shift-f":(3,[.maskCommand,.maskShift]), "up":(126,[]), "down":(125,[]), "enter":(36,[]), "tab":(48,[]), "escape":(53,[]), "backspace":(51,[]), "left":(123,[]), "right":(124,[]), "space":(49,[])]
+    // Generic chords: cmd-/ctrl-/shift-/alt- prefixes on a US-layout letter, digit or symbol.
+    let letters: [Character: CGKeyCode] = ["a":0,"s":1,"d":2,"f":3,"h":4,"g":5,"z":6,"x":7,"c":8,"v":9,"b":11,"q":12,"w":13,"e":14,"r":15,"y":16,"t":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,"=":24,"9":25,"7":26,"-":27,"8":28,"0":29,"o":31,"u":32,"i":34,"p":35,"l":37,"j":38,"k":40,"n":45,"m":46,",":43,".":47,"/":44,"[":33,"]":30]
+    func chord(_ spec: String) -> (CGKeyCode, CGEventFlags)? {
+        var parts = spec.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        if spec.hasSuffix("--") { parts.removeLast(2); parts.append("-") }
+        guard let key = parts.popLast(), key.count == 1, let code = letters[Character(key)] else { return nil }
+        var flags: CGEventFlags = []
+        for modifier in parts {
+            switch modifier {
+            case "cmd": flags.insert(.maskCommand)
+            case "ctrl": flags.insert(.maskControl)
+            case "shift": flags.insert(.maskShift)
+            case "alt": flags.insert(.maskAlternate)
+            default: return nil
+            }
+        }
+        return (code, flags)
+    }
+    guard let (code, flags) = keys[args[3]] ?? chord(args[3]) else { fail("Unsupported key") }
     for isDown in [true, false] {
         guard let event = CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:isDown) else { fail("Could not create key event") }
         event.flags = flags

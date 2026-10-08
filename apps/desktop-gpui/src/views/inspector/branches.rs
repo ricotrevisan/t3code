@@ -1,6 +1,7 @@
+use gpui_kit::base::Disableable;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::{
-    ActiveTheme as _,
+    ActiveTheme as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     input::Input,
 };
@@ -92,7 +93,7 @@ impl NativeApp {
                 })
                 .when(setup.phase == "running", |view| {
                     view.child(
-                        Button::new("setup-cancel")
+                        Button::new("setup-cancel").disabled(!self.connection_ready())
                             .danger()
                             .outline()
                             .label("Cancel worktree setup")
@@ -114,45 +115,34 @@ impl NativeApp {
             .flex()
             .flex_col()
             .gap_2()
+            .child(div().text_xs().child(self.next_checkout_label()))
             .child(
-                Button::new("prepare-worktree")
-                    .ghost()
-                    .selected(self.prepare_new_worktree)
-                    .label(if self.prepare_new_worktree {
-                        "Next new thread: new worktree"
-                    } else {
-                        "Next new thread: selected checkout"
-                    })
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.prepare_new_worktree = !app.prepare_new_worktree;
+                gpui_kit::component::switch::Switch::new("prepare-worktree")
+                    .small()
+                    .label("New worktree")
+                    .checked(self.prepare_new_worktree)
+                    .on_click(cx.listener(|app, value: &bool, _, cx| {
+                        app.prepare_new_worktree = *value;
                         cx.notify();
                     })),
             )
             .child(
-                Button::new("worktree-origin")
-                    .ghost()
-                    .selected(self.start_from_origin)
-                    .label(if self.start_from_origin {
-                        "Base: fetch from origin"
-                    } else {
-                        "Base: local branch"
-                    })
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.start_from_origin = !app.start_from_origin;
+                gpui_kit::component::switch::Switch::new("worktree-origin")
+                    .small()
+                    .label("Start from origin")
+                    .checked(self.start_from_origin)
+                    .on_click(cx.listener(|app, value: &bool, _, cx| {
+                        app.start_from_origin = *value;
                         cx.notify();
                     })),
             )
             .child(
-                Button::new("worktree-setup-script")
-                    .ghost()
-                    .selected(self.run_setup_script)
-                    .label(if self.run_setup_script {
-                        "Run setup script"
-                    } else {
-                        "Skip setup script"
-                    })
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.run_setup_script = !app.run_setup_script;
+                gpui_kit::component::switch::Switch::new("worktree-setup-script")
+                    .small()
+                    .label("Run setup script")
+                    .checked(self.run_setup_script)
+                    .on_click(cx.listener(|app, value: &bool, _, cx| {
+                        app.run_setup_script = *value;
                         cx.notify();
                     })),
             )
@@ -175,7 +165,7 @@ impl NativeApp {
                     .flex_wrap()
                     .gap_2()
                     .child(
-                        Button::new("refs-refresh")
+                        Button::new("refs-refresh").disabled(!self.connection_ready())
                             .label("Refresh branches")
                             .ghost()
                             .on_click(cx.listener(|app, _, _, cx| {
@@ -183,7 +173,7 @@ impl NativeApp {
                             })),
                     )
                     .child(
-                        Button::new("worktree-create")
+                        Button::new("worktree-create").disabled(!self.connection_ready())
                             .label("Create worktree")
                             .primary()
                             .on_click(cx.listener(|app, _, _, cx| {
@@ -191,7 +181,7 @@ impl NativeApp {
                             })),
                     )
                     .child(
-                        Button::new("ref-switch")
+                        Button::new("ref-switch").disabled(!self.connection_ready())
                             .label("Switch branch")
                             .secondary()
                             .on_click(cx.listener(|app, _, window, cx| {
@@ -202,7 +192,7 @@ impl NativeApp {
                             })),
                     )
                     .child(
-                        Button::new("worktree-remove")
+                        Button::new("worktree-remove").disabled(!self.connection_ready())
                             .label("Remove worktree")
                             .danger()
                             .outline()
@@ -219,7 +209,8 @@ impl NativeApp {
                     row.name
                 )))
                 .ghost()
-                .selected(row.current)
+                .justify_start()
+                .selected(self.is_next_checkout(row))
                 .label(format!(
                     "{}{}",
                     if row.current { "● " } else { "" },
@@ -265,7 +256,7 @@ impl NativeApp {
             })
             .when(self.refs_cursor.is_some(), |view| {
                 view.child(
-                    Button::new("refs-more")
+                    Button::new("refs-more").disabled(!self.connection_ready())
                         .ghost()
                         .label("More branches")
                         .on_click(cx.listener(|app, _, _, cx| {

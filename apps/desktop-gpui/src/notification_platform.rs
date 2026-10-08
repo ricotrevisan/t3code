@@ -18,6 +18,16 @@ pub enum DeliveryOutcome {
     Invalidated,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Authorization {
+    #[default]
+    Unknown,
+    NotDetermined,
+    Denied,
+    Authorized,
+    Unavailable,
+}
+
 pub struct Delivery {
     pub tag: String,
     generation: u64,
@@ -145,6 +155,9 @@ pub struct Platform {
     sequence: u64,
     pending: HashSet<String>,
     outcomes: VecDeque<async_channel::Receiver<DeliveryOutcome>>,
+    last_outcome: Option<DeliveryOutcome>,
+    authorization: Authorization,
+    authorization_epoch: u64,
 }
 impl Platform {
     /// Recording mode never invokes AppKit, including in headless UI tests.
@@ -156,8 +169,121 @@ impl Platform {
             sequence: 0,
             pending: HashSet::new(),
             outcomes: VecDeque::new(),
+            last_outcome: None,
+            authorization: Authorization::Unknown,
+            authorization_epoch: 0,
         }
     }
+    /// Read-only permission probe: never requests authorization or sends a banner.
+    pub fn probe_authorization(&mut self) -> async_channel::Receiver<Authorization> {
+        self.authorization_epoch += 1;
+        let (sender, receiver) = async_channel::bounded(1);
+        if self.recording {
+            let _ = sender.try_send(self.authorization);
+            return receiver;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use block2::RcBlock;
+            use objc2_foundation::NSBundle;
+            use objc2_user_notifications::{
+                UNAuthorizationStatus, UNNotificationSettings, UNUserNotificationCenter,
+            };
+            let bundle = NSBundle::mainBundle();
+            if bundle.bundleIdentifier().is_none()
+                || !bundle.bundlePath().to_string().ends_with(".app")
+            {
+                let _ = sender.try_send(Authorization::Unavailable);
+            } else {
+                let completion =
+                    RcBlock::new(move |settings: std::ptr::NonNull<UNNotificationSettings>| {
+                        let status = unsafe { settings.as_ref() }.authorizationStatus();
+                        let authorization = if status == UNAuthorizationStatus::NotDetermined {
+                            Authorization::NotDetermined
+                        } else if status == UNAuthorizationStatus::Denied {
+                            Authorization::Denied
+                        } else if status == UNAuthorizationStatus::Authorized
+                            || status == UNAuthorizationStatus::Provisional
+                            || status == UNAuthorizationStatus::Ephemeral
+                        {
+                            Authorization::Authorized
+                        } else {
+                            Authorization::Unknown
+                        };
+                        let _ = sender.try_send(authorization);
+                    });
+                UNUserNotificationCenter::currentNotificationCenter()
+                    .getNotificationSettingsWithCompletionHandler(&completion);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = sender.try_send(Authorization::Unavailable);
+        receiver
+    }
+
+    pub fn authorization_epoch(&self) -> u64 {
+        self.authorization_epoch
+    }
+
+    pub fn delivery_epoch(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn record_authorization(&mut self, authorization: Authorization) {
+        self.authorization = authorization;
+        // A current successful probe supersedes permission-related delivery failures.
+        // Keep real delivery failures as historical feedback, never as current denial.
+        if authorization == Authorization::Authorized
+            && matches!(
+                self.last_outcome,
+                Some(
+                    DeliveryOutcome::Denied
+                        | DeliveryOutcome::Unavailable
+                        | DeliveryOutcome::AuthorizationError
+                )
+            )
+        {
+            self.last_outcome = None;
+        }
+    }
+
+    pub fn state_text(&self) -> &'static str {
+        match self.authorization {
+            Authorization::Denied => {
+                return "Notification authorization denied · enable it in system settings";
+            }
+            Authorization::NotDetermined => {
+                return "Notification authorization not determined · requested when a background event needs delivery";
+            }
+            Authorization::Unavailable => {
+                return "Desktop notifications unavailable · a bundled app on a supported platform is required";
+            }
+            _ => {}
+        }
+        match self.last_outcome {
+            Some(DeliveryOutcome::Accepted) => {
+                "OS accepted the last notification request (banner delivery is not guaranteed)"
+            }
+            Some(DeliveryOutcome::Denied) => {
+                "Notification authorization denied · enable it in system settings"
+            }
+            Some(DeliveryOutcome::Unavailable) => {
+                "Desktop notifications unavailable · a bundled app is required"
+            }
+            Some(DeliveryOutcome::AuthorizationError) => {
+                "Could not determine notification authorization"
+            }
+            Some(DeliveryOutcome::DeliveryError) => "Last notification delivery failed",
+            _ if !self.recording && !Self::supported() => {
+                "Desktop notifications unsupported on this platform"
+            }
+            _ if self.authorization == Authorization::Authorized => {
+                "Notification authorization granted · no delivery receipt yet"
+            }
+            _ => "Notification authorization not yet checked",
+        }
+    }
+
     pub fn supported() -> bool {
         cfg!(target_os = "macos")
     }
@@ -201,6 +327,18 @@ impl Platform {
         }
     }
     pub fn record_receipt(&mut self, tag: &str, outcome: DeliveryOutcome) {
+        if outcome != DeliveryOutcome::Invalidated && self.pending.contains(tag) {
+            self.last_outcome = Some(outcome);
+            match outcome {
+                DeliveryOutcome::Accepted | DeliveryOutcome::DeliveryError => {
+                    self.authorization = Authorization::Authorized
+                }
+                DeliveryOutcome::Denied => self.authorization = Authorization::Denied,
+                DeliveryOutcome::Unavailable => self.authorization = Authorization::Unavailable,
+                DeliveryOutcome::AuthorizationError => self.authorization = Authorization::Unknown,
+                _ => {}
+            }
+        }
         if self.recording {
             self.calls.push(Call::Receipt(tag.into(), outcome));
         }
@@ -263,6 +401,30 @@ impl Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixa_authorization_probe_supersedes_stale_denial_and_unavailability() {
+        for outcome in [
+            DeliveryOutcome::Denied,
+            DeliveryOutcome::Unavailable,
+            DeliveryOutcome::AuthorizationError,
+        ] {
+            let mut platform = Platform::new(true);
+            let delivery = platform.begin_delivery("env", "thread");
+            platform.record_receipt(&delivery.tag, outcome);
+            platform.record_authorization(Authorization::Authorized);
+            assert_eq!(
+                platform.state_text(),
+                "Notification authorization granted · no delivery receipt yet"
+            );
+            assert_eq!(platform.delivery_epoch(), 1);
+        }
+        let mut platform = Platform::new(true);
+        let delivery = platform.begin_delivery("env", "thread");
+        platform.record_receipt(&delivery.tag, DeliveryOutcome::DeliveryError);
+        platform.record_authorization(Authorization::Authorized);
+        assert_eq!(platform.state_text(), "Last notification delivery failed");
+    }
+
     #[test]
     fn imported_modes_cannot_enable_unsupported_effects() {
         let platform = Platform::new(false);

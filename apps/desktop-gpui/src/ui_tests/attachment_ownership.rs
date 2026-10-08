@@ -411,6 +411,93 @@ fn explicit_detach_failure_retains_original_resource_and_retry_deletes_only_it(
     }
 }
 
+#[gpui_kit::test]
+fn attachment_only_send_reaches_wire_and_waits_for_accepted_receipt(cx: &mut TestAppContext) {
+    let (app, cx, requests) = attachment_harness(cx);
+    cx.update(|window, cx| app.update(cx, |app, cx| {
+        app.composer.update(cx, |input, cx| input.set_value("", window, cx));
+        app.attachments.push(json!({"id":"only-file","name":"notes.txt","mimeType":"text/plain","sizeBytes":12,"type":"file"}));
+    }));
+    cx.run_until_parked();
+    let send_bounds = cx.debug_bounds("send").unwrap();
+    cx.simulate_click(send_bounds.center(), gpui_kit::Modifiers::none());
+    cx.run_until_parked();
+    let connection::Command::Call {
+        tag,
+        payload,
+        reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("turn request");
+    };
+    assert_eq!(tag, "orchestration.dispatchCommand");
+    assert_eq!(payload["message"]["text"], "");
+    assert_eq!(payload["message"]["attachments"][0]["id"], "only-file");
+    app.read_with(cx, |app, _| assert_eq!(app.attachments.len(), 1));
+    reply.try_send(Ok(json!({"sequence":1}))).unwrap();
+    cx.run_until_parked();
+    app.read_with(cx, |app, _| assert!(app.attachments.is_empty()));
+}
+
+#[gpui_kit::test]
+fn stash_moves_attachment_and_context_ownership_and_restores_selected_record(
+    cx: &mut TestAppContext,
+) {
+    let (app, cx, requests) = attachment_harness(cx);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.draft_store = None;
+            app.composer.update(cx, |input, cx| {
+                input.set_value("Inspect [main.rs](src/main.rs)", window, cx)
+            });
+            app.attachments.push(json!({"id":"stash-file"}));
+            app.stash_prompt(false, window, cx);
+            assert!(app.attachments.is_empty());
+            assert!(app.composer.read(cx).value().is_empty());
+            app.stash_attachment_draft();
+            app.restore_attachment_draft();
+            assert!(app.attachments.is_empty());
+            let first = app.composer_stashes()[0].id.clone();
+            assert_eq!(
+                app.composer_stashes()[0].context.as_ref().unwrap()["records"][0]["path"],
+                "src/main.rs"
+            );
+            app.composer
+                .update(cx, |input, cx| input.set_value("Second", window, cx));
+            app.stash_prompt(false, window, cx);
+            assert_eq!(app.composer_stashes().len(), 2);
+            app.restore_stash(&first, window, cx);
+            assert!(app.attachments.is_empty());
+        })
+    });
+    cx.run_until_parked();
+    let connection::Command::Call { tag, reply, .. } = requests.try_recv().unwrap() else {
+        panic!("verify");
+    };
+    assert_eq!(tag, "assets.createUrl");
+    reply
+        .try_send(Ok(json!({"relativeUrl":"/api/assets/test"})))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            assert_eq!(app.attachments[0]["id"], "stash-file");
+            assert_eq!(
+                app.composer.read(cx).value().as_str(),
+                "Inspect [main.rs](src/main.rs)"
+            );
+            assert_eq!(app.composer_stashes()[0].prompt, "Second");
+            let second = app.composer_stashes()[0].id.clone();
+            app.restore_stash(&second, window, cx);
+            assert_eq!(
+                app.composer_stashes().len(),
+                1,
+                "nonempty draft must not lose the stash"
+            );
+        })
+    });
+}
+
 #[test]
 fn bounded_read_rejects_empty_directory_and_oversize_without_loading_body() {
     let (dir, path) = fixture_file();

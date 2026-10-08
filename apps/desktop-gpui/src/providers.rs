@@ -25,6 +25,18 @@ pub struct Provider {
     #[serde(default)]
     pub requires_new_thread_for_model_change: bool,
     pub models: Vec<Model>,
+    #[serde(default)]
+    pub supported_runtime_modes: Option<Vec<String>>,
+    #[serde(default)]
+    pub default_runtime_mode: Option<String>,
+    #[serde(default)]
+    pub show_interaction_mode_toggle: Option<bool>,
+    #[serde(default)]
+    pub slash_commands: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub skills: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub workspace_snapshots: Vec<serde_json::Value>,
 }
 #[derive(Deserialize)]
 pub struct Config {
@@ -52,6 +64,50 @@ impl Provider {
             .or(self.message.as_deref())
             .unwrap_or(&self.status)
     }
+    pub fn runtime_modes(&self) -> Vec<&str> {
+        [
+            "approval-required",
+            "auto-accept-edits",
+            "auto",
+            "full-access",
+        ]
+        .into_iter()
+        .filter(|mode| {
+            self.supported_runtime_modes
+                .as_ref()
+                .is_none_or(|modes| modes.iter().any(|supported| supported == mode))
+        })
+        .collect()
+    }
+    pub fn commands_for_cwd(&self, cwd: Option<&str>) -> Vec<serde_json::Value> {
+        self.workspace_snapshots
+            .iter()
+            .find(|snapshot| snapshot["cwd"].as_str() == cwd && cwd.is_some())
+            .and_then(|snapshot| snapshot["slashCommands"].as_array())
+            .cloned()
+            .unwrap_or_else(|| self.slash_commands.clone())
+    }
+    pub fn skills_for_cwd(&self, cwd: Option<&str>) -> Vec<serde_json::Value> {
+        let skills = self
+            .workspace_snapshots
+            .iter()
+            .find(|snapshot| snapshot["cwd"].as_str() == cwd && cwd.is_some())
+            .and_then(|snapshot| snapshot["skills"].as_array())
+            .unwrap_or(&self.skills);
+        let mut seen = std::collections::HashSet::new();
+        skills
+            .iter()
+            .filter(|skill| {
+                skill["enabled"] == true
+                    && skill["userInvocable"] != false
+                    && skill["name"].as_str().is_some_and(|name| {
+                        !name.trim().is_empty() && seen.insert(name.trim().to_lowercase())
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn default_model(&self) -> Option<&Model> {
         self.models
             .iter()

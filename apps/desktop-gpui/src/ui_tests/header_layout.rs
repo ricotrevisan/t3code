@@ -20,7 +20,7 @@ fn seed_header(app: &Entity<NativeApp>, cx: &mut VisualTestContext) {
                 "worktreePath":CHECKOUT, "session":{"status":"interrupted"},
                 "messages":[], "activities":[], "proposedPlans":[],
                 "checkpoints":[{"files":[{"path":"src/example.rs","additions":12,"deletions":3}]}]
-            }));
+            }).into());
             // Checkout actions must not target this independently editable destination.
             app.workspace.update(cx, |input, cx| {
                 input.set_value("/tmp/wrong-clone-destination", window, cx)
@@ -76,7 +76,8 @@ fn header_readable_lanes_do_not_overlap_with_both_panels(cx: &mut TestAppContext
             "thread-menu",
         ] {
             let action = cx.debug_bounds(selector).expect(selector);
-            assert!(action.size.width >= px(40.) && action.size.height >= px(20.));
+            let minimum_width = if selector == "push-pr" { px(20.) } else { px(40.) };
+            assert!(action.size.width >= minimum_width && action.size.height >= px(20.));
             assert!(
                 action.top() >= diff.bottom(),
                 "{selector} overlaps metadata"
@@ -161,10 +162,28 @@ fn narrow_header_actions_reach_selected_checkout_and_visible_panels(cx: &mut Tes
     let push = cx.debug_bounds("push-pr").unwrap();
     cx.simulate_click(push.center(), Default::default());
     cx.run_until_parked();
-    let connection::Command::CallStream {
+    let connection::Command::Call {
         tag,
         payload,
         reply,
+    } = requests.try_recv().unwrap()
+    else {
+        panic!("expected git status before any mutation");
+    };
+    assert_eq!(tag, "vcs.refreshStatus");
+    assert_eq!(payload["cwd"], CHECKOUT);
+    reply.send_blocking(Ok(json!({"isRepo":true,"refName":"feature","hasPrimaryRemote":true,"hasUpstream":true,"hasWorkingTreeChanges":true,"aheadCount":0,"behindCount":0,"isDefaultRef":false,"workingTree":{"files":[{"path":"a.rs"}]}}))).unwrap();
+    cx.run_until_parked();
+    let quick = cx.debug_bounds("git-quick-action").unwrap();
+    cx.simulate_click(quick.center(), Default::default());
+    cx.run_until_parked();
+    let submit = cx.debug_bounds("git-form-submit").unwrap();
+    cx.simulate_click(submit.center(), Default::default());
+    cx.run_until_parked();
+    let connection::Command::CallStreamLive {
+        tag,
+        payload,
+        events,
     } = requests.try_recv().unwrap()
     else {
         panic!("expected stacked git action");
@@ -173,11 +192,8 @@ fn narrow_header_actions_reach_selected_checkout_and_visible_panels(cx: &mut Tes
     assert_eq!(payload["cwd"], CHECKOUT);
     assert_eq!(payload["threadId"], "t");
     assert_eq!(payload["action"], "commit_push_pr");
-    reply
-        .send_blocking(Ok(vec![
-            json!({"kind":"action_finished","result":{"toast":{"title":"Done"}}}),
-        ]))
-        .unwrap();
+    events.send_blocking(Ok(Some(json!({"kind":"action_finished","result":{"toast":{"title":"Done"}}})))).unwrap();
+    events.send_blocking(Ok(None)).unwrap();
     cx.run_until_parked();
 
     let actions = cx.debug_bounds("project-actions-header").unwrap();

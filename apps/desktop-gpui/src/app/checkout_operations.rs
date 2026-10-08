@@ -154,7 +154,7 @@ impl NativeApp {
             .checkout_recovery()
             .is_none_or(|op| !op.safely_dismissible())
         {
-            self.set_status(
+            self.report_error(
                 "This checkout still needs reconciliation; it cannot be dismissed as unchanged",
                 cx,
             );
@@ -181,7 +181,7 @@ impl NativeApp {
             return;
         }
         if op.context.0 != self.selected_project || op.context.1 != self.selected_thread {
-            self.set_status(
+            self.report_error(
                 "Return to the captured thread before adopting actual Git state",
                 cx,
             );
@@ -229,7 +229,7 @@ impl NativeApp {
                 .iter()
                 .any(|p| p.id == op.project && p.workspace_root == op.root)
         {
-            self.set_status(
+            self.report_error(
                 "Return to the captured project root and thread to adopt this checkout",
                 cx,
             );
@@ -249,7 +249,7 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         if self.checkout_transition_pending() {
-            self.set_status("Resolve the previous checkout outcome first", cx);
+            self.report_error("Resolve the previous checkout outcome first", cx);
             return;
         }
         let Some(sender) = self.commands.clone() else {
@@ -286,7 +286,7 @@ impl NativeApp {
         });
         if let Err(error) = self.save_checkout_operations() {
             self.checkout_operations.pop();
-            self.set_status(error, cx);
+            self.report_error(error, cx);
             return;
         }
         self.worktree_busy = true;
@@ -310,7 +310,7 @@ impl NativeApp {
                         if !gate.may_have_been_sent() { app.checkout_operations.remove(index); }
                         else { app.checkout_operations[index].error = Some(format!("Worktree outcome may be unknown: {error}")); }
                         if app.environment_scope == scope && app.checkout_context() == context {
-                            app.set_status(error, cx);
+                            app.report_error(error, cx);
                         }
                     }
                 }
@@ -392,12 +392,12 @@ impl NativeApp {
         cx: &mut Context<Self>,
     ) {
         if self.checkout_transition_pending() {
-            self.set_status("Resolve the previous checkout outcome first", cx);
+            self.report_error("Resolve the previous checkout outcome first", cx);
             return;
         }
         if let Some(reason) = self.checkout_operation_preflight(&tag, &payload, reuse.is_some()) {
             self.branch_workflow_error = Some(reason.into());
-            self.set_status(reason, cx);
+            self.report_error(reason, cx);
             return;
         }
         let Some(sender) = self.commands.clone() else {
@@ -441,7 +441,7 @@ impl NativeApp {
         });
         if let Err(error) = self.save_checkout_operations() {
             self.checkout_operations.pop();
-            self.set_status(format!("Cannot retain checkout recovery: {error}"), cx);
+            self.report_error(format!("Cannot retain checkout recovery: {error}"), cx);
             return;
         }
         self.worktree_busy = true;

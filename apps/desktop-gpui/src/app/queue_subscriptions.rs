@@ -76,7 +76,7 @@ impl NativeApp {
             Ok(item) => item,
             Err(error) => {
                 cache.detail = thread::ThreadDetail::default();
-                self.set_status(format!("Queued thread stream failed: {error}"), cx);
+                self.report_error(format!("Queued thread stream failed: {error}"), cx);
                 return Ok(());
             }
         };

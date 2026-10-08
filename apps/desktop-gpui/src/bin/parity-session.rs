@@ -39,6 +39,8 @@ impl Projection {
                 }
             }
             Update::Subscription { .. } => {}
+            Update::Phase(connection::Phase::Error(error)) | Update::Error(error) => return Err(error.into()),
+            Update::Phase(_) => {}
             Update::Status(status) => {
                 if status != "Authorizing…" && status != "Loading projects and threads…" {
                     return Err(status.into());

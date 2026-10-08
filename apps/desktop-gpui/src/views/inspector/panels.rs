@@ -30,14 +30,96 @@ impl NativeApp {
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .when(checkpoints.is_none_or(|list| list.is_empty()), |view| {
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .child(
+                        Button::new("diff-working-tree").debug_selector(|| "diff-working-tree".into())
+                            .ghost()
+                            .small()
+                            .label("Working tree")
+                            .selected(self.diffs.git_scope.as_deref() == Some("working-tree"))
+                            .on_click(
+                                cx.listener(|app, _, _, cx| app.view_git_diff("working-tree", cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("diff-branch-range").debug_selector(|| "diff-branch-range".into())
+                            .ghost()
+                            .small()
+                            .label("Branch changes")
+                            .selected(self.diffs.git_scope.as_deref() == Some("branch-range"))
+                            .on_click(
+                                cx.listener(|app, _, _, cx| app.view_git_diff("branch-range", cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("diff-refresh").debug_selector(|| "diff-refresh".into())
+                            .ghost()
+                            .small()
+                            .label("Refresh")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                if let Some(scope) = app.diffs.git_scope.clone() {
+                                    app.view_git_diff(&scope, cx);
+                                } else if let Some(turn) = app.diffs.turn_count {
+                                    app.view_checkpoint_diff(turn, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("diff-wrap").debug_selector(|| "diff-wrap".into())
+                            .ghost()
+                            .small()
+                            .label("Wrap lines")
+                            .selected(self.diffs.wrap)
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.diffs.wrap = !app.diffs.wrap;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("diff-expand-all").debug_selector(|| "diff-expand-all".into())
+                            .ghost()
+                            .small()
+                            .label("Expand all")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.diffs.expand_all = true;
+                                app.diffs.collapsed.clear();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("diff-collapse-all").debug_selector(|| "diff-collapse-all".into())
+                            .ghost()
+                            .small()
+                            .label("Collapse all")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.diffs.expand_all = true;
+                                app.diffs.collapsed = (0..app.diffs.files.len()).collect();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(self.diffs.truncated, |view| {
                 view.child(
                     div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No checkpointed changes yet"),
+                        .text_xs()
+                        .child("Patch truncated by server; only returned changes are shown"),
                 )
             })
+            .when(
+                self.diffs.git_scope.is_none() && checkpoints.is_none_or(|list| list.is_empty()),
+                |view| {
+                    view.child(
+                        div()
+                            .text_sm()
+                            .text_color(muted_foreground)
+                            .child("No checkpointed changes yet"),
+                    )
+                },
+            )
             .child(
                 div()
                     .id("diff-checkpoints")
@@ -57,6 +139,7 @@ impl NativeApp {
                             .label(format!("Turn {turn}"))
                             .ghost()
                             .small()
+                            .justify_start()
                             .selected(selected == Some(turn))
                             .on_click(
                                 cx.listener(move |app, _, _, cx| {
@@ -67,7 +150,9 @@ impl NativeApp {
                     })),
             )
             .when(
-                selected.is_none() && checkpoints.is_some_and(|list| !list.is_empty()),
+                selected.is_none()
+                    && self.diffs.git_scope.is_none()
+                    && checkpoints.is_some_and(|list| !list.is_empty()),
                 |view| {
                     view.child(
                         div()
@@ -82,7 +167,7 @@ impl NativeApp {
                         .id("diff-loading")
                         .debug_selector(|| "diff-loading".into())
                         .text_sm()
-                        .child("Loading checkpoint patch…"),
+                        .child("Loading patch…"),
                 )
             })
             .when(current && self.diffs.error.is_some(), |view| {
@@ -98,14 +183,16 @@ impl NativeApp {
                         .ghost()
                         .small()
                         .on_click(cx.listener(move |app, _, _, cx| {
-                            if let Some(turn) = app.diffs.turn_count {
+                            if let Some(scope) = app.diffs.git_scope.clone() {
+                                app.view_git_diff(&scope, cx);
+                            } else if let Some(turn) = app.diffs.turn_count {
                                 app.view_checkpoint_diff(turn, cx);
                             }
                         })),
                 )
             })
             .when(
-                selected.is_some()
+                (selected.is_some() || self.diffs.git_scope.is_some())
                     && !self.diffs.loading
                     && self.diffs.error.is_none()
                     && self.diffs.files.is_empty(),
@@ -135,9 +222,12 @@ impl NativeApp {
                                 .label(file.path.clone())
                                 .ghost()
                                 .small()
+                                .justify_start()
                                 .selected(self.diffs.selected_file == index)
                                 .on_click(cx.listener(move |app, _, _, cx| {
                                     app.diffs.selected_file = index;
+                                    app.diffs.expand_all = false;
+                                    app.diffs.collapsed.remove(&index);
                                     cx.notify();
                                 }))
                         })),
@@ -166,49 +256,49 @@ impl NativeApp {
                         .min_w_0()
                         .overflow_scroll()
                         .font_family(mono_font)
-                        .whitespace_nowrap()
                         .text_xs()
-                        .child(
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(
                             self.diffs
                                 .files
-                                .get(self.diffs.selected_file)
-                                .map(|file| file.patch.clone())
-                                .unwrap_or_default(),
+                                .iter()
+                                .enumerate()
+                                .filter(|(index, _)| {
+                                    self.diffs.expand_all || *index == self.diffs.selected_file
+                                })
+                                .map(|(index, file)| {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .gap_1()
+                                        .child(
+                                            Button::new(gpui_kit::SharedString::from(format!(
+                                                "diff-disclosure-{index}"
+                                            )))
+                                            .ghost()
+                                            .small()
+                                            .justify_start()
+                                            .label(file.path.clone())
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                if !app.diffs.collapsed.remove(&index) {
+                                                    app.diffs.collapsed.insert(index);
+                                                }
+                                                cx.notify();
+                                            })),
+                                        )
+                                        .when(!self.diffs.collapsed.contains(&index), |view| {
+                                            view.child(self.render_patch_lines(&file.patch, cx))
+                                        })
+                                }),
                         ),
                 )
             })
     }
 
     pub(super) fn render_agents_panel(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let muted_foreground = cx.theme().muted_foreground;
-        div()
-            .id("agents-panel")
-            .debug_selector(|| "agents-panel".into())
-            .flex()
-            .flex_col()
-            .gap_2()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .when(self.provider_catalog.is_empty(), |view| {
-                view.child(
-                    div()
-                        .text_sm()
-                        .text_color(muted_foreground)
-                        .child("No provider catalog loaded"),
-                )
-            })
-            .children(self.provider_catalog.iter().map(|provider| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_sm().child(provider.label().to_owned()))
-                    .child(div().text_xs().text_color(muted_foreground).child(format!(
-                        "{} · {}",
-                        provider.instance_id,
-                        provider.explanation()
-                    )))
-            }))
+        self.render_runtime_agents(cx)
     }
 }
