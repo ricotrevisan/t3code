@@ -72,7 +72,7 @@ impl NativeApp {
                                 .on_click(cx.listener(|app, _, window, cx| app.close_settings(window, cx))),
                         ),
                 )
-                .when(matches("connection pairing credentials follow up queue general send key confirmations archive delete unpin timestamp"), |view| view.child(
+                .when(matches("connection pairing credentials follow up queue general send key confirmations archive delete unpin timestamp skills slash"), |view| view.child(
                     div()
                         .flex()
                         .flex_col()
@@ -269,7 +269,7 @@ impl NativeApp {
                                                 })))
                                     })
                                     .when(state["interaction"]["type"] == "terminal", |view| view.child(div().text_sm().child(state["interaction"]["output"].as_str().unwrap_or_default().to_owned())))
-                                    .when(matches!(state["interaction"]["type"].as_str(), Some("terminal" | "credentials")) || (state["interaction"]["type"] == "browser" && state["interaction"]["requiresConsent"] == true), |view| view.child(div().text_sm().child("This authentication method is not supported here. Complete it in provider settings in the web client.")))
+                                    .child(self.render_provider_interaction(&state, cx))
                                     .when(crate::settings_provider::auth_active(&state), |view| view.child(
                                         Button::new("provider-auth-cancel").label("Cancel sign-in").ghost().disabled(!self.connection_ready())
                                             .on_click(cx.listener(|app, _, _, cx| app.cancel_provider_auth(cx)))))
@@ -289,6 +289,8 @@ impl NativeApp {
                 .when(matches("usage limits quotas credits subscription providers"), |view| view.child(
                     t3code_desktop_gpui::surfaces::usage::render(
                         self.server_config.config(self.generation).unwrap_or(&serde_json::Value::Null), cx)))
+                .when(matches("theme library themes import export"), |view| view.child(self.render_theme_library(cx)))
+                .when(matches("font families typography prose code"), |view| view.child(self.render_font_families(cx)))
                 .when(matches("notifications appearance light dark system font typography context meter theme contrast prose code"), |view| view.child(
                     div()
                         .flex()

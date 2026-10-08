@@ -335,6 +335,7 @@ fn sidebar_parity_cmd_z_keeps_text_undo_owned_by_input(cx: &mut TestAppContext) 
                 environment: app.environment_scope.clone(),
                 generation: app.generation,
                 title: "Thread".into(),
+                batch: false,
                 inverses: vec![commands::command("thread.unsettle", "t")],
             });
         })

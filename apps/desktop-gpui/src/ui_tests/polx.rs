@@ -323,6 +323,7 @@ fn polx_status_chips_pack_left_and_message_owns_spare_width(cx: &mut TestAppCont
         let bar = cx.debug_bounds("status-bar").unwrap();
         let dot = cx.debug_bounds("connection-status-dot").unwrap();
         let chip = cx.debug_bounds("environment-chip").unwrap();
+        let usage = cx.debug_bounds("usage-limits-entry").unwrap();
         let message = cx.debug_bounds("status-message").unwrap();
         let inset = cx.update(|window, _| window.rem_size() * 0.75);
         assert!(
@@ -330,8 +331,9 @@ fn polx_status_chips_pack_left_and_message_owns_spare_width(cx: &mut TestAppCont
             "{dot:?} {bar:?}"
         );
         assert!(chip.left() - dot.right() <= px(8.));
-        assert!(message.left() - chip.right() <= px(16.));
+        assert!(usage.left() - chip.right() <= px(16.));
+        assert!(message.left() - usage.right() <= px(16.));
         assert!((bar.right() - message.right() - inset).abs() <= px(1.));
-        assert!(message.size.width >= bar.size.width - chip.size.width - px(60.));
+        assert!(message.size.width >= bar.size.width - chip.size.width - usage.size.width - px(72.));
     }
 }

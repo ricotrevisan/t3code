@@ -1,6 +1,20 @@
 //! Headless GPUI interactions: real input dispatch and asynchronous receipts, not markup assertions.
+mod r13_int_glue;
+mod r13_int_requests;
+use r13_int_requests::Requests;
 mod attachment_ownership;
+mod r13_d_timeline;
+mod r13_d2_timeline;
+mod r13_g_usage;
+mod r13_g_environments;
+mod r13_a_shell;
 mod composer_parity;
+mod r13_c_readiness;
+mod r13_c_models;
+mod r13_c_commands;
+mod r13_c_context;
+mod r13_c_transfers;
+mod r13_c_recovery;
 mod composer_fixd;
 mod branch_workflows;
 mod checkout_context;
@@ -18,18 +32,23 @@ mod intw_wire;
 mod header_parity_checkout;
 mod header_parity_controls;
 mod header_pol;
+mod r13_e_header;
 mod notification_preferences;
 mod connection_health;
 mod outcomes;
 mod project_actions_run;
 mod settings_parity;
+mod r13_f_settings;
+mod r13_f_auth;
 mod settings_polc;
 mod workspace_context;
 mod sidebar_parity;
+mod r13_b_sidebar;
 mod sidebar_fixb;
 mod sidebar_pols;
 mod surfaces_agents;
 mod surfaces_terminal;
+mod r13_h_terminal;
 #[path = "ui_tests/surfaces_terminal_polT.rs"]
 mod surfaces_terminal_pol_t;
 mod fixa_feedback;
@@ -47,7 +66,7 @@ fn harness(
 ) -> (
     Entity<NativeApp>,
     &mut VisualTestContext,
-    async_channel::Receiver<connection::Command>,
+    Requests,
 ) {
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -83,6 +102,10 @@ fn harness(
         matches!(requests.try_recv().unwrap(),connection::Command::SelectThread(Some(id)) if id == "t")
     );
     cx.run_until_parked();
+    // Retain automatic VCS commands separately; feature assertions still see every
+    // non-VCS command in order. The live-status test inspects these real subscriptions.
+    let requests = Requests::from(requests);
+    assert!(requests.is_empty());
     (app, cx, requests)
 }
 
@@ -446,8 +469,8 @@ fn each_turn_owns_its_activity_and_checkpoint_controls(cx: &mut TestAppContext) 
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
     app.read_with(cx, |app, _| {
-        assert_eq!(app.activity_expanded.get("turn-1"), Some(&true));
-        assert_eq!(app.activity_expanded.get("turn-2"), None);
+        assert_eq!(app.activity_expanded.get("activity:turn-1"), Some(&true));
+        assert_eq!(app.activity_expanded.get("activity:turn-2"), None);
     });
 
     let bounds = cx
@@ -466,7 +489,7 @@ fn each_turn_owns_its_activity_and_checkpoint_controls(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) {
+fn tool_calls_render_in_independent_work_groups_and_expand_one_at_a_time(cx: &mut TestAppContext) {
     let (app, cx, _requests) = harness(cx);
     let activity = |id: &str, kind: &str, tone: &str, summary: &str, at: &str, payload: Value| json!({"id": id, "kind": kind, "tone": tone, "summary": summary, "payload": payload, "turnId": "turn-1", "createdAt": at});
     let command = json!({"itemType": "command_execution", "toolCallId": "c1", "title": "Ran command", "data": {"item": {"command": "cargo test"}}});
@@ -497,11 +520,17 @@ fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) 
         })
     });
     cx.run_until_parked();
-    let bounds = cx
-        .debug_bounds("activity-toggle")
-        .expect("the turn has its disclosure");
-    cx.simulate_click(bounds.center(), Default::default());
-    cx.run_until_parked();
+    let disclosures = app.read_with(cx, |app, _| app.conversation_rows.iter().filter_map(|row| {
+        if let t3code_desktop_gpui::conversation::TimelineEntry::Activity { latest, .. } = &row.entry {
+            Some(if *latest { "activity-toggle".to_owned() } else { format!("activity-toggle-{}", row.key.strip_prefix("activity:").unwrap()) })
+        } else { None }
+    }).collect::<Vec<_>>());
+    assert_eq!(disclosures.len(), 2, "command and edit are independent groups; runtime info remains inline");
+    for selector in disclosures {
+        let bounds = cx.debug_bounds(Box::leak(selector.clone().into_boxed_str())).unwrap_or_else(|| panic!("work group {selector} must be painted"));
+        cx.simulate_click(bounds.center(), Default::default());
+        cx.run_until_parked();
+    }
 
     for id in [
         "tool-row-e1",
@@ -553,7 +582,7 @@ fn tool_calls_render_as_rows_that_expand_one_at_a_time(cx: &mut TestAppContext) 
     );
     app.read_with(cx, |app, _| {
         assert_eq!(app.activity_expanded.get("tool:e1"), Some(&true));
-        assert_eq!(app.activity_expanded.get("turn-1"), Some(&true));
+        assert_eq!(app.activity_expanded.get("activity:turn-1"), Some(&true));
     });
 }
 
@@ -680,7 +709,7 @@ fn open_in_editor_prefers_zed_and_targets_the_worktree(cx: &mut TestAppContext) 
 fn type_catalog_prompt(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     text: &str,
 ) {
     cx.update(|_, cx| app.update(cx, |app, cx| {
@@ -3142,7 +3171,7 @@ fn hide_right_panel_on_changes(app: &Entity<NativeApp>, cx: &mut VisualTestConte
 
 fn open_branch_picker(
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     trigger: &'static str,
 ) -> async_channel::Sender<Result<Value, String>> {
     open_branch_picker_at(cx, requests, trigger, "/tmp/fixture")
@@ -3150,7 +3179,7 @@ fn open_branch_picker(
 
 fn open_branch_picker_at(
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     trigger: &'static str,
     cwd: &str,
 ) -> async_channel::Sender<Result<Value, String>> {
@@ -3452,7 +3481,7 @@ fn set_session(app: &Entity<NativeApp>, cx: &mut VisualTestContext, thread: &str
 
 /// The dispatched calls waiting on the channel; subscriptions are skipped.
 fn calls(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) -> Vec<(Value, async_channel::Sender<Result<Value, String>>)> {
     std::iter::from_fn(|| requests.try_recv().ok())
         .filter_map(|command| match command {
@@ -3787,7 +3816,7 @@ fn hiding_the_sidebar_keeps_an_open_row_menu_usable(cx: &mut TestAppContext) {
 fn revert_checkpoint(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     reply: Result<Value, String>,
 ) {
     cx.update(|_, cx| {
@@ -3955,7 +3984,7 @@ fn composer_text(app: &Entity<NativeApp>, cx: &mut VisualTestContext) -> String 
 fn type_mention_and_answer(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) {
     cx.update(|_, cx| {
         app.update(cx, |app, _| {

@@ -17,6 +17,7 @@ pub struct State {
     pub project_scope: Option<String>,
     pub custom_snooze_target: Option<String>,
     pub custom_snooze_environment: Option<String>,
+    pub custom_snooze_generation: Option<u64>,
     pub rename_target: Option<(String, String)>,
     pub rename_busy: Option<u64>,
     pub search_query: String,
@@ -30,6 +31,8 @@ pub struct State {
     pub selection_environment: String,
     pub selection: Vec<String>,
     pub selection_anchor: Option<String>,
+    pub bulk_delete_review: Option<(u64, String, Vec<String>)>,
+    pub bulk_snooze_review: Option<Vec<String>>,
     pub bulk_busy: bool,
     pub bulk_generation: u64,
     /// Search contracts expose timestamps, not message IDs. Timeline resolves
@@ -38,6 +41,7 @@ pub struct State {
     groups: std::cell::RefCell<GroupCache>,
     row_cache: std::cell::RefCell<RowCache>,
     pub read_at: std::collections::HashMap<(String, String), DateTime<Utc>>,
+    pub woke_acknowledged: std::collections::HashMap<(String, String), DateTime<Utc>>,
     pub marked_unread: std::collections::HashSet<(String, String)>,
 }
 
@@ -95,6 +99,7 @@ struct LocalState {
     priority: bool,
     read_at: Vec<(String, String, DateTime<Utc>)>,
     marked_unread: Vec<(String, String)>,
+    woke_acknowledged: Vec<(String, String, DateTime<Utc>)>,
 }
 
 pub struct RowData {
@@ -223,12 +228,11 @@ impl State {
     }
 
     pub fn woke(&self, environment: &str, thread: &Thread, now: DateTime<Utc>) -> bool {
-        thread.settled_override.as_deref() != Some("settled")
-            && woke_at(thread, now).is_some_and(|at| {
-                self.read_at
-                    .get(&(environment.to_owned(), thread.id.clone()))
-                    .is_none_or(|read| *read < at)
-            })
+        let key = (environment.to_owned(), thread.id.clone());
+        woke_at(thread, now).is_some_and(|at| {
+            self.read_at.get(&key).is_none_or(|read| *read < at)
+                && self.woke_acknowledged.get(&key).is_none_or(|ack| *ack < at)
+        })
     }
     pub fn reconcile_selection(&mut self, environment: &str, order: &[String]) {
         if self.selection_environment != environment {
@@ -368,6 +372,11 @@ impl State {
             .map(|(environment, thread, at)| ((environment, thread), at))
             .collect();
         self.marked_unread = local.marked_unread.into_iter().collect();
+        self.woke_acknowledged = local
+            .woke_acknowledged
+            .into_iter()
+            .map(|(environment, thread, at)| ((environment, thread), at))
+            .collect();
         self.local_path = Some(path);
         Ok(())
     }
@@ -385,6 +394,11 @@ impl State {
                 .map(|((environment, thread), at)| (environment.clone(), thread.clone(), *at))
                 .collect(),
             marked_unread: self.marked_unread.iter().cloned().collect(),
+            woke_acknowledged: self
+                .woke_acknowledged
+                .iter()
+                .map(|((environment, thread), at)| (environment.clone(), thread.clone(), *at))
+                .collect(),
         };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -501,9 +515,8 @@ pub fn queued_turn_start(thread: &Thread, now: DateTime<Utc>) -> bool {
     })
 }
 
-/// Same base-26 fractional key convention as client-runtime/threadSort.ts.
-/// A keyless neighbor needs section materialization; callers omit the move
-/// rather than pretending one write can cross the keyless Active prefix.
+/// Single-write variant retained for callers that only need a fractional key.
+/// Interactive ordering uses `move_assignments`, including section repair.
 pub fn move_key(rows: &[&Thread], target: &str, forward: bool, pinned: bool) -> Option<String> {
     let from = rows.iter().position(|thread| thread.id == target)?;
     let to = if forward {
@@ -535,6 +548,93 @@ pub fn move_key(rows: &[&Thread], target: &str, forward: bool, pinned: bool) -> 
         None
     };
     key_between(before.as_deref(), after.as_deref())
+}
+
+/// Reference threadSort planner: repair only the visible section and reserve
+/// keys belonging to hidden rows. Accepted writes remain authoritative even
+/// if a subsequent write fails.
+pub fn order_assignments(
+    rows: &[&Thread],
+    all: &[Thread],
+    target: &str,
+    pinned: bool,
+) -> Vec<(String, String)> {
+    fn order_key(thread: &Thread, pinned: bool) -> Option<&str> {
+        if pinned {
+            thread.pin_order_key.as_deref()
+        } else {
+            thread.active_order_key.as_deref()
+        }
+    }
+    let key = |thread| order_key(thread, pinned);
+    let Some(index) = rows.iter().position(|row| row.id == target) else {
+        return vec![];
+    };
+    let reserved: std::collections::HashSet<_> = all
+        .iter()
+        .filter(|thread| !rows.iter().any(|row| row.id == thread.id))
+        .filter_map(key)
+        .collect();
+    let before = index.checked_sub(1).map(|index| rows[index]);
+    let after = rows.get(index + 1).copied();
+    if before.is_none_or(|row| key(row).is_some()) && after.is_none_or(|row| key(row).is_some()) {
+        let mut next = key_between(before.and_then(key), after.and_then(key));
+        while let Some(value) = &next {
+            if !reserved.contains(value.as_str()) {
+                return vec![(target.into(), value.clone())];
+            }
+            next = key_between(Some(value), after.and_then(key));
+        }
+    }
+    let count = rows.len() + reserved.len();
+    let mut width = 2;
+    let mut space = 26_u64.pow(width);
+    while space <= (count as u64 + 1) * 2 {
+        width += 1;
+        space = 26_u64.pow(width);
+    }
+    let keys = (1..=count)
+        .map(|index| {
+            let mut value = (space as f64 / (count + 1) as f64 * index as f64).round() as u64;
+            if value.is_multiple_of(26) {
+                value += 1;
+            }
+            let mut bytes = vec![b'a'; width as usize];
+            for digit in bytes.iter_mut().rev() {
+                *digit += (value % 26) as u8;
+                value /= 26;
+            }
+            String::from_utf8(bytes).expect("base-26 ASCII")
+        })
+        .filter(|value| !reserved.contains(value.as_str()));
+    rows.iter()
+        .zip(keys)
+        .filter_map(|(row, value)| {
+            (key(row) != Some(value.as_str())).then(|| (row.id.clone(), value))
+        })
+        .collect()
+}
+
+pub fn move_assignments(
+    rows: &[&Thread],
+    all: &[Thread],
+    target: &str,
+    forward: bool,
+    pinned: bool,
+) -> Option<Vec<(String, String)>> {
+    let from = rows.iter().position(|row| row.id == target)?;
+    let to = if forward {
+        from.checked_add(1)?
+    } else {
+        from.checked_sub(1)?
+    };
+    if to >= rows.len() {
+        return None;
+    }
+    let mut order = rows.to_vec();
+    let moved = order.remove(from);
+    order.insert(to, moved);
+    Some(order_assignments(&order, all, target, pinned))
 }
 
 pub fn key_between(before: Option<&str>, after: Option<&str>) -> Option<String> {
@@ -679,8 +779,14 @@ fn timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
 pub fn raised_hand(thread: &Thread) -> bool {
     thread.has_pending_approvals
         || thread.has_pending_user_input
-        // Session status-edge timestamps are not projected by this client yet.
-        // Never treat a pre-snooze error as fresh information.
+        || (thread
+            .session
+            .as_ref()
+            .is_some_and(|session| session.status == "error")
+            && (thread.snoozed_at.is_none()
+                || timestamp(thread.session_updated_at.as_deref())
+                    .zip(timestamp(thread.snoozed_at.as_deref()))
+                    .is_some_and(|(error, snooze)| error > snooze)))
         || thread.latest_turn.as_ref().is_some_and(|turn| {
             turn.state == "completed"
                 && timestamp(thread.snoozed_at.as_deref()).is_some()
@@ -698,7 +804,8 @@ pub fn woke_at(thread: &Thread, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         {
             return timestamp(turn.completed_at.as_deref());
         }
-        return timestamp(thread.snoozed_at.as_deref());
+        return timestamp(thread.session_updated_at.as_deref())
+            .or_else(|| timestamp(thread.snoozed_at.as_deref()));
     }
     (until <= now).then_some(until)
 }
@@ -974,6 +1081,52 @@ pub fn thread_meta(thread: &Thread) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn r13_b_materialization_reserves_hidden_keys_and_repairs_corruption() {
+        let mut a = thread();
+        a.id = "a".into();
+        a.active_order_key = None;
+        let mut b = thread();
+        b.id = "b".into();
+        b.active_order_key = Some("bad-key".into());
+        let mut hidden = thread();
+        hidden.id = "hidden".into();
+        hidden.active_order_key = Some("ir".into());
+        let all = vec![a.clone(), b.clone(), hidden];
+        let assignments = order_assignments(&[&b, &a], &all, "b", false);
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(assignments[0].0, "b");
+        assert!(assignments[0].1 < assignments[1].1);
+        assert!(
+            assignments
+                .iter()
+                .all(|(_, key)| key != "ir" && key_between(Some(key), None).is_some())
+        );
+        assert_eq!(all[2].active_order_key.as_deref(), Some("ir"));
+    }
+
+    #[test]
+    fn r13_b_dismissed_wake_survives_restart_without_acknowledging_history() {
+        let now = Utc::now();
+        let path = std::env::temp_dir().join(format!("r13-b-wake-{}.json", uuid::Uuid::new_v4()));
+        let mut row = thread();
+        row.snoozed_at = Some((now - chrono::Duration::hours(2)).to_rfc3339());
+        row.snoozed_until = Some((now - chrono::Duration::hours(1)).to_rfc3339());
+        let mut state = State::default();
+        state.load_local(path.clone()).unwrap();
+        state.marked_unread.insert(("env".into(), row.id.clone()));
+        state
+            .woke_acknowledged
+            .insert(("env".into(), row.id.clone()), woke_at(&row, now).unwrap());
+        state.save_local().unwrap();
+        let mut restored = State::default();
+        restored.load_local(path.clone()).unwrap();
+        assert!(!restored.woke("env", &row, now));
+        assert!(restored.unread("env", &row));
+        assert!(restored.woke("other", &row, now));
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn sidebar_fixb_prepares_only_changed_rows() {
         let state = State::default();

@@ -85,7 +85,7 @@ fn connection_health_environment_uses_descriptor_not_endpoint(cx: &mut TestAppCo
     synchronized(&app, cx);
     cx.update(|_, cx| {
         app.update(cx, |app, cx| {
-            app.update_environment_identity(&json!({"environment":{"displayName":"Build Mac"}}));
+            app.update_environment_identity(&json!({"environment":{"label":"Build Mac"}}));
             cx.notify();
         })
     });

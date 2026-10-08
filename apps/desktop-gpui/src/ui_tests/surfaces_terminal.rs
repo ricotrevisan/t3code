@@ -2,8 +2,8 @@
 use super::*;
 use t3code_desktop_gpui::terminal::Size;
 
-fn call(
-    requests: &async_channel::Receiver<connection::Command>,
+pub(super) fn call(
+    requests: &Requests,
     expected: &str,
 ) -> (Value, async_channel::Sender<Result<Value, String>>) {
     let connection::Command::Call {
@@ -19,10 +19,10 @@ fn call(
     assert_eq!(tag, expected);
     (payload, reply)
 }
-fn open(
+pub(super) fn open(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) -> (String, String) {
     cx.update(|_, cx| {
         app.update(cx, |app, cx| {
@@ -37,6 +37,17 @@ fn open(
     cx.simulate_keystrokes("cmd-j");
     cx.run_until_parked();
     assert!(cx.debug_bounds("terminal-drawer").is_some());
+    let connection::Command::Subscribe { key, tag, payload } = requests.try_recv().unwrap() else {
+        panic!("initial discovery")
+    };
+    assert_eq!(tag, "subscribeTerminalMetadata");
+    assert_eq!(payload, json!({}));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.terminal_update(&key, Ok(json!({"type":"snapshot","terminals":[]})), cx)
+        })
+    });
+    cx.run_until_parked();
     let (payload, reply) = call(requests, "terminal.open");
     assert_eq!(payload["cwd"], "/tmp/selected-checkout");
     assert_eq!(payload["worktreePath"], "/tmp/selected-checkout");
@@ -54,9 +65,9 @@ fn open(
     drain_sizes(cx, requests);
     (id, key)
 }
-fn drain_sizes(
+pub(super) fn drain_sizes(
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) {
     cx.run_until_parked();
     while !requests.is_empty() {

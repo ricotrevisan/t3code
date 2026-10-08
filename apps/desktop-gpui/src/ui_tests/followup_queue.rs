@@ -26,7 +26,7 @@ fn background_tool(tool: &str, sequence: u64) -> Value {
 fn prepare_background(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) -> (String, t3code_desktop_gpui::queue::QueuedMessage) {
     projection(app, cx, "running", "old", Some("known-tool"), false);
     cx.update(|_, cx| app.update(cx, |app, _| {

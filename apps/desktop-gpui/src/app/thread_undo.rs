@@ -16,7 +16,85 @@ pub(crate) struct UndoRecord {
     pub(crate) environment: String,
     pub(crate) generation: u64,
     pub(crate) title: String,
+    pub(crate) batch: bool,
     pub(crate) inverses: Vec<Value>,
+}
+
+impl UndoRecord {
+    pub(crate) fn label(&self) -> String {
+        if self.batch {
+            let targets: std::collections::HashSet<_> = self
+                .inverses
+                .iter()
+                .filter_map(|payload| payload["threadId"].as_str())
+                .collect();
+            format!(
+                "{} thread{} · Undo remaining",
+                targets.len(),
+                if targets.len() == 1 { "" } else { "s" }
+            )
+        } else {
+            self.title.clone()
+        }
+    }
+}
+
+/// Capture pre-command state; only accepted forward receipts may arm these.
+pub(crate) fn navigation_inverses(
+    thread: &t3code_desktop_gpui::shell::Thread,
+    kind: &str,
+) -> Vec<Value> {
+    let inverse_kind = match kind {
+        "thread.settle" => "thread.unsettle",
+        "thread.unsettle" => "thread.settle",
+        "thread.snooze" => "thread.unsnooze",
+        "thread.unsnooze" => "thread.snooze",
+        "thread.archive" => "thread.unarchive",
+        "thread.unarchive" => "thread.archive",
+        "thread.pin" => "thread.unpin",
+        "thread.unpin" => "thread.pin",
+        _ => return vec![],
+    };
+    let mut inverse = commands::command(inverse_kind, &thread.id);
+    if matches!(inverse_kind, "thread.unsettle" | "thread.unsnooze") {
+        inverse["reason"] = json!("user");
+    }
+    if inverse_kind == "thread.snooze" {
+        let Some(until) = &thread.snoozed_until else {
+            return vec![];
+        };
+        inverse["snoozedUntil"] = json!(until);
+    }
+    if inverse_kind == "thread.pin"
+        && let Some(key) = &thread.pin_order_key
+    {
+        inverse["orderKey"] = json!(key);
+    }
+    let mut inverses = vec![inverse];
+    if kind == "thread.settle" {
+        if thread.pinned_at.is_some() {
+            let mut pin = commands::command("thread.pin", &thread.id);
+            if let Some(key) = &thread.pin_order_key {
+                pin["orderKey"] = json!(key);
+            }
+            inverses.push(pin);
+        }
+        if let Some(key) = &thread.active_order_key {
+            let mut order = commands::command("thread.active.reorder", &thread.id);
+            order["orderKey"] = json!(key);
+            inverses.push(order);
+        }
+        if let Some(until) = &thread.snoozed_until
+            && chrono::DateTime::parse_from_rfc3339(until)
+                .ok()
+                .is_some_and(|at| at > chrono::Utc::now())
+        {
+            let mut snooze = commands::command("thread.snooze", &thread.id);
+            snooze["snoozedUntil"] = json!(until);
+            inverses.push(snooze);
+        }
+    }
+    inverses
 }
 
 impl NativeApp {
@@ -48,51 +126,12 @@ impl NativeApp {
             self.dispatch(payload, cx);
             return;
         };
-        let mut inverse = commands::command(
-            match kind {
-                "thread.settle" => "thread.unsettle",
-                "thread.snooze" => "thread.unsnooze",
-                "thread.archive" => "thread.unarchive",
-                _ => "thread.pin",
-            },
-            id,
-        );
-        if matches!(kind, "thread.settle" | "thread.snooze") {
-            inverse["reason"] = json!("user");
-        }
-        if kind == "thread.unpin"
-            && let Some(key) = &thread.pin_order_key
-        {
-            inverse["orderKey"] = json!(key);
-        }
-        let mut inverses = vec![inverse];
-        if kind == "thread.settle" && thread.pinned_at.is_some() {
-            let mut pin = commands::command("thread.pin", id);
-            if let Some(key) = &thread.pin_order_key {
-                pin["orderKey"] = json!(key);
-            }
-            inverses.push(pin);
-        }
-        if kind == "thread.settle" {
-            if let Some(key) = &thread.active_order_key {
-                let mut order = commands::command("thread.active.reorder", id);
-                order["orderKey"] = json!(key);
-                inverses.push(order);
-            }
-            if let Some(until) = &thread.snoozed_until
-                && chrono::DateTime::parse_from_rfc3339(until)
-                    .ok()
-                    .is_some_and(|at| at > chrono::Utc::now())
-            {
-                let mut snooze = commands::command("thread.snooze", id);
-                snooze["snoozedUntil"] = json!(until);
-                inverses.push(snooze);
-            }
-        }
+        let inverses = navigation_inverses(thread, kind);
         let record = UndoRecord {
             environment: self.environment_scope.clone(),
             generation: self.generation,
             title: thread.title.clone(),
+            batch: false,
             inverses,
         };
         let Some(sender) = self.commands.clone() else {

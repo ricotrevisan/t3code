@@ -206,6 +206,9 @@ impl NativeApp {
                 self.sidebar_state.project_scope = None;
             }
         }
+        if let Err(error) = self.sidebar_state.save_local() {
+            self.report_error(error, cx);
+        }
         if self.selected_thread.as_deref() == Some(id) {
             self.clear_thread_required(cx);
             self.reveal_sidebar_selection();
@@ -241,8 +244,9 @@ impl NativeApp {
                 .map(|store| store.get(&self.environment_scope, id).to_owned())
                 .unwrap_or_default()
         });
-        self.composer
-            .update(cx, |input, cx| input.set_value(crate::composer_state::prompt_content(&text), window, cx));
+        self.composer.update(cx, |input, cx| {
+            input.set_value(crate::composer_state::prompt_content(&text), window, cx)
+        });
         if let Some(thread) = self
             .shell
             .threads
@@ -310,10 +314,14 @@ impl NativeApp {
         }
         self.sync_checkout_recipe_controls(window, cx);
         self.setup_progress = None;
-        self.enqueue_subscription(connection::Command::Subscribe {
-            key: "worktree-setup".into(), tag: "subscribeWorktreeSetup".into(),
-            payload: json!({"threadId":id}),
-        }, cx);
+        self.enqueue_subscription(
+            connection::Command::Subscribe {
+                key: "worktree-setup".into(),
+                tag: "subscribeWorktreeSetup".into(),
+                payload: json!({"threadId":id}),
+            },
+            cx,
+        );
         if let Some(sender) = &self.commands
             && sender
                 .try_send(connection::Command::SelectThread(if pending {
@@ -391,7 +399,10 @@ impl NativeApp {
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.setup_progress = None;
-        self.enqueue_subscription(connection::Command::Unsubscribe("worktree-setup".into()), cx);
+        self.enqueue_subscription(
+            connection::Command::Unsubscribe("worktree-setup".into()),
+            cx,
+        );
         self.schedule_draft_save(cx);
         self.report_success("Unsent thread discarded", cx);
         cx.notify();
@@ -519,6 +530,36 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(until) = kind.strip_prefix("bulk-snooze-until:") {
+            self.bulk_thread_lifecycle_until("snooze", "thread.snooze", Some(until.into()), cx);
+            return;
+        }
+        if kind == "bulk-snooze-custom" {
+            self.sidebar_state.bulk_snooze_review = Some(self.sidebar_state.selection.clone());
+            self.sidebar_state.custom_snooze_generation = Some(self.generation);
+            self.sidebar_state.custom_snooze_environment = Some(self.environment_scope.clone());
+            self.sidebar_state.custom_snooze_target = Some(target.into());
+            self.close_thread_menu();
+            self.custom_snooze
+                .update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
+            return;
+        }
+        if kind == "bulk-mark-unread" {
+            self.reconcile_sidebar_selection();
+            for id in self.sidebar_state.selection.clone() {
+                self.sidebar_state
+                    .marked_unread
+                    .insert((self.environment_scope.clone(), id));
+            }
+            self.sidebar_state.selection.clear();
+            if let Err(error) = self.sidebar_state.save_local() {
+                self.report_error(error, cx);
+            }
+            self.close_thread_menu();
+            cx.notify();
+            return;
+        }
         if let Some(bulk) = kind.strip_prefix("bulk:") {
             if let Some((action, kind)) = bulk.split_once(':') {
                 self.bulk_thread_lifecycle(action, kind, cx);
@@ -576,6 +617,9 @@ impl NativeApp {
                 self.sidebar_state
                     .marked_unread
                     .insert((self.environment_scope.clone(), target.into()));
+                if let Err(error) = self.sidebar_state.save_local() {
+                    self.report_error(error, cx);
+                }
                 self.close_thread_menu();
             }
             "filter-project" => {
@@ -600,6 +644,8 @@ impl NativeApp {
                 self.close_thread_menu();
             }
             "snooze-custom" => {
+                self.sidebar_state.bulk_snooze_review = None;
+                self.sidebar_state.custom_snooze_generation = Some(self.generation);
                 self.sidebar_state.custom_snooze_target = Some(target.into());
                 self.sidebar_state.custom_snooze_environment = Some(self.environment_scope.clone());
                 self.close_thread_menu();
@@ -800,13 +846,30 @@ impl NativeApp {
         forward: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar_state.order_busy && self.sidebar_state.order_generation == self.generation {
+        if !self.connection_ready()
+            || (self.sidebar_state.order_busy
+                && self.sidebar_state.order_generation == self.generation)
+        {
             return;
         }
         let Some(thread) = self.shell.threads.iter().find(|thread| thread.id == target) else {
             return;
         };
         let pinned = thread.pinned_at.is_some();
+        if self.sidebar_state.capabilities[if pinned {
+            "threadPinReorder"
+        } else {
+            "threadActiveReorder"
+        }]
+        .as_bool()
+            != Some(true)
+            || !self
+                .sidebar_selectable_order()
+                .iter()
+                .any(|id| id == target)
+        {
+            return;
+        }
         let groups = self.sidebar_state.grouped(
             &self.shell.threads,
             Some(self.shell.revision),
@@ -820,22 +883,30 @@ impl NativeApp {
             &self.environment_scope,
         );
         let rows = &groups[if pinned { 0 } else { 1 }].2;
-        let Some(key) = sidebar::move_key(rows, target, forward, pinned) else {
+        let Some(assignments) =
+            sidebar::move_assignments(rows, &self.shell.threads, target, forward, pinned)
+        else {
             return;
         };
         let Some(sender) = self.commands.clone() else {
             self.report_error("Not connected", cx);
             return;
         };
-        let mut payload = commands::command(
-            if pinned {
-                "thread.pin.reorder"
-            } else {
-                "thread.active.reorder"
-            },
-            target,
-        );
-        payload["orderKey"] = json!(key);
+        let calls = assignments
+            .into_iter()
+            .map(|(id, key)| {
+                let mut payload = commands::command(
+                    if pinned {
+                        "thread.pin.reorder"
+                    } else {
+                        "thread.active.reorder"
+                    },
+                    &id,
+                );
+                payload["orderKey"] = json!(key);
+                payload
+            })
+            .collect::<Vec<_>>();
         let generation = self.generation;
         let environment = self.environment_scope.clone();
         self.sidebar_state.order_busy = true;
@@ -843,30 +914,33 @@ impl NativeApp {
         // No optimistic projection mutation: rejection leaves the displayed
         // order untouched; only authoritative shell receipts can rearrange it.
         cx.spawn(async move |entity, cx| {
-            let (reply, receipt) = async_channel::bounded(1);
-            let result = if sender
-                .send(connection::Command::Call {
-                    tag: "orchestration.dispatchCommand".into(),
-                    payload,
-                    reply,
-                })
-                .await
-                .is_err()
-            {
-                Err("Connection closed".to_owned())
-            } else {
-                receipt
-                    .recv()
-                    .await
-                    .unwrap_or_else(|_| Err("Reorder reply lost".into()))
-            };
+            let mut result = Ok(json!({}));
+            for payload in calls {
+                if !entity
+                    .read_with(cx, |app, _| {
+                        app.generation == generation && app.environment_scope == environment
+                    })
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                result = connection::call(&sender, "orchestration.dispatchCommand", payload).await;
+                if result.is_err() {
+                    break;
+                }
+            }
             let _ = entity.update(cx, |app, cx| {
                 if app.generation != generation || app.environment_scope != environment {
                     return;
                 }
                 app.sidebar_state.order_busy = false;
                 if let Err(error) = result {
-                    app.report_error(format!("Thread order unchanged: {error}"), cx);
+                    app.report_error(
+                        format!(
+                            "Order write rejected; showing server-authoritative state: {error}"
+                        ),
+                        cx,
+                    );
                 }
                 cx.notify();
             });
@@ -888,6 +962,16 @@ impl NativeApp {
     }
 
     pub(crate) fn snooze_custom(&mut self, cx: &mut Context<Self>) {
+        if self
+            .sidebar_state
+            .custom_snooze_generation
+            .is_some_and(|generation| generation != self.generation)
+        {
+            self.sidebar_state.custom_snooze_target = None;
+            self.sidebar_state.bulk_snooze_review = None;
+            self.report_error("Connection changed; review snooze targets again", cx);
+            return;
+        }
         if self.sidebar_state.custom_snooze_target.is_some()
             && self.sidebar_state.custom_snooze_environment.as_deref()
                 != Some(&self.environment_scope)
@@ -913,6 +997,25 @@ impl NativeApp {
                 return;
             }
         };
+        if let Some(review) = self.sidebar_state.bulk_snooze_review.take() {
+            if review != self.sidebar_state.selection {
+                self.report_error("Selection changed; review bulk snooze targets again", cx);
+                self.sidebar_state.custom_snooze_target = None;
+                return;
+            }
+            self.bulk_thread_lifecycle_until(
+                "snooze",
+                "thread.snooze",
+                Some(
+                    until
+                        .with_timezone(&chrono::Utc)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                ),
+                cx,
+            );
+            self.sidebar_state.custom_snooze_target = None;
+            return;
+        }
         let mut command = commands::command("thread.snooze", id);
         command["snoozedUntil"] = json!(
             until

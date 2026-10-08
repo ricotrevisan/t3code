@@ -98,6 +98,7 @@ impl NativeApp {
     fn publish_server_config(&mut self, cx: &mut Context<Self>) {
         let value = self.server_config.config(self.generation).unwrap().clone();
         self.update_environment_identity(&value);
+        self.remember_environment_identity(&value, cx);
         self.sidebar_state.capabilities = value["environment"]["capabilities"].clone();
         self.project_settings = value.get("settings").cloned();
         match serde_json::from_value::<providers::Config>(value.clone()) {

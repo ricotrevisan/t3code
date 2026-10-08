@@ -9,6 +9,9 @@ use serde_json::Value;
 
 #[derive(Debug, PartialEq)]
 pub struct Account {
+    pub key: String,
+    pub sensitive_label: Option<String>,
+    pub reset_input: Option<Value>,
     pub label: String,
     pub checked: String,
     pub windows: Vec<Window>,
@@ -68,6 +71,9 @@ fn account(label: String, limits: &Value) -> Account {
             )
         });
     Account {
+        key: label.clone(),
+        sensitive_label: label.contains('@').then(|| label.clone()),
+        reset_input: None,
         label: if label.contains('@') {
             "Account (identity hidden)".into()
         } else {
@@ -97,12 +103,17 @@ pub fn accounts(config: &Value) -> Vec<Account> {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| string(&p["instanceId"]))
             .unwrap_or_else(|| "Provider account".into());
-        out.push(account(label, &p["usageLimits"]));
+        let mut row = account(label, &p["usageLimits"]);
+        if let Some(instance) = string(&p["instanceId"]) {
+            row.key = format!("provider:{instance}");
+            row.reset_input = Some(serde_json::json!({"instanceId":instance}));
+        }
+        out.push(row);
     }
     for source in config["usageLimitSources"].as_array().into_iter().flatten() {
         let label = source["label"].as_str().unwrap_or("Usage source");
         for a in source["accounts"].as_array().into_iter().flatten() {
-            out.push(account(
+            let mut row = account(
                 format!(
                     "{label} · {}",
                     a["plan"]
@@ -110,10 +121,23 @@ pub fn accounts(config: &Value) -> Vec<Account> {
                         .unwrap_or(a["driver"].as_str().unwrap_or("Account"))
                 ),
                 &a["usageLimits"],
-            ));
+            );
+            row.sensitive_label = string(&a["email"]);
+            if let (Some(source), Some(id)) = (string(&source["id"]), string(&a["id"])) {
+                row.key = format!("source:{source}:{id}");
+                if let Some(credit) = string(&a["usageLimits"]["resetCredits"]["nextCreditId"]) {
+                    row.reset_input = Some(
+                        serde_json::json!({"sourceId":source,"accountId":id,"creditId":credit}),
+                    );
+                }
+            }
+            out.push(row);
         }
         if let Some(error) = string(&source["error"]) {
             out.push(Account {
+                key: format!("error:{label}"),
+                sensitive_label: None,
+                reset_input: None,
                 label: label.into(),
                 checked: source["checkedAt"].as_str().unwrap_or("Unknown").into(),
                 windows: vec![],
@@ -206,6 +230,33 @@ pub fn render(config: &Value, cx: &mut App) -> AnyElement {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn r13_g_usage_redemption_inputs_use_instance_or_exact_source_credit() {
+        let rows = accounts(
+            &json!({"providers":[{"instanceId":"named-codex","displayName":"rico@example.com","usageLimits":{"resetCredits":{"availableCount":2}}}], "usageLimitSources":[{"id":"hub","label":"Hub","accounts":[{"id":"one","driver":"codex","email":"private@example.com","usageLimits":{"resetCredits":{"availableCount":1,"nextCreditId":"credit-7"}}},{"id":"two","driver":"codex","usageLimits":{"resetCredits":{"availableCount":1}}}]}]}),
+        );
+        assert_eq!(rows[0].key, "provider:named-codex");
+        assert_eq!(rows[0].label, "Account (identity hidden)");
+        assert_eq!(rows[0].sensitive_label.as_deref(), Some("rico@example.com"));
+        assert_eq!(
+            rows[0].reset_input,
+            Some(json!({"instanceId":"named-codex"}))
+        );
+        assert_eq!(rows[1].key, "source:hub:one");
+        assert_eq!(
+            rows[1].sensitive_label.as_deref(),
+            Some("private@example.com")
+        );
+        assert_eq!(
+            rows[1].reset_input,
+            Some(json!({"sourceId":"hub","accountId":"one","creditId":"credit-7"}))
+        );
+        assert!(
+            rows[2].reset_input.is_none(),
+            "source must never redeem an unpinned credit"
+        );
+    }
+
     #[test]
     fn quota_windows_credits_external_and_probe_failure_are_not_context_usage() {
         let rows = accounts(

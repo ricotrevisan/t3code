@@ -176,7 +176,20 @@ impl NativeApp {
         kind: &str,
         cx: &mut Context<Self>,
     ) {
-        if self.sidebar_state.bulk_busy && self.sidebar_state.bulk_generation == self.generation {
+        self.bulk_thread_lifecycle_until(action, kind, None, cx);
+    }
+
+    pub(crate) fn bulk_thread_lifecycle_until(
+        &mut self,
+        action: &str,
+        kind: &str,
+        until: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.connection_ready()
+            || (self.sidebar_state.bulk_busy
+                && self.sidebar_state.bulk_generation == self.generation)
+        {
             return;
         }
         self.reconcile_sidebar_selection();
@@ -184,7 +197,7 @@ impl NativeApp {
             self.report_error("Not connected", cx);
             return;
         };
-        if action == "archive"
+        if matches!(action, "archive" | "delete")
             && self
                 .selected_thread
                 .as_ref()
@@ -201,7 +214,33 @@ impl NativeApp {
         } else {
             &self.sidebar_state.capabilities
         };
-        let mut calls: Vec<(String, Value)> = Vec::new();
+        let review = (
+            self.generation,
+            self.environment_scope.clone(),
+            self.sidebar_state.selection.clone(),
+        );
+        if action == "delete" && self.sidebar_state.bulk_delete_review.as_ref() != Some(&review) {
+            self.sidebar_state.bulk_delete_review = Some(review);
+            self.report_error("Review selected targets; click Delete again to permanently clear their conversation history", cx);
+            return;
+        }
+        self.sidebar_state.bulk_delete_review = None;
+        if action == "snooze"
+            && !self.sidebar_state.selection.iter().all(|id| {
+                self.shell
+                    .threads
+                    .iter()
+                    .find(|thread| &thread.id == id)
+                    .is_some_and(|thread| {
+                        sidebar::thread_action_policy(Some(thread), action, now, capabilities)
+                            && !self.queues.has_queued(id)
+                    })
+            })
+        {
+            self.report_error("Every selected thread must be eligible for snooze", cx);
+            return;
+        }
+        let mut calls: Vec<(String, Value, Vec<Value>)> = Vec::new();
         for id in &self.sidebar_state.selection {
             if let Some(thread) = self
                 .shell
@@ -217,12 +256,20 @@ impl NativeApp {
                     command["reason"] = serde_json::json!("user");
                 }
                 if kind == "thread.snooze" {
-                    command["snoozedUntil"] = serde_json::json!(
-                        (now + chrono::Duration::hours(1))
-                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                    );
+                    command["snoozedUntil"] =
+                        serde_json::json!(until.clone().unwrap_or_else(|| {
+                            (now + chrono::Duration::hours(1))
+                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                        }));
                 }
-                calls.push((id.clone(), command));
+                if kind == "thread.meta.update" {
+                    command["regenerateTitle"] = serde_json::json!(true);
+                }
+                calls.push((
+                    id.clone(),
+                    command,
+                    super::thread_undo::navigation_inverses(thread, kind),
+                ));
             }
         }
         if calls.is_empty() {
@@ -234,6 +281,7 @@ impl NativeApp {
         let generation = self.generation;
         let environment = self.environment_scope.clone();
         self.thread_undo.serial += 1;
+        let undo_serial = self.thread_undo.serial;
         self.thread_undo.record = None;
         self.thread_undo.busy = false;
         self.sidebar_state.bulk_busy = true;
@@ -241,7 +289,8 @@ impl NativeApp {
         cx.spawn(async move |entity, cx| {
             let mut succeeded = Vec::new();
             let mut failures = Vec::new();
-            for (id, payload) in calls {
+            let mut inverses = Vec::new();
+            for (id, payload, inverse) in calls {
                 let current = entity
                     .read_with(cx, |app, _| {
                         app.generation == generation
@@ -286,7 +335,10 @@ impl NativeApp {
                         .unwrap_or_else(|_| Err("Lifecycle reply lost".into()))
                 };
                 match result {
-                    Ok(_) => succeeded.push(id),
+                    Ok(_) => {
+                        succeeded.push(id);
+                        inverses.extend(inverse);
+                    }
                     Err(error) => failures.push(format!("{id}: {error}")),
                 }
             }
@@ -295,6 +347,15 @@ impl NativeApp {
                     return;
                 }
                 app.sidebar_state.bulk_busy = false;
+                if app.thread_undo.serial == undo_serial && !inverses.is_empty() {
+                    app.thread_undo.record = Some(super::thread_undo::UndoRecord {
+                        environment: environment.clone(),
+                        generation,
+                        title: format!("{} threads", succeeded.len()),
+                        batch: true,
+                        inverses,
+                    });
+                }
                 app.sidebar_state
                     .selection
                     .retain(|id| !succeeded.contains(id));

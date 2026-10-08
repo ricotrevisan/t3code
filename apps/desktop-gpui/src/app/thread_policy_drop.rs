@@ -47,7 +47,7 @@ impl NativeApp {
             now,
             &self.environment_scope,
         );
-        let rows: Vec<_> = groups[if pinned { 0 } else { 1 }]
+        let mut rows: Vec<_> = groups[if pinned { 0 } else { 1 }]
             .2
             .iter()
             .copied()
@@ -61,24 +61,29 @@ impl NativeApp {
         } else {
             rows.len()
         };
-        let key = |thread: &t3code_desktop_gpui::shell::Thread| {
-            if pinned {
-                thread.pin_order_key.clone()
-            } else {
-                thread.active_order_key.clone()
-            }
-        };
-        let previous = if index > 0 {
-            Some(key(rows[index - 1])?)
-        } else {
-            None
-        };
-        let next = if index < rows.len() {
-            Some(key(rows[index])?)
-        } else {
-            None
-        };
-        let order = sidebar::key_between(previous.as_deref(), next.as_deref())?;
+        rows.insert(index, thread);
+        let assignments = sidebar::order_assignments(&rows, &self.shell.threads, id, pinned);
+        let order = assignments
+            .iter()
+            .find(|(target, _)| target == id)?
+            .1
+            .clone();
+        let repairs = assignments
+            .iter()
+            .filter(|(target, _)| target != id)
+            .map(|(target, key)| {
+                let mut command = commands::command(
+                    if pinned {
+                        "thread.pin.reorder"
+                    } else {
+                        "thread.active.reorder"
+                    },
+                    target,
+                );
+                command["orderKey"] = json!(key);
+                command
+            })
+            .collect::<Vec<_>>();
         if pinned {
             if thread.pinned_at.is_none() && !allowed("pin") {
                 return None;
@@ -102,6 +107,7 @@ impl NativeApp {
                 calls.push(wake);
             }
             calls.push(command);
+            calls.extend(repairs);
             return Some(calls);
         }
         let mut calls = Vec::new();
@@ -128,6 +134,7 @@ impl NativeApp {
         let mut command = commands::command("thread.active.reorder", id);
         command["orderKey"] = json!(order);
         calls.push(command);
+        calls.extend(repairs);
         Some(calls)
     }
 
@@ -148,7 +155,7 @@ impl NativeApp {
         }
         let Some(calls) = self.sidebar_drop_plan(&drag.id, section, before) else {
             self.report_error(
-                "This destination is unavailable (capability, thread state or unkeyed neighbors)",
+                "This destination is unavailable (capability or thread state)",
                 cx,
             );
             return;

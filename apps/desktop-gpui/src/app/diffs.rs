@@ -19,6 +19,14 @@ pub(crate) struct DiffState {
     pub expand_all: bool,
     pub collapsed: std::collections::HashSet<usize>,
     pub truncated: bool,
+    pub split: bool,
+    pub ignore_whitespace: bool,
+    pub base_ref: Option<String>,
+    pub source_base: Option<String>,
+    pub source_head: Option<String>,
+    pub full_file: Option<(usize, String, String)>,
+    pub full_file_loading: bool,
+    pub full_file_error: Option<String>,
     epoch: u64,
     task: Option<Task<()>>,
 }
@@ -164,14 +172,28 @@ impl NativeApp {
         self.diffs.thread_id = Some(thread_id);
         self.diffs.turn_count = None;
         self.diffs.git_scope = Some(scope.clone());
+        self.diffs.full_file = None;
+        self.diffs.full_file_error = None;
+        self.diffs.full_file_loading = false;
+        self.diffs.source_base = None;
+        self.diffs.source_head = None;
         self.diffs.files.clear();
         self.diffs.selected_file = 0;
         self.diffs.collapsed.clear();
         self.diffs.error = None;
         self.diffs.loading = true;
+        self.diffs.truncated = false;
+        let mut payload = json!({"cwd":cwd});
+        if self.diffs.ignore_whitespace {
+            payload["ignoreWhitespace"] = true.into();
+        }
+        if scope == "branch-range"
+            && let Some(base) = &self.diffs.base_ref
+        {
+            payload["baseRef"] = base.clone().into();
+        }
         self.diffs.task = Some(cx.spawn(async move |entity, cx| {
-            let result =
-                connection::call(&sender, "review.getDiffPreview", json!({"cwd":cwd})).await;
+            let result = connection::call(&sender, "review.getDiffPreview", payload).await;
             let _ = entity.update(cx, |app, cx| {
                 if app.generation != generation
                     || app.checkout_context() != context
@@ -188,6 +210,8 @@ impl NativeApp {
                             app.diffs.files =
                                 split_patch(source["diff"].as_str().unwrap_or_default().to_owned());
                             app.diffs.truncated = source["truncated"] == true;
+                            app.diffs.source_base = source["baseRef"].as_str().map(str::to_owned);
+                            app.diffs.source_head = source["headRef"].as_str().map(str::to_owned);
                         } else {
                             app.diffs.error = Some("Requested diff scope is unavailable".into());
                         }
@@ -198,6 +222,104 @@ impl NativeApp {
                 cx.notify();
             });
         }));
+        cx.notify();
+    }
+
+    pub(crate) fn select_diff_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.diffs.epoch = self.diffs.epoch.wrapping_add(1);
+        self.diffs.selected_file = index;
+        self.diffs.full_file = None;
+        self.diffs.full_file_error = None;
+        self.diffs.full_file_loading = false;
+        self.diffs.expand_all = false;
+        self.diffs.collapsed.remove(&index);
+        cx.notify();
+    }
+    /// Full contents are a separate, explicitly labelled view, not invented
+    /// context lines appended to a truncated preview.
+    pub(crate) fn load_diff_file_contents(&mut self, cx: &mut Context<Self>) {
+        if !self.connection_ready() || self.diffs.full_file_loading {
+            return;
+        }
+        let (Some(scope), Some(cwd), Some(sender), Some(file)) = (
+            self.diffs.git_scope.clone(),
+            self.selected_workspace(),
+            self.commands.clone(),
+            self.diffs.files.get(self.diffs.selected_file),
+        ) else {
+            return;
+        };
+        let paths = file
+            .patch
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("--- ")
+                    .or_else(|| line.strip_prefix("+++ "))
+                    .map(git_path)
+            })
+            .collect::<Vec<_>>();
+        let old_path = paths
+            .first()
+            .map(|p| p.strip_prefix("a/").unwrap_or(p))
+            .unwrap_or(&file.path);
+        let new_path = paths
+            .get(1)
+            .map(|p| p.strip_prefix("b/").unwrap_or(p))
+            .unwrap_or(&file.path);
+        let change = if old_path == "/dev/null" {
+            "new"
+        } else if new_path == "/dev/null" {
+            "deleted"
+        } else if file.patch.contains("rename from ") {
+            if file.patch.contains("@@ ") {
+                "rename-changed"
+            } else {
+                "rename-pure"
+            }
+        } else {
+            "change"
+        };
+        let rename_old = file
+            .patch
+            .lines()
+            .find_map(|line| line.strip_prefix("rename from "))
+            .map(git_path);
+        let payload = json!({"cwd":cwd,"sourceKind":scope,"changeType":change,"baseRef":self.diffs.source_base,"headRef":self.diffs.source_head,"oldPath":if old_path == "/dev/null" { &file.path } else { rename_old.as_deref().unwrap_or(old_path) },"newPath":if new_path == "/dev/null" { &file.path } else { new_path }});
+        let epoch = self.diffs.epoch;
+        let index = self.diffs.selected_file;
+        let generation = self.generation;
+        let context = self.checkout_context();
+        self.diffs.full_file_loading = true;
+        self.diffs.full_file = None;
+        self.diffs.full_file_error = None;
+        cx.spawn(async move |entity, cx| {
+            let result = connection::call(&sender, "review.getDiffFileContents", payload).await;
+            let _ = entity.update(cx, |app, cx| {
+                if app.generation != generation
+                    || app.checkout_context() != context
+                    || app.diffs.epoch != epoch
+                {
+                    return;
+                }
+                app.diffs.full_file_loading = false;
+                match result {
+                    Ok(value) => {
+                        match (value["oldContents"].as_str(), value["newContents"].as_str()) {
+                            (Some(old), Some(new)) => {
+                                app.diffs.full_file = Some((index, old.into(), new.into()))
+                            }
+                            _ => {
+                                app.diffs.full_file_error =
+                                    Some("Invalid file contents response".into())
+                            }
+                        }
+                    }
+                    Err(error) => app.diffs.full_file_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -214,6 +336,9 @@ impl NativeApp {
         self.diffs.thread_id = Some(thread_id.clone());
         self.diffs.turn_count = Some(turn_count);
         self.diffs.git_scope = None;
+        self.diffs.full_file = None;
+        self.diffs.full_file_error = None;
+        self.diffs.full_file_loading = false;
         self.diffs.truncated = false;
         self.diffs.collapsed.clear();
         self.diffs.files.clear();

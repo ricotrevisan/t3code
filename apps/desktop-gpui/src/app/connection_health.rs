@@ -56,7 +56,7 @@ impl NativeApp {
     }
 
     pub(crate) fn update_environment_identity(&mut self, config: &Value) {
-        self.environment_name = config["environment"]["displayName"]
+        self.environment_name = config["environment"]["label"]
             .as_str()
             .filter(|name| !name.trim().is_empty())
             .map(str::to_owned);

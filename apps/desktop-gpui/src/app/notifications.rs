@@ -35,17 +35,27 @@ impl NativeApp {
     }
 
     pub(crate) fn report_thread_required(&mut self, cx: &mut Context<Self>) {
-        self.report_error("Select a thread first", cx);
-        self.thread_required_toast = self
+        self.thread_required_status = true;
+        self.status = "Select a thread first".into();
+        self.status_kind = notifications::Outcome::Error;
+        self.toast_id += 1;
+        if let Some(toast) = self
             .toasts
-            .iter()
-            .find(|toast| {
-                toast.id != 0
-                    && toast.kind == notifications::ToastKind::Error
-                    && toast.thread.is_none()
-                    && toast.message == "Select a thread first"
-            })
-            .map(|toast| toast.id);
+            .iter_mut()
+            .find(|toast| Some(toast.id) == self.thread_required_toast)
+        {
+            toast.count = toast.count.saturating_add(1);
+        } else {
+            self.thread_required_toast = Some(self.toast_id);
+            self.toasts.push(notifications::Toast {
+                id: self.toast_id,
+                kind: notifications::ToastKind::Error,
+                count: 1,
+                message: self.status.clone(),
+                thread: None,
+            });
+        }
+        cx.notify();
     }
 
     pub(crate) fn clear_thread_required(&mut self, cx: &mut Context<Self>) {
@@ -54,7 +64,7 @@ impl NativeApp {
         }
         if let Some(id) = self.thread_required_toast.take() {
             self.dismiss_toast(id, cx);
-            if self.status == "Select a thread first" {
+            if self.thread_required_status {
                 self.set_status("Thread selected", cx);
             }
         }
@@ -75,6 +85,7 @@ impl NativeApp {
         status: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
+        self.thread_required_status = false;
         self.status = notifications::cap_message(status.into());
         self.status_kind = outcome;
         let kind = match outcome {
@@ -96,6 +107,14 @@ impl NativeApp {
     ) {
         self.toast_id += 1;
         let id = self.toast_id;
+        // Condition-owned validation never coalesces with durable RPC failures,
+        // even when a server happens to use exactly the same wording.
+        let condition = self.thread_required_toast.and_then(|id| {
+            self.toasts
+                .iter()
+                .position(|toast| toast.id == id)
+                .map(|index| self.toasts.remove(index))
+        });
         notifications::retain_toast(
             &mut self.toasts,
             notifications::Toast {
@@ -106,6 +125,9 @@ impl NativeApp {
                 thread,
             },
         );
+        if let Some(condition) = condition {
+            self.toasts.push(condition);
+        }
         if kind != notifications::ToastKind::Error {
             cx.spawn(async move |app, cx| {
                 cx.background_executor()
@@ -138,6 +160,9 @@ impl NativeApp {
     }
 
     pub(crate) fn refresh_notification_authorization(&mut self, cx: &mut Context<Self>) {
+        if self.notification_platform.authorization_request_pending() {
+            return;
+        }
         let receiver = self.notification_platform.probe_authorization();
         let authorization_epoch = self.notification_platform.authorization_epoch();
         let generation = self.generation;
@@ -165,6 +190,44 @@ impl NativeApp {
         preferences: notifications::Preferences,
         cx: &mut Context<Self>,
     ) {
+        if preferences.mode.desktop() && preferences.mode != self.notification_preferences.mode {
+            self.clear_notification_badge(cx);
+            let receiver = self.notification_platform.request_authorization();
+            let epoch = self.notification_platform.authorization_epoch();
+            cx.spawn(async move |app, cx| {
+                let authorization = receiver
+                    .recv()
+                    .await
+                    .unwrap_or(t3code_desktop_gpui::notification_platform::Authorization::Failed);
+                let _ = app.update(cx, |app, cx| {
+                    if app.notification_platform.authorization_epoch() != epoch {
+                        return;
+                    }
+                    app.notification_platform
+                        .record_authorization(authorization);
+                    if authorization
+                        == t3code_desktop_gpui::notification_platform::Authorization::Authorized
+                    {
+                        app.commit_notification_preferences(preferences, cx);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        } else {
+            // A newer choice invalidates an outstanding permission request.
+            self.notification_platform.cancel_authorization_request();
+            self.refresh_notification_authorization(cx);
+            self.commit_notification_preferences(preferences, cx);
+        }
+        cx.notify();
+    }
+
+    fn commit_notification_preferences(
+        &mut self,
+        preferences: notifications::Preferences,
+        cx: &mut Context<Self>,
+    ) {
         let mode_changed = self.notification_preferences.mode != preferences.mode;
         self.notification_preferences = preferences;
         if mode_changed || !preferences.mode.desktop() {
@@ -179,7 +242,6 @@ impl NativeApp {
             // persist an older preference after a newer one.
             t3code_desktop_gpui::window_state::save(*state);
         }
-        self.refresh_notification_authorization(cx);
         cx.notify();
     }
 

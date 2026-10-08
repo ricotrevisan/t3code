@@ -51,7 +51,18 @@ pub(crate) fn quick(status: &Value) -> GitChoice {
         return choice("Commit", "commit", Some("Not a repository"));
     }
     if !status["refName"].is_string() {
-        return choice("Commit", "commit", Some("Create and checkout a ref first"));
+        return choice(
+            "Commit",
+            "commit",
+            (!changes).then_some("No working-tree changes"),
+        );
+    }
+    if remote && !status["hasUpstream"].is_boolean() {
+        return choice(
+            "Commit",
+            "commit",
+            (!changes).then_some("Remote status is unavailable"),
+        );
     }
     if changes {
         return if !upstream && !remote {
@@ -108,12 +119,14 @@ pub(crate) fn quick(status: &Value) -> GitChoice {
 
 impl NativeApp {
     pub(crate) fn render_git_split(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let action = self
-            .git_header
-            .status
-            .as_ref()
-            .filter(|_| self.git_header.context.as_ref() == Some(&self.checkout_context()))
-            .map(quick);
+        let action =
+            self.live_git_status()
+                .or_else(|| {
+                    self.git_header.status.as_ref().filter(|_| {
+                        self.git_header.context.as_ref() == Some(&self.checkout_context())
+                    })
+                })
+                .map(quick);
         let bounds = self.git_header.trigger_bounds.clone();
         div()
             .relative()
@@ -207,6 +220,7 @@ impl NativeApp {
             open: true,
             loading: true,
             context: Some(context.clone()),
+            status: self.live_git_status().cloned(),
             ..Default::default()
         };
         cx.spawn(async move |entity, cx| {
@@ -220,7 +234,10 @@ impl NativeApp {
                 }
                 app.git_header.loading = false;
                 match result {
-                    Ok(value) => app.git_header.status = Some(value),
+                    Ok(value) => {
+                        app.git_header.status =
+                            Some(app.live_git_status().cloned().unwrap_or(value))
+                    }
                     Err(error) => app.git_header.error = Some(error),
                 }
                 cx.notify();
@@ -235,7 +252,8 @@ impl NativeApp {
         window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) {
-        if self.git_header.context.as_ref() != Some(&self.checkout_context())
+        if !self.connection_ready()
+            || self.git_header.context.as_ref() != Some(&self.checkout_context())
             || self.pending_actions > 0
         {
             return;
@@ -281,7 +299,9 @@ impl NativeApp {
     pub(crate) fn render_git_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let current = self.git_header.context.as_ref() == Some(&self.checkout_context());
         let busy = self.pending_actions > 0;
-        let status = self.git_header.status.as_ref().filter(|_| current);
+        let status = self
+            .live_git_status()
+            .or_else(|| self.git_header.status.as_ref().filter(|_| current));
         let primary = status.map(quick);
         let mut actions = Vec::new();
         if let Some(status) = status {
@@ -294,12 +314,11 @@ impl NativeApp {
                 "Commit",
                 "commit",
                 blocked
-                    .or((status["isRepo"] != true || !status["refName"].is_string())
-                        .then_some("Checkout a repository branch first"))
+                    .or((status["isRepo"] != true).then_some("Not a repository"))
                     .or((status["hasWorkingTreeChanges"] != true)
                         .then_some("No working-tree changes")),
             ));
-            if status["hasPrimaryRemote"] == true {
+            if status["hasPrimaryRemote"] == true && status["hasUpstream"].is_boolean() {
                 actions.push(choice(
                     "Push",
                     "push",
@@ -384,6 +403,9 @@ impl NativeApp {
                 view.child("Checkout changed; reopen Git to refresh")
             })
             .children(self.git_header.error.clone())
+            .when_some(self.live_git_error(), |view, error| {
+                view.child(format!("Live checkout status unavailable: {error}"))
+            })
             .when_some(
                 self.git_header.result_url.clone().filter(|_| current),
                 |view, url| {

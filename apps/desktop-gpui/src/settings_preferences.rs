@@ -111,6 +111,11 @@ impl NativeApp {
             .flex_col()
             .gap_2()
             .child(
+                div()
+                    .text_sm()
+                    .child("Fallback theme family · used after resetting library selections"),
+            )
+            .child(
                 RadioGroup::horizontal("settings-theme-variant")
                     .selected_index(
                         settings_appearance::Variant::ALL

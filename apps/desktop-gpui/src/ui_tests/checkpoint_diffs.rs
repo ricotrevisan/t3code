@@ -22,7 +22,7 @@ fn click_diff(cx: &mut VisualTestContext, selector: &'static str) {
 }
 
 fn diff_request(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     turn: u64,
 ) -> async_channel::Sender<Result<Value, String>> {
     let connection::Command::Call {

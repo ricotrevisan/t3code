@@ -3,7 +3,7 @@ use super::*;
 fn begin(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) -> (String, async_channel::Receiver<Result<(), String>>) {
     let result = cx.update(|_, cx| {
         app.update(cx, |app, cx| {
@@ -62,7 +62,7 @@ fn dispatch(
     _app: &Entity<NativeApp>,
     _cx: &mut VisualTestContext,
     _key: &str,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) -> (
     String,
     connection::MutationGate,

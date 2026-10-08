@@ -61,7 +61,9 @@ impl NativeApp {
                             .label("Settings")
                             .ghost()
                             .small()
-                            .on_click(cx.listener(|app, _, window, cx| app.open_settings("", window, cx))),
+                            .on_click(
+                                cx.listener(|app, _, window, cx| app.open_settings("", window, cx)),
+                            ),
                     ),
             )
     }

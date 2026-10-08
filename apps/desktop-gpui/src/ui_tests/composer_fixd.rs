@@ -269,7 +269,7 @@ fn animated_thumbnail_is_single_static_bounded_frame() {
     let preview = crate::composer_thumbnail::thumbnail(&bytes).unwrap();
     assert_eq!(preview.format, gpui_kit::ImageFormat::Png);
     let decoded = image::load_from_memory(&preview.bytes).unwrap();
-    assert_eq!((decoded.width(), decoded.height()), (256, 256));
+    assert_eq!((decoded.width(), decoded.height()), (512, 512));
     assert_eq!(decoded.to_rgba8().get_pixel(0, 0)[0], 20);
 }
 

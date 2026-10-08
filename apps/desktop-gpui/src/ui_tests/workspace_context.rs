@@ -19,7 +19,7 @@ fn add_other_project(app: &Entity<NativeApp>, cx: &mut VisualTestContext) {
 fn switch_thread(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     id: &str,
     pending: bool,
 ) {
@@ -47,7 +47,7 @@ fn switch_thread(
 fn assert_action_cwds(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     id: &str,
     cwd: &str,
 ) {

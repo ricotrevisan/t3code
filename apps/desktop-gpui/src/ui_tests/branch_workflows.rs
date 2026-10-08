@@ -3,7 +3,7 @@ use super::*;
 use crate::app::branch_workflows::BranchWorkflow;
 
 fn call(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     tag: &str,
 ) -> (Value, async_channel::Sender<Result<Value, String>>) {
     let (actual, payload, reply) = loop {
@@ -29,7 +29,7 @@ fn call(
 pub(super) fn stop_observation(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) -> String {
     let connection::Command::Subscribe { key, tag, .. } = requests
         .try_recv()
@@ -64,7 +64,7 @@ pub(super) fn complete_stop(
 pub(super) fn finish_owned_stop(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) {
     let key = stop_observation(app, cx, requests);
     let (payload, receipt) = call(requests, "orchestration.dispatchCommand");
@@ -80,7 +80,7 @@ pub(super) fn finish_owned_stop(
 
 pub(super) fn refresh_refs(
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) {
     let (payload, reply) = call(requests, "vcs.listRefs");
     assert_eq!(payload["refresh"], true);

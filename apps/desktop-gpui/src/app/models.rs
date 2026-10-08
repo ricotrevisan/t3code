@@ -13,6 +13,8 @@ impl NativeApp {
         }
         self.prepare_search_overlay(window, cx);
         self.catalog_open = true;
+        self.composer_state.catalog_favorites_only = false;
+        self.composer_state.catalog_show_hidden = false;
         if self.catalog_open {
             self.composer_state.catalog_provider = None;
             self.composer_state.catalog_anchor = Some(gpui_kit::ScrollAnchor::for_handle(
@@ -50,8 +52,101 @@ impl NativeApp {
         cx.notify();
     }
 
+    pub(crate) fn model_preferences(&self) -> &[t3code_desktop_gpui::drafts::ModelPreference] {
+        self.draft_store
+            .as_ref()
+            .map(|store| store.model_preferences(&self.environment_scope))
+            .unwrap_or_else(|| {
+                self.composer_state
+                    .model_preferences
+                    .get(&self.environment_scope)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+            })
+    }
+
+    pub(crate) fn model_preference(
+        &self,
+        instance: &str,
+        slug: &str,
+    ) -> Option<&t3code_desktop_gpui::drafts::ModelPreference> {
+        self.model_preferences()
+            .iter()
+            .find(|entry| entry.instance_id == instance && entry.model == slug)
+    }
+
+    pub(crate) fn toggle_model_preference(
+        &mut self,
+        instance: &str,
+        slug: &str,
+        favorite: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut preferences = self.model_preferences().to_vec();
+        let index = preferences
+            .iter()
+            .position(|entry| entry.instance_id == instance && entry.model == slug)
+            .unwrap_or_else(|| {
+                preferences.push(t3code_desktop_gpui::drafts::ModelPreference {
+                    instance_id: instance.into(),
+                    model: slug.into(),
+                    ..Default::default()
+                });
+                preferences.len() - 1
+            });
+        if favorite {
+            preferences[index].favorite = !preferences[index].favorite;
+        } else {
+            preferences[index].hidden = !preferences[index].hidden;
+        }
+        preferences.retain(|entry| entry.favorite || entry.hidden);
+        if let Some(store) = &mut self.draft_store {
+            store.set_model_preferences(&self.environment_scope, preferences);
+            self.schedule_draft_save(cx);
+        } else {
+            self.composer_state
+                .model_preferences
+                .insert(self.environment_scope.clone(), preferences);
+        }
+        self.composer_state.catalog_index = 0;
+        cx.notify();
+    }
+
+    /// The painted list and keyboard list share filtering and favorite ordering.
+    pub(crate) fn catalog_models<'a>(
+        &self,
+        provider: &'a t3code_desktop_gpui::providers::Provider,
+    ) -> Vec<(usize, &'a t3code_desktop_gpui::providers::Model)> {
+        let mut models: Vec<_> = provider
+            .models
+            .iter()
+            .enumerate()
+            .filter(|(_, model)| {
+                let preference = self.model_preference(&provider.instance_id, &model.slug);
+                (!preference.is_some_and(|entry| entry.hidden)
+                    || self.composer_state.catalog_show_hidden)
+                    && (!self.composer_state.catalog_favorites_only
+                        || preference.is_some_and(|entry| entry.favorite))
+                    && format!(
+                        "{} {} {} {}",
+                        provider.label(),
+                        provider.instance_id,
+                        model.name,
+                        model.slug
+                    )
+                    .to_lowercase()
+                    .contains(&self.composer_state.catalog_query)
+            })
+            .collect();
+        models.sort_by_key(|(_, model)| {
+            !self
+                .model_preference(&provider.instance_id, &model.slug)
+                .is_some_and(|entry| entry.favorite)
+        });
+        models
+    }
+
     pub(crate) fn catalog_rows(&self) -> Vec<(String, String)> {
-        let query = &self.composer_state.catalog_query;
         self.provider_catalog
             .iter()
             .filter(|provider| {
@@ -63,21 +158,9 @@ impl NativeApp {
                         .is_none_or(|id| id == &provider.instance_id)
             })
             .flat_map(|provider| {
-                provider
-                    .models
-                    .iter()
-                    .filter(|model| {
-                        format!(
-                            "{} {} {} {}",
-                            provider.label(),
-                            provider.instance_id,
-                            model.name,
-                            model.slug
-                        )
-                        .to_lowercase()
-                        .contains(query)
-                    })
-                    .map(|model| (provider.instance_id.clone(), model.slug.clone()))
+                self.catalog_models(provider)
+                    .into_iter()
+                    .map(|(_, model)| (provider.instance_id.clone(), model.slug.clone()))
             })
             .collect()
     }
@@ -173,6 +256,67 @@ impl NativeApp {
             })
             .cloned()
             .unwrap_or(selected))
+    }
+
+    pub(crate) fn choose_composer_trait(
+        &mut self,
+        id: &str,
+        value: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let descriptor = self
+            .selected_provider(cx)
+            .and_then(|p| {
+                p.models
+                    .iter()
+                    .find(|m| m.slug == self.model.read(cx).value().as_str())
+            })
+            .and_then(|m| m.capabilities["optionDescriptors"].as_array())
+            .and_then(|options| options.iter().find(|o| o["id"] == id));
+        let injected = descriptor
+            .and_then(|d| d["promptInjectedValues"].as_array())
+            .is_some_and(|values| values.contains(&value));
+        let prompt = self.composer.read(cx).value().to_string();
+        if injected {
+            if value != "ultrathink" {
+                self.report_error(
+                    "This prompt-injected trait is not supported by the native composer",
+                    cx,
+                );
+                return;
+            }
+            let stripped = prompt.trim_start();
+            let next = if stripped.to_lowercase().starts_with("ultrathink:") {
+                prompt
+            } else {
+                format!("Ultrathink:\n{prompt}")
+            };
+            self.composer.update(cx, |input, cx| {
+                input.set_value(crate::composer_state::prompt_content(&next), window, cx)
+            });
+            self.remember_composer_draft(cx);
+        } else {
+            let supported = descriptor.is_some_and(|d| {
+                (d["type"] == "boolean" && value.is_boolean())
+                    || d["options"]
+                        .as_array()
+                        .is_some_and(|choices| choices.iter().any(|c| c["id"] == value))
+            });
+            if !supported {
+                self.choose_model_option(id, value, cx);
+                return;
+            }
+            if id == "effort" && prompt.to_lowercase().starts_with("ultrathink:") {
+                let next = prompt[11..].trim_start().to_owned();
+                self.composer.update(cx, |input, cx| {
+                    input.set_value(crate::composer_state::prompt_content(&next), window, cx)
+                });
+                self.remember_composer_draft(cx);
+            }
+            self.choose_model_option(id, value, cx);
+        }
+        cx.notify();
     }
 
     pub(crate) fn choose_model_option(&mut self, id: &str, value: Value, cx: &mut Context<Self>) {
@@ -400,7 +544,10 @@ impl NativeApp {
         if let Some(state) = &self.auth_state
             && let Some(previous) = state["instanceId"].as_str()
         {
-            self.enqueue_subscription(t3code_desktop_gpui::connection::Command::Unsubscribe(format!("auth:{previous}")), cx);
+            self.enqueue_subscription(
+                t3code_desktop_gpui::connection::Command::Unsubscribe(format!("auth:{previous}")),
+                cx,
+            );
         }
         self.auth_state = None;
         self.perform(

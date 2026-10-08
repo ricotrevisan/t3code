@@ -1,7 +1,7 @@
 use super::*;
 
 fn rpc(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     expected: &str,
 ) -> (Value, async_channel::Sender<Result<Value, String>>) {
     let connection::Command::Call {

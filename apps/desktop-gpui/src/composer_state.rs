@@ -18,12 +18,37 @@ pub(crate) fn prompt_content(text: &str) -> InputContent {
             let token = InlineToken::new(format!("skill:{name}"), text[range.clone()].to_owned());
             (range, token)
         });
-    for (range, token) in files.chain(skills).take(200) {
+    let contexts = context_tokens(text);
+    for (range, token) in files.chain(skills).chain(contexts).take(200) {
         if let Ok(next) = content.clone().with_token(range, token) {
             content = next;
         }
     }
     content
+}
+/// Canonical source is the clipboard/undo representation; Kit owns atomic caret editing.
+fn context_tokens(text: &str) -> Vec<(std::ops::Range<usize>, InlineToken)> {
+    let mut tokens = Vec::new();
+    for (start, _) in text.match_indices('[') {
+        let Some(relative) = text[start..].find("](t3-context://v1/") else {
+            continue;
+        };
+        if text[start + 1..start + relative].contains('[') {
+            continue;
+        }
+        let href_start = start + relative + 2;
+        let Some(end) = text[href_start..].find(')') else {
+            continue;
+        };
+        let end = href_start + end + 1;
+        let href = &text[href_start..end - 1];
+        tokens.push((
+            start..end,
+            InlineToken::new(href.to_owned(), text[start..end].to_owned())
+                .with_label(text[start + 1..start + relative].to_owned()),
+        ));
+    }
+    tokens
 }
 use gpui_kit::{Entity, Subscription, Task};
 
@@ -34,6 +59,11 @@ pub(crate) struct ComposerState {
     pub(crate) catalog_index: usize,
     pub(crate) catalog_query: String,
     pub(crate) catalog_provider: Option<String>,
+    pub(crate) catalog_favorites_only: bool,
+    pub(crate) catalog_show_hidden: bool,
+    pub(crate) model_preferences:
+        std::collections::HashMap<String, Vec<t3code_desktop_gpui::drafts::ModelPreference>>,
+    pub(crate) show_skills_in_slash_menu: Option<bool>,
     pub(crate) catalog_scroll: gpui_kit::ScrollHandle,
     pub(crate) catalog_anchor: Option<gpui_kit::ScrollAnchor>,
     pub(crate) stash_picker: bool,
@@ -48,10 +78,17 @@ pub(crate) struct ComposerState {
     pub(crate) command_task: Option<Task<()>>,
     pub(crate) command_loading: bool,
     pub(crate) command_error: Option<String>,
+    pub(crate) preview_loading: std::collections::HashSet<(String, String)>,
+    pub(crate) preview_errors: std::collections::HashSet<(String, String)>,
+    pub(crate) expanded_preview: Option<(String, String)>,
     pub(crate) previews:
         std::collections::HashMap<(String, String), std::sync::Arc<gpui_kit::Image>>,
     retired_previews: std::cell::RefCell<Vec<std::sync::Arc<gpui_kit::Image>>>,
     pub(crate) pending_paste: Option<(crate::app::attachments::AttachmentScope, String)>,
+    pub(crate) contexts: std::collections::HashMap<
+        (String, String),
+        Vec<t3code_desktop_gpui::draft_context::DraftContextRecord>,
+    >,
 }
 
 impl ComposerState {

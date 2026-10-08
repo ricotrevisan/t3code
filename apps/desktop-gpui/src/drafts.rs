@@ -13,7 +13,20 @@ struct EnvironmentDrafts {
     drafts: BTreeMap<String, String>,
     #[serde(default)]
     resources: BTreeMap<String, Vec<serde_json::Value>>,
+    #[serde(default)]
+    contexts: BTreeMap<String, Vec<crate::draft_context::DraftContextRecord>>,
     stash: Vec<StashEntry>,
+    #[serde(default)]
+    model_preferences: Vec<ModelPreference>,
+}
+
+/// Device-local preferences are scoped to environment and exact provider instance.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelPreference {
+    pub instance_id: String,
+    pub model: String,
+    pub favorite: bool,
+    pub hidden: bool,
 }
 
 /// A stash owns its uploaded references; these never remain on the cleared draft.
@@ -115,6 +128,8 @@ struct Document {
     version: u8,
     #[serde(default)]
     send_shortcut: SendShortcut,
+    #[serde(default)]
+    show_skills_in_slash_menu: Option<bool>,
     environments: BTreeMap<String, EnvironmentDrafts>,
 }
 
@@ -151,6 +166,7 @@ impl Drafts {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Document {
                 version: 2,
                 send_shortcut: Default::default(),
+                show_skills_in_slash_menu: None,
                 environments: Default::default(),
             },
             Err(error) => return Err(error),
@@ -163,11 +179,35 @@ impl Drafts {
         })
     }
 
+    pub fn show_skills_in_slash_menu(&self) -> bool {
+        self.document.show_skills_in_slash_menu.unwrap_or(true)
+    }
+    pub fn set_show_skills_in_slash_menu(&mut self, show: bool) {
+        self.document.show_skills_in_slash_menu = Some(show);
+        self.revision += 1;
+    }
+
     pub fn send_shortcut(&self) -> SendShortcut {
         self.document.send_shortcut
     }
     pub fn set_send_shortcut(&mut self, shortcut: SendShortcut) {
         self.document.send_shortcut = shortcut;
+        self.revision += 1;
+    }
+
+    pub fn model_preferences(&self, environment: &str) -> &[ModelPreference] {
+        self.document
+            .environments
+            .get(environment)
+            .map(|state| state.model_preferences.as_slice())
+            .unwrap_or_default()
+    }
+    pub fn set_model_preferences(&mut self, environment: &str, preferences: Vec<ModelPreference>) {
+        self.document
+            .environments
+            .entry(environment.into())
+            .or_default()
+            .model_preferences = preferences;
         self.revision += 1;
     }
 
@@ -233,12 +273,49 @@ impl Drafts {
             .stash
             .push(record);
     }
+    pub fn update_stash(&mut self, environment: &str, record: StashEntry) {
+        if let Some(entry) = self
+            .document
+            .environments
+            .get_mut(environment)
+            .and_then(|state| state.stash.iter_mut().find(|entry| entry.id == record.id))
+        {
+            *entry = record;
+            self.revision += 1;
+        }
+    }
     pub fn stashes(&self, environment: &str) -> &[StashEntry] {
         self.document
             .environments
             .get(environment)
             .map(|e| e.stash.as_slice())
             .unwrap_or_default()
+    }
+    pub fn contexts(
+        &self,
+        environment: &str,
+        thread: &str,
+    ) -> Vec<crate::draft_context::DraftContextRecord> {
+        self.document
+            .environments
+            .get(environment)
+            .and_then(|s| s.contexts.get(thread))
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub fn set_contexts(
+        &mut self,
+        environment: &str,
+        thread: &str,
+        records: Vec<crate::draft_context::DraftContextRecord>,
+    ) {
+        self.document
+            .environments
+            .entry(environment.into())
+            .or_default()
+            .contexts
+            .insert(thread.into(), records);
+        self.revision += 1;
     }
     pub fn resources(&self, environment: &str, thread: &str) -> Vec<serde_json::Value> {
         self.document
@@ -273,6 +350,18 @@ impl Drafts {
     ) -> Option<StashEntry> {
         let record = self.take_stash(environment, id)?;
         self.set(environment, thread, record.prompt.clone());
+        let records = record
+            .context
+            .as_ref()
+            .and_then(|v| v["records"].as_array())
+            .map(|records| {
+                records
+                    .iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.set_contexts(environment, thread, records);
         self.document
             .environments
             .get_mut(environment)?
@@ -354,6 +443,35 @@ pub fn default_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r13_c_context_draft_stash_restart_preserves_ids_and_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let record = crate::draft_context::DraftContextRecord::terminal(
+            "Build", "t", "Build", 1, 2, "captured",
+        )
+        .unwrap();
+        let mut store = Drafts::open(path.clone()).unwrap();
+        store.set("a", "thread", record.reference());
+        store.set_contexts("a", "thread", vec![record.clone()]);
+        let mut stash = StashEntry::new(record.reference(), vec![]);
+        stash.context =
+            crate::draft_context::message_context(&stash.prompt, std::slice::from_ref(&record))
+                .unwrap()
+                .1;
+        let id = stash.id.clone();
+        store.stash_record("a", stash);
+        store.write_snapshot().unwrap().persist().unwrap();
+        let mut restarted = Drafts::open(path.clone()).unwrap();
+        assert_eq!(restarted.contexts("a", "thread"), vec![record.clone()]);
+        assert!(restarted.contexts("b", "thread").is_empty());
+        restarted.restore_record("a", "restored", &id).unwrap();
+        restarted.write_snapshot().unwrap().persist().unwrap();
+        let restarted = Drafts::open(path).unwrap();
+        assert_eq!(restarted.contexts("a", "restored"), vec![record]);
+        assert!(restarted.stashes("a").is_empty());
+    }
+
     #[test]
     fn pending_thread_checkout_recipe_survives_restart_and_is_environment_scoped() {
         let dir = tempfile::tempdir().unwrap();
@@ -438,6 +556,55 @@ mod tests {
         assert_eq!(restored.unstash("local").unwrap(), "世界");
         assert_eq!(restored.unstash("local").unwrap(), "old one");
         assert_eq!(restored.document.version, 2);
+    }
+
+    #[test]
+    fn r13_c_model_preferences_survive_restart_and_isolate_instances_and_environments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let mut store = Drafts::open(path.clone()).unwrap();
+        let preferences = vec![
+            ModelPreference {
+                instance_id: "work".into(),
+                model: "shared".into(),
+                favorite: true,
+                hidden: false,
+            },
+            ModelPreference {
+                instance_id: "personal".into(),
+                model: "shared".into(),
+                favorite: false,
+                hidden: true,
+            },
+        ];
+        store.set_model_preferences("office", preferences.clone());
+        store.write_snapshot().unwrap().persist().unwrap();
+        let mut restored = Drafts::open(path.clone()).unwrap();
+        assert_eq!(restored.model_preferences("office"), preferences);
+        assert!(restored.model_preferences("lab").is_empty());
+        restored.set_model_preferences("office", Vec::new());
+        restored.write_snapshot().unwrap().persist().unwrap();
+        assert!(
+            Drafts::open(path)
+                .unwrap()
+                .model_preferences("office")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn r13_c_optional_slash_skills_default_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let mut store = Drafts::open(path.clone()).unwrap();
+        assert!(store.show_skills_in_slash_menu());
+        store.set_show_skills_in_slash_menu(false);
+        store.write_snapshot().unwrap().persist().unwrap();
+        let mut restored = Drafts::open(path.clone()).unwrap();
+        assert!(!restored.show_skills_in_slash_menu());
+        restored.set_show_skills_in_slash_menu(true);
+        restored.write_snapshot().unwrap().persist().unwrap();
+        assert!(Drafts::open(path).unwrap().show_skills_in_slash_menu());
     }
 
     #[test]

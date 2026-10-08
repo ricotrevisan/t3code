@@ -73,6 +73,11 @@ pub struct Thread {
     // Shell-level live state, unset on older servers.
     #[serde(default)]
     pub session: Option<Session>,
+    /// Captured at the shell wire boundary, including status-edge timestamps.
+    /// Kept separate from Session so existing client-created session fixtures
+    /// cannot fabricate a fresh error merely by setting its status.
+    #[serde(default)]
+    pub session_updated_at: Option<String>,
     #[serde(default)]
     pub latest_turn: Option<LatestTurn>,
     #[serde(default)]
@@ -98,7 +103,29 @@ pub struct Thread {
 pub struct Snapshot {
     pub snapshot_sequence: u64,
     pub projects: Vec<Project>,
+    #[serde(deserialize_with = "decode_threads")]
     pub threads: Vec<Thread>,
+}
+
+fn decode_thread_value(value: serde_json::Value) -> Result<Thread, serde_json::Error> {
+    let updated_at = value["session"]["updatedAt"].as_str().map(str::to_owned);
+    let mut thread: Thread = serde_json::from_value(value)?;
+    thread.session_updated_at = updated_at;
+    Ok(thread)
+}
+
+fn decode_thread<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Thread, D::Error> {
+    decode_thread_value(serde_json::Value::deserialize(deserializer)?)
+        .map_err(serde::de::Error::custom)
+}
+
+fn decode_threads<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Thread>, D::Error> {
+    Vec::<serde_json::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| decode_thread_value(value).map_err(serde::de::Error::custom))
+        .collect()
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -122,6 +149,7 @@ pub enum ShellItem {
     },
     ThreadUpserted {
         sequence: u64,
+        #[serde(deserialize_with = "decode_thread")]
         thread: Thread,
     },
     ThreadRemoved {

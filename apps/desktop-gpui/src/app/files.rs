@@ -41,6 +41,7 @@ impl NativeApp {
         self.header_rename = Default::default();
         self.editor_choice.open = false;
         self.git_header.open = false;
+        self.git_header.status = None;
         self.git_header.epoch = self.git_header.epoch.wrapping_add(1);
         self.diffs.invalidate();
         self.file_listing_epoch += 1;
@@ -196,7 +197,10 @@ impl NativeApp {
                     Ok(value) => match serde_json::from_value::<files::ContentResults>(value) {
                         Ok(results) => {
                             if let Some(error) = results.regex_fallback_error.clone() {
-                                app.report_error(format!("Regex failed; showing literal matches: {error}"), cx);
+                                app.report_error(
+                                    format!("Regex failed; showing literal matches: {error}"),
+                                    cx,
+                                );
                             } else {
                                 app.set_status("Workspace content results loaded", cx);
                             };
@@ -423,6 +427,16 @@ impl NativeApp {
         let Some(editor) = self.preferred_editor() else {
             return;
         };
+        if self.is_remote_editor_checkout() {
+            if let Some(host) = self.remote_editor_host()
+                && let Some(link) = super::git_editors::remote_editor_url(&editor, host, &cwd)
+            {
+                cx.open_url(&link);
+            } else {
+                self.report_error("This editor cannot open remote checkouts", cx);
+            }
+            return;
+        }
         self.perform(
             "shell.openInEditor",
             json!({"cwd": cwd, "editor": editor}),

@@ -8,6 +8,28 @@ pub(crate) struct HeaderRename {
     subscription: Option<Subscription>,
 }
 impl NativeApp {
+    pub(crate) fn open_header_project_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self
+            .shell
+            .projects
+            .iter()
+            .find(|p| Some(&p.id) == self.selected_project.as_ref())
+            .cloned()
+        else {
+            return;
+        };
+        self.close_thread_menu();
+        self.sidebar_state.rename_target = None;
+        self.sidebar_state.project_settings_target =
+            Some((self.environment_scope.clone(), project.id));
+        self.sidebar_rename
+            .update(cx, |input, cx| input.set_value(project.title, window, cx));
+        cx.notify();
+    }
     pub(crate) fn begin_header_rename(
         &mut self,
         original: String,

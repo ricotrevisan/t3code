@@ -1,5 +1,8 @@
 //! Exact-file capability images. Downloads do not carry OAuth credentials to a browser.
+#[path = "r13_d_file_preview.rs"]
+mod file_preview;
 use crate::NativeApp;
+pub(crate) use file_preview::TextPreview;
 use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
@@ -160,13 +163,20 @@ impl NativeApp {
         let thread = self.selected_thread.as_deref().unwrap_or("");
         let mut items = Vec::new();
         for row in self.conversation_rows.iter() {
-            let t3code_desktop_gpui::conversation::TimelineEntry::Message { message, .. } =
-                &row.entry
-            else {
-                continue;
+            let (text, attachments) = match &row.entry {
+                t3code_desktop_gpui::conversation::TimelineEntry::Message { message, .. } => (
+                    message["text"].as_str().unwrap_or(""),
+                    message["attachments"]
+                        .as_array()
+                        .map_or(&[][..], Vec::as_slice),
+                ),
+                t3code_desktop_gpui::conversation::TimelineEntry::Plan(plan) => {
+                    (plan["planMarkdown"].as_str().unwrap_or(""), &[][..])
+                }
+                _ => continue,
             };
             let mut group = Vec::new();
-            for attachment in message["attachments"].as_array().into_iter().flatten() {
+            for attachment in attachments {
                 let Some(id) = attachment["id"].as_str() else {
                     continue;
                 };
@@ -183,11 +193,7 @@ impl NativeApp {
                     mime.to_owned(),
                 ));
             }
-            for (_, path) in crate::conversation_presentation::workspace_markdown_images(
-                message["text"].as_str().unwrap_or(""),
-            )
-            .1
-            {
+            for (_, path) in crate::conversation_presentation::workspace_markdown_images(text).1 {
                 let mime = match path
                     .rsplit('.')
                     .next()

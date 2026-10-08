@@ -27,10 +27,17 @@ fn ready(
                 .unwrap();
             app.notification_tracker.baseline(app.shell.threads.iter());
             app.window_active = focused;
+            if mode.desktop() && mode != app.notification_preferences.mode {
+                app.notification_platform
+                    .queue_authorization()
+                    .try_send(t3code_desktop_gpui::notification_platform::Authorization::Authorized)
+                    .unwrap();
+            }
             app.set_notification_preferences(notifications::Preferences { mode, in_app }, cx);
-            app.notification_platform.calls.clear();
         })
     });
+    cx.run_until_parked();
+    cx.update(|_, cx| app.update(cx, |app, _| app.notification_platform.calls.clear()));
 }
 
 #[gpui_kit::test]

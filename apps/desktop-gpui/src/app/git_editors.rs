@@ -4,6 +4,54 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{Context, div, prelude::*};
+/// Mirrors contracts/editor.ts buildRemoteOpenUrl; encode segments, not slashes.
+pub(crate) fn remote_editor_url(editor: &str, host: &str, path: &str) -> Option<String> {
+    let scheme = match editor {
+        "zed" => "zed",
+        "vscode" => "vscode",
+        "cursor" => "cursor",
+        "vscode-insiders" => "vscode-insiders",
+        "vscodium" => "vscodium",
+        _ => return None,
+    };
+    if host.trim().is_empty() || path.trim().is_empty() {
+        return None;
+    }
+    let windows_c = path.as_bytes().get(1) == Some(&b':')
+        && matches!(path.as_bytes().first(), Some(b'C' | b'c'))
+        && matches!(path.as_bytes().get(2), Some(b'/' | b'\\'));
+    let mut path = path.replace('\\', "/");
+    if !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    if editor == "zed" && windows_c {
+        path = path[3..].to_owned();
+    }
+    let encoded_path = path
+        .split('/')
+        .map(encode_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    let host = encode_segment(host);
+    Some(if editor == "zed" {
+        format!("{scheme}://ssh/{host}{encoded_path}")
+    } else {
+        format!("{scheme}://vscode-remote/ssh-remote+{host}{encoded_path}")
+    })
+}
+fn encode_segment(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(b) {
+                char::from(*b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
 #[derive(Default)]
 pub(crate) struct EditorChoice {
     pub open: bool,
@@ -25,8 +73,53 @@ impl EditorChoice {
     }
 }
 impl NativeApp {
+    pub(crate) fn open_diff_editor(&mut self, cx: &mut Context<Self>) {
+        if !self.connection_ready() {
+            return;
+        }
+        let (Some(file), Some(cwd), Some(editor)) = (
+            self.diffs.files.get(self.diffs.selected_file),
+            self.selected_workspace(),
+            self.preferred_editor(),
+        ) else {
+            return;
+        };
+        if file.path.starts_with('/') || file.path.split(['/', '\\']).any(|part| part == "..") {
+            self.report_error("Diff path is outside the selected checkout", cx);
+            return;
+        }
+        let path = format!("{}/{}", cwd.trim_end_matches(['/', '\\']), file.path);
+        if self.is_remote_editor_checkout() {
+            if let Some(host) = self.remote_editor_host()
+                && let Some(link) = remote_editor_url(&editor, host, &path)
+            {
+                cx.open_url(&link);
+            } else {
+                self.report_error("Remote SSH editor route is unavailable", cx);
+            }
+        } else if self.editor_unavailable_reason().is_none() {
+            self.perform(
+                "shell.openInEditor",
+                serde_json::json!({"cwd":path,"editor":editor}),
+                None,
+                cx,
+            );
+        }
+    }
     pub(crate) fn editor_unavailable_reason(&self) -> Option<&'static str> {
-        let remote = url::Url::parse(&self.environment_scope)
+        let remote = self.is_remote_editor_checkout();
+        if remote && self.remote_editor_host().is_none() {
+            Some(
+                "Remote environment has not advertised an SSH host. Server-side editor launch is disabled.",
+            )
+        } else if !remote && self.available_editors.is_empty() {
+            Some("No available editors or file managers reported by the server")
+        } else {
+            None
+        }
+    }
+    pub(crate) fn is_remote_editor_checkout(&self) -> bool {
+        url::Url::parse(&self.environment_scope)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
             .is_some_and(|host| {
@@ -35,33 +128,42 @@ impl NativeApp {
                         .parse::<std::net::IpAddr>()
                         .ok()
                         .is_none_or(|ip| !ip.is_loopback())
-            });
-        if remote {
-            Some(
-                "Remote checkout: local SSH editor routes are not supported yet. Opening on the server is disabled.",
-            )
-        } else if self.available_editors.is_empty() {
-            Some("No available editors or file managers reported by the server")
+            })
+    }
+    pub(crate) fn remote_editor_host(&self) -> Option<&str> {
+        self.server_config.config(self.generation)?["remoteOpenTargets"]
+            .as_array()?
+            .iter()
+            .find_map(|target| {
+                target["host"]
+                    .as_str()
+                    .filter(|host| !host.trim().is_empty())
+            })
+    }
+    pub(crate) fn effective_editors(&self) -> Vec<String> {
+        if self.is_remote_editor_checkout() {
+            vec!["vscode".into(), "zed".into()]
         } else {
-            None
+            self.available_editors.clone()
         }
     }
     pub(crate) fn preferred_editor(&self) -> Option<String> {
         self.editor_choice
             .preferred
             .as_ref()
-            .filter(|editor| self.available_editors.contains(editor))
+            .filter(|editor| self.effective_editors().contains(editor))
             .cloned()
             .or_else(|| {
-                self.available_editors
+                self.effective_editors()
                     .iter()
                     .find(|editor| editor.as_str() == "zed")
                     .cloned()
             })
-            .or_else(|| self.available_editors.first().cloned())
+            .or_else(|| self.effective_editors().first().cloned())
     }
     pub(crate) fn select_editor(&mut self, editor: String, cx: &mut Context<Self>) {
-        if !self.available_editors.contains(&editor) || self.editor_unavailable_reason().is_some() {
+        if !self.effective_editors().contains(&editor) || self.editor_unavailable_reason().is_some()
+        {
             return;
         }
         self.editor_choice.preferred = Some(editor.clone());
@@ -87,7 +189,8 @@ impl NativeApp {
             .when_some(reason, |view, reason| {
                 view.child(div().text_xs().child(reason))
             })
-            .children(self.available_editors.iter().map(|editor| {
+            .when(self.is_remote_editor_checkout() && reason.is_none(), |view| view.child(div().text_xs().child("Opens the editor on this Mac over SSH. Install its URL handler and configure SSH keys here.")))
+            .children(self.effective_editors().iter().map(|editor| {
                 let editor = editor.clone();
                 Button::new(gpui_kit::SharedString::from(format!("open-in-{editor}")))
                     .ghost()

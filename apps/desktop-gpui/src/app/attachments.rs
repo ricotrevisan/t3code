@@ -11,8 +11,11 @@ pub(crate) struct AttachmentDrafts {
     pub(crate) stashes: HashMap<String, Vec<t3code_desktop_gpui::drafts::StashEntry>>,
     pub(crate) stash_deleting: bool,
     pub(crate) stash_writing: bool,
+    pub(crate) transfers: Vec<AttachmentTransfer>,
+    pub(crate) missing_stash_resources: HashMap<(String, String), Vec<Value>>,
 }
 
+#[derive(Clone)]
 pub(crate) enum AttachmentInput {
     Path(std::path::PathBuf),
     Bytes {
@@ -20,6 +23,62 @@ pub(crate) enum AttachmentInput {
         bytes: Vec<u8>,
         source: Option<Value>,
     },
+}
+
+pub(crate) struct AttachmentTransfer {
+    pub(crate) id: String,
+    pub(crate) owner: (String, String),
+    pub(crate) name: String,
+    pub(crate) phase: &'static str,
+    pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) retry: Option<AttachmentInput>,
+}
+
+/// Expand a native folder drop without following symlinks. Reject the entire
+/// batch on limits: no silently truncated tree or unexpectedly partial upload.
+pub(crate) fn expand_paths(
+    paths: Vec<std::path::PathBuf>,
+    limit: usize,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut stack: Vec<_> = paths.into_iter().map(|p| (p, 0)).collect();
+    let mut files = Vec::new();
+    let mut entries = 0usize;
+    let mut total = 0u64;
+    while let Some((path, depth)) = stack.pop() {
+        entries += 1;
+        if entries > 2000 || depth > 16 {
+            return Err("Folder exceeds 2000 entries or 16 directory levels".into());
+        }
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| "Could not open attachment")?;
+        if metadata.file_type().is_symlink() {
+            return Err("Folder drops cannot contain symbolic links".into());
+        }
+        if metadata.is_dir() {
+            let children = std::fs::read_dir(path).map_err(|_| "Could not read dropped folder")?;
+            for child in children {
+                if stack.len() >= 2000 {
+                    return Err("Folder exceeds 2000 entries".into());
+                }
+                stack.push((
+                    child.map_err(|_| "Could not read folder entry")?.path(),
+                    depth + 1,
+                ));
+            }
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+            if total > 100 * 1024 * 1024 {
+                return Err("Folder drop exceeds 100 MiB total".into());
+            }
+            files.push(path);
+            if files.len() > limit {
+                return Err("You can attach up to 100 files per message".into());
+            }
+        } else {
+            return Err("Only regular files can be attached".into());
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 impl AttachmentInput {

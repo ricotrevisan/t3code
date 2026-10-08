@@ -432,7 +432,9 @@ type Subscriptions = HashMap<String, (String, Value)>;
 fn supported_subscription(tag: &str) -> bool {
     matches!(
         tag,
-        "subscribeProjectClones"
+        "subscribeVcsStatus"
+            | "subscribeTerminalMetadata"
+            | "subscribeProjectClones"
             | "subscribeServerConfig"
             | "subscribeWorktreeSetup"
             | "orchestration.subscribeThread"
@@ -1437,6 +1439,34 @@ mod subscription_tests {
         .await;
         assert!(rx.recv().await.unwrap().unwrap_err().contains("not sent"));
         assert!(subscriptions.is_empty());
+    }
+    #[tokio::test]
+    async fn r13_int_live_git_and_terminal_metadata_cross_transport_and_cancel() {
+        let (client, server) = tokio::io::duplex(16384);
+        let client = tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let (updates, rx) = async_channel::bounded(16);
+        let (commands, requests) = async_channel::bounded(16);
+        let task = tokio::spawn(async move { run_session(client, &updates, &requests).await });
+        assert_eq!(receive(&mut server).await["tag"], "orchestration.subscribeShell");
+        for (key, tag, payload, event) in [
+            ("header-vcs:test", "subscribeVcsStatus", json!({"cwd":"/tmp/fixture"}), json!({"_tag":"remoteUpdated","remote":null})),
+            ("drawer-metadata-test", "subscribeTerminalMetadata", json!({}), json!({"type":"snapshot","terminals":[]})),
+        ] {
+            commands.send(Command::Subscribe { key:key.into(), tag:tag.into(), payload:payload.clone() }).await.unwrap();
+            let request = receive(&mut server).await;
+            assert_eq!(request["tag"], tag);
+            assert_eq!(request["payload"], payload);
+            server.send(Message::Text(json!({"_tag":"Chunk","requestId":request["id"],"values":[event]}).to_string().into())).await.unwrap();
+            assert!(matches!(rx.recv().await.unwrap(), Update::Subscription { key: actual, item: Ok(value) } if actual == key && value == event));
+            assert_eq!(receive(&mut server).await["_tag"], "Ack");
+            commands.send(Command::Unsubscribe(key.into())).await.unwrap();
+            let interrupt = receive(&mut server).await;
+            assert_eq!(interrupt["_tag"], "Interrupt");
+            assert_eq!(interrupt["requestId"], request["id"]);
+        }
+        server.close(None).await.unwrap();
+        assert_eq!(task.await.unwrap(), Err("Server disconnected"));
     }
     #[tokio::test]
     async fn read_subscription_replacement_cancels_old_stream_and_rejects_mutation_tags() {

@@ -5,7 +5,7 @@ fn attachment_harness(
 ) -> (
     Entity<NativeApp>,
     &mut VisualTestContext,
-    async_channel::Receiver<connection::Command>,
+    Requests,
 ) {
     let (app, cx, requests) = harness(cx);
     cx.update(|_, cx| {
@@ -34,7 +34,7 @@ fn start_upload(app: &Entity<NativeApp>, cx: &mut VisualTestContext, path: std::
 }
 
 fn issue_upload(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     cx: &mut VisualTestContext,
 ) -> async_channel::Sender<Result<(), String>> {
     let connection::Command::Call {

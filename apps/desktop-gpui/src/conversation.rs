@@ -1315,7 +1315,14 @@ pub fn timeline_rows_counted(
         if let Some((label, TurnState::Running)) = summary {
             push!(format!("working:{key}"), TimelineEntry::Working(label));
         }
-        let prepared = interleave_turn_rows(rows.split_off(turn_start));
+        let mut prepared = interleave_turn_rows(rows.split_off(turn_start));
+        for row in &mut prepared {
+            if let TimelineEntry::Activity { expanded: open, .. } = &mut row.entry
+                && let Some(chosen) = expanded.get(&row.key)
+            {
+                *open = *chosen;
+            }
+        }
         rows.extend(prepared);
     }
     if let Some(approval) = thread["activities"]
@@ -1419,7 +1426,96 @@ pub fn timeline_tail_rows(
                 .collect(),
         );
     }
-    let mut prepared = timeline_rows(&tail, expanded);
+    finish_tail_rows(&tail, expanded, old, start)
+}
+
+/// Reuse a cached, isolated turn only when the projection adapter proved an
+/// existing final assistant-message update. The caller owns that proof.
+pub fn timeline_verified_message_rows(
+    thread: &Value,
+    tail: &mut Value,
+    start: usize,
+    expanded: &std::collections::HashMap<String, bool>,
+    old: &[TimelineRow],
+) -> Option<Vec<TimelineRow>> {
+    let last = thread["messages"].as_array()?.last()?;
+    let messages = tail["messages"].as_array_mut()?;
+    if messages.last()?["id"] != last["id"] || start >= old.len() {
+        return None;
+    }
+    *messages.last_mut()? = last.clone();
+    tail["latestTurn"] = thread["latestTurn"].clone();
+    for checkpoint in tail["checkpoints"].as_array_mut()? {
+        checkpoint["assistantMessageId"] = last["id"].clone();
+    }
+    finish_tail_rows(tail, expanded, old, start)
+}
+
+/// Cache construction belongs to full preparation, not each streaming frame.
+pub fn message_tail_template(thread: &Value, old: &[TimelineRow]) -> Option<(usize, Value)> {
+    let turn = thread["latestTurn"]["turnId"].as_str()?;
+    if thread["activities"]
+        .as_array()?
+        .iter()
+        .any(|item| item["turnId"].is_null())
+    {
+        return None;
+    }
+    let start = old.iter().position(
+        |row| matches!(&row.entry, TimelineEntry::Message {turn:Some(id),..} if id == turn),
+    )?;
+    let mut ids = std::collections::HashSet::new();
+    for (index, row) in old[start..].iter().enumerate() {
+        match &row.entry {
+            TimelineEntry::Message {
+                message,
+                turn: header,
+                ..
+            } => {
+                if header.as_ref().is_some_and(|id| id != turn)
+                    || message["turnId"].as_str().is_some_and(|id| id != turn)
+                    || (message["turnId"].is_null() && (index != 0 || message["role"] != "user"))
+                {
+                    return None;
+                }
+                ids.insert(message["id"].clone());
+            }
+            TimelineEntry::Activity { turn: owner, .. }
+            | TimelineEntry::Checkpoint { turn: owner, .. }
+                if owner != turn =>
+            {
+                return None;
+            }
+            TimelineEntry::Plan(plan) if plan["turnId"] != turn => return None,
+            TimelineEntry::Approval(_) | TimelineEntry::UserInput(_) | TimelineEntry::Error(_) => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    let mut tail = serde_json::json!({"id":thread["id"],"latestTurn":thread["latestTurn"],"session":thread["session"]});
+    for key in ["messages", "activities", "proposedPlans", "checkpoints"] {
+        tail[key] = Value::Array(
+            thread[key]
+                .as_array()?
+                .iter()
+                .filter(|item| {
+                    item["turnId"] == turn || (key == "messages" && ids.contains(&item["id"]))
+                })
+                .cloned()
+                .collect(),
+        );
+    }
+    Some((start, tail))
+}
+
+fn finish_tail_rows(
+    tail: &Value,
+    expanded: &std::collections::HashMap<String, bool>,
+    old: &[TimelineRow],
+    start: usize,
+) -> Option<Vec<TimelineRow>> {
+    let mut prepared = timeline_rows(tail, expanded);
     // Full preparation carries role continuity across turn boundaries; the
     // isolated tail starts with no previous role. Restore that boundary without
     // re-preparing any historical turn.
@@ -1963,6 +2059,40 @@ mod tests {
             last.messages.is_empty(),
             "a running turn shows even before any item"
         );
+    }
+
+    #[test]
+    fn r13_d_work_disclosures_have_group_identity_and_preserve_turn_defaults() {
+        let thread = json!({"messages":[
+            {"id":"u","role":"user","text":"go","createdAt":"2026-01-01T00:00:00Z"},
+            {"id":"a","role":"assistant","text":"progress","turnId":"t","createdAt":"2026-01-01T00:00:03Z"}],
+            "activities":[
+            {"id":"c1","turnId":"t","kind":"tool.completed","createdAt":"2026-01-01T00:00:01Z","payload":{"title":"bash","toolCallId":"c1"}},
+            {"id":"c2","turnId":"t","kind":"tool.completed","createdAt":"2026-01-01T00:00:04Z","payload":{"title":"bash","toolCallId":"c2"}}]});
+        let rows = timeline_rows(
+            &thread,
+            &[("t".into(), true), ("activity:t:c2".into(), false)].into(),
+        );
+        let groups: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row.entry {
+                TimelineEntry::Activity { expanded, .. } => Some((row.key.as_str(), expanded)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups, [("activity:t", true), ("activity:t:c2", false)]);
+        let rows = timeline_rows(
+            &thread,
+            &[("activity:t".into(), false), ("activity:t:c2".into(), true)].into(),
+        );
+        let groups: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row.entry {
+                TimelineEntry::Activity { expanded, .. } => Some((row.key.as_str(), expanded)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups, [("activity:t", false), ("activity:t:c2", true)]);
     }
 
     #[test]

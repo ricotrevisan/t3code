@@ -10,6 +10,8 @@ use t3code_desktop_gpui::{
 
 mod input;
 pub(crate) mod keys;
+mod names;
+mod operations;
 mod view;
 
 pub(crate) struct Tab {
@@ -19,6 +21,8 @@ pub(crate) struct Tab {
     pub thread: String,
     pub cwd: String,
     pub title: String,
+    pub custom_title: bool,
+    pub launch: Value,
     pub screen: Screen,
     pub exists: bool,
     pub busy: bool,
@@ -36,7 +40,10 @@ impl Tab {
         json!({"threadId":self.thread,"terminalId":self.id})
     }
     fn event(&mut self, value: Value) {
-        let snapshot = matches!(value["type"].as_str(), Some("snapshot" | "restarted"));
+        let snapshot = matches!(
+            value["type"].as_str(),
+            Some("snapshot" | "restarted" | "started")
+        );
         let body = if snapshot { &value["snapshot"] } else { &value };
         if snapshot
             && (body["threadId"].as_str().is_none()
@@ -63,6 +70,21 @@ impl Tab {
         if snapshot {
             self.screen
                 .reset(body["history"].as_str().unwrap_or_default());
+            if let Some(cwd) = body["cwd"].as_str() {
+                self.cwd = cwd.into();
+                self.launch["cwd"] = cwd.into();
+            }
+            if body
+                .as_object()
+                .is_some_and(|body| body.contains_key("worktreePath"))
+            {
+                self.launch["worktreePath"] = body["worktreePath"].clone();
+            }
+            if !self.custom_title
+                && let Some(label) = body["label"].as_str().filter(|label| !label.is_empty())
+            {
+                self.title = label.chars().take(128).collect();
+            }
             self.status = body["status"].as_str().unwrap_or("unknown").into();
             self.exists = true;
             self.running = (self.status == "exited").then_some(false);
@@ -97,6 +119,15 @@ pub(crate) struct Drawer {
     pub rename: Entity<InputState>,
     pub renaming: Option<String>,
     pub confirm: Option<String>,
+    pub restart_confirm: Option<String>,
+    pub search: Entity<InputState>,
+    pub searching: bool,
+    pub search_result: Option<(String, String, i32, usize)>,
+    pub search_missing: bool,
+    names: names::Names,
+    pub local_error: Option<String>,
+    metadata: Option<(String, String, u64)>,
+    pending_open: Option<(String, String, u64)>,
     pub height: f32,
     composition: Option<input::Composition>,
     pub drag: Option<(f32, f32)>,
@@ -106,6 +137,19 @@ pub(crate) struct Drawer {
 }
 impl Drawer {
     pub fn new(window: &mut Window, cx: &mut Context<NativeApp>) -> Self {
+        let (names, local_error) = if cfg!(test) {
+            (names::Names::default(), None)
+        } else {
+            match names::Names::load(
+                t3code_desktop_gpui::drafts::default_path().with_file_name("terminal-names.json"),
+            ) {
+                Ok(names) => (names, None),
+                Err(error) => (
+                    names::Names::unavailable(),
+                    Some(format!("Terminal names cannot be read: {error}")),
+                ),
+            }
+        };
         Self {
             open: false,
             tabs: Vec::new(),
@@ -114,6 +158,15 @@ impl Drawer {
             rename: cx.new(|cx| crate::single_line_input(window, cx)),
             renaming: None,
             confirm: None,
+            restart_confirm: None,
+            search: cx.new(|cx| crate::single_line_input(window, cx)),
+            searching: false,
+            search_result: None,
+            search_missing: false,
+            names,
+            local_error,
+            metadata: None,
+            pending_open: None,
             height: crate::window_state::TERMINAL_HEIGHT.1,
             composition: None,
             drag: None,
@@ -138,8 +191,10 @@ impl NativeApp {
                 .map(|tab| tab.id.clone());
             if let Some(id) = id {
                 self.terminal_drawer.active = Some(id);
-            } else {
-                self.new_terminal(cx);
+            } else if let Some(thread) = self.selected_thread.clone() {
+                self.terminal_drawer.pending_open =
+                    Some((self.environment_scope.clone(), thread, self.generation));
+                self.terminal_discover(cx);
             }
             self.terminal_drawer.focus.focus(window, cx);
         } else {
@@ -149,6 +204,7 @@ impl NativeApp {
         cx.notify();
     }
     pub(crate) fn new_terminal(&mut self, cx: &mut Context<Self>) {
+        self.terminal_drawer.pending_open = None;
         if !self.shell.synchronized || !self.connection_phase.ready() || self.commands.is_none() {
             self.set_status(
                 "Terminal unavailable while disconnected or synchronizing",
@@ -201,6 +257,8 @@ impl NativeApp {
             thread: thread.id.clone(),
             cwd,
             title: "Terminal".into(),
+            custom_title: false,
+            launch: payload.clone(),
             screen: Screen::new(Size::new(80, 12)),
             exists: false,
             busy: true,
@@ -261,6 +319,9 @@ impl NativeApp {
         item: Result<Value, String>,
         cx: &mut Context<Self>,
     ) {
+        if self.terminal_metadata_update(stream, &item, cx) {
+            return;
+        }
         let Some(tab) = self.terminal_drawer.tabs.iter_mut().find(|tab| {
             tab.stream == stream
                 && tab.scope == self.environment_scope
@@ -285,8 +346,9 @@ impl NativeApp {
             }
         }
         let id = tab.id.clone();
+        let current_thread = Some(&tab.thread) == self.selected_thread.as_ref();
         let replies = tab.screen.take_replies();
-        for reply in replies {
+        for reply in replies.into_iter().filter(|_| current_thread) {
             self.terminal_rpc(&id, "terminal.write", json!({"data":reply}), cx);
         }
         cx.notify();
@@ -361,23 +423,33 @@ impl NativeApp {
         extra: Value,
         cx: &mut Context<Self>,
     ) {
+        self.terminal_enqueue(id, tag, extra, cx);
+    }
+    pub(super) fn terminal_enqueue(
+        &mut self,
+        id: &str,
+        tag: &'static str,
+        extra: Value,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(sender) = &self.commands else {
-            return;
+            return false;
         };
         if !self.shell.synchronized || !self.connection_phase.ready() {
-            return;
+            return false;
         }
         let Some(tab) = self.terminal_drawer.tabs.iter_mut().find(|tab| {
             tab.id == id
                 && tab.scope == self.environment_scope
+                && Some(&tab.thread) == self.selected_thread.as_ref()
                 && !tab.busy
                 && tab.exists
                 && tab.attached == Some(self.generation)
         }) else {
-            return;
+            return false;
         };
         if tag == "terminal.write" && !tab.stream_ready {
-            return;
+            return false;
         }
         let mut payload = tab.session();
         for (key, value) in extra.as_object().unwrap() {
@@ -392,16 +464,23 @@ impl NativeApp {
         }) {
             tab.error = Some(format!("Terminal input not sent: {error}"));
             cx.notify();
-            return;
+            return false;
         }
-        if tag == "terminal.close" {
+        if matches!(
+            tag,
+            "terminal.close" | "terminal.restart" | "terminal.clear"
+        ) {
             tab.busy = true;
             tab.epoch += 1;
         }
         let id = id.to_owned();
+        let thread = tab.thread.clone();
         let generation = self.generation;
         let scope = self.environment_scope.clone();
         let epoch = tab.epoch;
+        if matches!(tag, "terminal.close" | "terminal.restart") {
+            self.terminal_drawer.composition = None;
+        }
         let sender = sender.clone();
         cx.spawn(async move |entity, cx| {
             let result = receipt
@@ -413,18 +492,24 @@ impl NativeApp {
                     if app.generation != generation || app.environment_scope != scope {
                         return None;
                     }
-                    let tab = app
-                        .terminal_drawer
-                        .tabs
-                        .iter_mut()
-                        .find(|tab| tab.id == id && tab.epoch == epoch)?;
+                    let tab = app.terminal_drawer.tabs.iter_mut().find(|tab| {
+                        tab.id == id
+                            && tab.scope == scope
+                            && tab.thread == thread
+                            && tab.epoch == epoch
+                    })?;
                     tab.busy = false;
                     match result {
                         Ok(_) if tag == "terminal.close" => {
                             let stream = tab.stream.clone();
-                            app.terminal_drawer.tabs.retain(|tab| tab.id != id);
+                            app.terminal_drawer.tabs.retain(|tab| {
+                                !(tab.id == id && tab.scope == scope && tab.thread == thread)
+                            });
                             cx.notify();
                             return Some(stream);
+                        }
+                        Ok(snapshot) if tag == "terminal.restart" => {
+                            tab.event(json!({"type":"restarted","snapshot":snapshot}));
                         }
                         Ok(_) => {}
                         Err(error) => tab.error = Some(error),
@@ -439,18 +524,25 @@ impl NativeApp {
             }
         })
         .detach();
+        true
     }
     pub(crate) fn terminal_close(&mut self, id: &str, confirmed: bool, cx: &mut Context<Self>) {
-        let Some(tab) = self
-            .terminal_drawer
-            .tabs
-            .iter()
-            .find(|tab| tab.id == id && tab.scope == self.environment_scope)
-        else {
+        let Some(tab) = self.terminal_drawer.tabs.iter().find(|tab| {
+            tab.id == id
+                && tab.scope == self.environment_scope
+                && Some(&tab.thread) == self.selected_thread.as_ref()
+        }) else {
             return;
         };
         if !tab.exists && !tab.busy {
-            self.terminal_drawer.tabs.retain(|tab| tab.id != id);
+            if let Some(sender) = &self.commands {
+                let _ = sender.try_send(connection::Command::Unsubscribe(tab.stream.clone()));
+            }
+            self.terminal_drawer.tabs.retain(|tab| {
+                !(tab.id == id
+                    && tab.scope == self.environment_scope
+                    && Some(&tab.thread) == self.selected_thread.as_ref())
+            });
             cx.notify();
             return;
         }
@@ -466,12 +558,11 @@ impl NativeApp {
         if !self.shell.synchronized || !self.connection_phase.ready() {
             return;
         }
-        let Some(tab) = self
-            .terminal_drawer
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == id)
-        else {
+        let Some(tab) = self.terminal_drawer.tabs.iter_mut().find(|tab| {
+            tab.id == id
+                && tab.scope == self.environment_scope
+                && Some(&tab.thread) == self.selected_thread.as_ref()
+        }) else {
             return;
         };
         if tab.screen.size == size || tab.busy || tab.attached != Some(self.generation) {

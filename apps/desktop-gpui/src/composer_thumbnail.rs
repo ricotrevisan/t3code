@@ -14,7 +14,9 @@ pub(crate) fn thumbnail(bytes: &[u8]) -> Option<std::sync::Arc<gpui_kit::Image>>
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
     // ImageReader::decode uses the still-image decoder (first frame for GIF/WebP).
-    let decoded = reader.decode().ok()?.thumbnail(256, 256);
+    let decoded = reader.decode().ok()?;
+    // Expanded previews have a larger cap, but small originals must not be upscaled.
+    let decoded = decoded.thumbnail(decoded.width().min(1024), decoded.height().min(1024));
     let mut encoded = Cursor::new(Vec::new());
     decoded
         .write_to(&mut encoded, image::ImageFormat::Png)

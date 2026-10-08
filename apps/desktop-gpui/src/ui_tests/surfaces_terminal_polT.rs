@@ -3,7 +3,7 @@ use super::*;
 use gpui_kit::{EntityInputHandler, MouseMoveEvent};
 
 fn receipt(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     expected: &str,
 ) -> (Value, async_channel::Sender<Result<Value, String>>) {
     let connection::Command::Call {
@@ -23,7 +23,7 @@ fn ready(
 ) -> (
     Entity<NativeApp>,
     &mut VisualTestContext,
-    async_channel::Receiver<connection::Command>,
+    Requests,
 ) {
     let (app, cx, requests) = harness(cx);
     cx.update(|_, cx| {
@@ -36,6 +36,17 @@ fn ready(
         })
     });
     cx.simulate_keystrokes("cmd-j");
+    cx.run_until_parked();
+    let connection::Command::Subscribe { key, tag, payload } = requests.try_recv().unwrap() else {
+        panic!("initial discovery")
+    };
+    assert_eq!(tag, "subscribeTerminalMetadata");
+    assert_eq!(payload, json!({}));
+    cx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.terminal_update(&key, Ok(json!({"type":"snapshot","terminals":[]})), cx)
+        })
+    });
     cx.run_until_parked();
     let (payload, reply) = receipt(&requests, "terminal.open");
     let id = payload["terminalId"].as_str().unwrap().to_owned();

@@ -1,3 +1,18 @@
+#[path = "r13_d_citations.rs"]
+mod citations;
+#[path = "r13_d_navigator.rs"]
+pub(crate) mod navigator;
+#[path = "r13_d_context.rs"]
+mod received_context;
+#[path = "r13_d_shell.rs"]
+mod shell_fences;
+#[path = "r13_d_tables.rs"]
+mod tables;
+#[path = "r13_d_agents.rs"]
+mod timeline_agents;
+#[path = "r13_d_workspace_media.rs"]
+mod workspace_media;
+
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
@@ -214,9 +229,16 @@ impl NativeApp {
                         detail["id"].as_str().unwrap_or(""),
                         &self.activity_expanded,
                     ) && !self.conversation_presentation.same_projection(Some(detail))
-                        && self.conversation_presentation.tail_matches(detail, turn)
+                        && (self
+                            .conversation_presentation
+                            .verified_tail(&self.detail, turn)
+                            || self.conversation_presentation.tail_matches(detail, turn))
                 })
                 .map(|(_, turn)| turn.clone());
+            let sealed_message_update = incremental.as_ref().is_some_and(|turn| {
+                self.conversation_presentation
+                    .verified_tail(&self.detail, turn)
+            });
             if self.conversation_presentation.needs_preparation(
                 self.generation,
                 self.detail.revision,
@@ -229,6 +251,18 @@ impl NativeApp {
                 }
                 let detail = self.detail.thread.as_ref().expect("prepared thread");
                 let tail = incremental.and_then(|turn| {
+                    if sealed_message_update
+                        && let Some((start, template)) =
+                            &mut self.conversation_presentation.message_tail
+                    {
+                        return conversation::timeline_verified_message_rows(
+                            detail,
+                            template,
+                            *start,
+                            &self.activity_expanded,
+                            &self.conversation_rows,
+                        );
+                    }
                     conversation::timeline_tail_rows(
                         detail,
                         &self.activity_expanded,
@@ -261,6 +295,13 @@ impl NativeApp {
                     self.user_input_request = open_request;
                     self.user_input_selected.clear();
                     self.user_input_custom.clear();
+                }
+                if !sealed_message_update {
+                    self.conversation_presentation.message_tail =
+                        conversation::message_tail_template(detail, &rows);
+                    self.conversation_presentation.navigation = Rc::new(navigator::items(detail));
+                    self.conversation_presentation.agents =
+                        t3code_desktop_gpui::surfaces::agents::fold(detail);
                 }
                 self.conversation_rows = Rc::new(rows);
                 self.detail.tail_change = None;
@@ -295,6 +336,7 @@ impl NativeApp {
             let app = cx.weak_entity();
             return conversation
                 .py_2()
+                .child(self.render_timeline_navigator(cx))
                 .child(
                     list(
                         self.conversation_scroll.clone(),
@@ -389,6 +431,12 @@ impl NativeApp {
                 .border_color(cx.theme().border)
                 .child(format!("Worktree setup · {}", setup.phase))
                 .children(setup.error.clone())
+                .children(match setup.phase.as_str() {
+                    "failed" => Some("Setup failed. Inspect the stage output below. Your queued first message has not been confirmed sent; check the retained draft before sending again."),
+                    "cancelled" => Some("Setup was cancelled. Check the retained draft and checkout before retrying; no local-work handoff or resend has been performed."),
+                    "running" => Some("Setup is still running on the selected environment. Cancelling is a request, not proof that the script has stopped."),
+                    _ => None,
+                }.map(|text| div().text_xs().text_color(cx.theme().muted_foreground).child(text)))
                 .child(
                     Button::new("timeline-setup-details")
                         .ghost()
@@ -415,9 +463,11 @@ impl NativeApp {
                 .when(setup.phase == "running", |view| {
                     view.child(
                         Button::new("timeline-setup-cancel")
+                            .debug_selector(|| "timeline-setup-cancel".into())
                             .ghost()
                             .small()
                             .label("Cancel setup")
+                            .disabled(!self.connection_ready() || self.pending_actions > 0)
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.perform(
                                     "worktreeSetup.cancel",
@@ -503,7 +553,7 @@ impl NativeApp {
                     )
                 };
                 let expanded = *expanded;
-                let key = turn.clone();
+                let key = row.key.clone();
                 div()
                     .flex()
                     .flex_col()
@@ -834,6 +884,8 @@ impl NativeApp {
                     if attachment["type"] == "image" {
                         self.request_message_image(key.clone(), resource.clone(), attachment["mimeType"].as_str().unwrap_or(""), cx);
                     }
+                    let text_preview = self.render_attachment_text_preview(key.clone(), resource.clone(), attachment["mimeType"].as_str().unwrap_or(""), cx);
+                    let video = attachment["mimeType"].as_str().is_some_and(|mime| mime.starts_with("video/"));
                     let preview = self.conversation_presentation.media.get(&key).cloned();
                     let preview_ready = matches!(preview, Some(super::message_media::MediaPreview::Ready(_)));
                     let expand_key = key.clone();
@@ -842,6 +894,8 @@ impl NativeApp {
                     let mut inline_resource = resource.clone();
                     inline_resource["disposition"] = serde_json::json!("inline");
                     div().flex().flex_col().gap_1()
+                        .child(text_preview)
+                        .when(video, |view| view.child(div().text_xs().text_color(muted_foreground).child("Video · native poster/playback unavailable; open the original below")))
                         .when_some(preview, |view, preview| match preview {
                             super::message_media::MediaPreview::Ready(image) => view.child(
                                 div().id(gpui_kit::SharedString::from(format!("image-{key}")))
@@ -859,7 +913,7 @@ impl NativeApp {
                         .when(preview_ready, |view| view.child(Button::new("expand-image").ghost().xsmall().label("Expand image")
                             .on_click(cx.listener(move |app, _, window, cx| app.expand_message_image(expand_key.clone(), keyboard_resource.clone(), window, cx)))))
                         .child(Button::new(gpui_kit::SharedString::from(format!("attachment-open-{}", attachment["id"].as_str().unwrap_or("unknown"))))
-                            .ghost().xsmall().label("Open in browser")
+                            .ghost().xsmall().label(if video { "Open video in browser" } else { "Open in browser" })
                             .on_click(cx.listener(move |app, _, _, cx| app.open_conversation_asset(inline_resource.clone(), cx))))
                 }))
         });
@@ -899,24 +953,26 @@ impl NativeApp {
         };
         let (displayed, workspace_images) =
             crate::conversation_presentation::workspace_markdown_images(&displayed);
-        let workspace_media = div().flex().flex_wrap().gap_2().children(workspace_images.into_iter().map(|(alt, path)| {
-            let resource = serde_json::json!({"_tag":"media-file", "threadId": self.selected_thread, "path":path});
-            let key = super::message_media::media_key(&self.environment_scope, self.selected_thread.as_deref().unwrap_or(""), &format!("workspace:{path}"));
-            self.request_message_image(key.clone(), resource.clone(), crate::attachment_mime(&path), cx);
-            let image = self.conversation_presentation.media.get(&key).and_then(|preview| match preview { super::message_media::MediaPreview::Ready(image) => Some(image.clone()), _ => None });
-            let open_resource = resource.clone();
-            div().flex().flex_col().gap_1()
-                .when_some(image, |view, image| view.child(div().id(gpui_kit::SharedString::from(format!("workspace-image-{key}")))
-                    .child(gpui_kit::img(image).w(px(160.)).h(px(100.)).object_fit(gpui_kit::ObjectFit::Contain))
-                    .on_click(cx.listener(move |app, _, window, cx| app.expand_message_image(key.clone(), resource.clone(), window, cx)))))
-                .child(Button::new(gpui_kit::SharedString::from(format!("workspace-image-open-{path}"))).ghost().xsmall()
-                    .label(format!("Open image · {}", if alt.is_empty() { path } else { alt }))
-                    .on_click(cx.listener(move |app, _, _, cx| app.open_conversation_asset(open_resource.clone(), cx))))
-        }));
+        let displayed = self.selected_workspace().map_or_else(
+            || displayed.clone(),
+            |cwd| super::message_paths::link_inline_workspace_paths(&displayed, &cwd),
+        );
+        let workspace_media = self.render_workspace_media(workspace_images, cx);
         let context = message["context"]["records"]
             .as_array()
             .map_or(&[][..], Vec::as_slice);
         let body = div()
+            .when(
+                role == "assistant" && message["streaming"] != true,
+                |view| {
+                    view.child(
+                        div()
+                            .text_xs()
+                            .text_color(muted_foreground)
+                            .child("Select text · ⌘⇧L to add quote to chat"),
+                    )
+                },
+            )
             .flex()
             .flex_col()
             .gap_1()
@@ -924,31 +980,11 @@ impl NativeApp {
             .when_some(attachment_row, |view, row| view.child(row))
             .when(!context.is_empty(), |view| {
                 view.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_1()
-                        .children(context.iter().map(|record| {
-                            let kind = record["kind"].as_str().unwrap_or("context");
-                            let label = record["label"]
-                                .as_str()
-                                .or_else(|| record["name"].as_str())
-                                .or_else(|| record["path"].as_str())
-                                .unwrap_or("Unavailable context");
-                            let detail = serde_json::to_string_pretty(record).unwrap_or_default();
-                            let key = format!(
-                                "context:{}",
-                                record["contextId"].as_str().unwrap_or(label)
-                            );
-                            Button::new(gpui_kit::SharedString::from(key.clone()))
-                                .ghost()
-                                .xsmall()
-                                .label(format!("{kind} · {label}"))
-                                .tooltip(detail.clone())
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.copy_conversation_text(key.clone(), detail.clone(), cx)
-                                }))
-                        })),
+                    div().flex().flex_wrap().gap_1().children(
+                        context
+                            .iter()
+                            .map(|record| self.render_received_context(message, record, cx)),
+                    ),
                 )
             })
             .when(expandable, |view| {
@@ -983,82 +1019,271 @@ impl NativeApp {
                 let view = view.child(workspace_media);
                 let app = cx.weak_entity();
                 let link_app = app.clone();
+                let table_app = app.clone();
+                let link_message = message_id.to_owned();
+                let link_records = context.to_vec();
                 let wrap_id = message_id.to_owned();
+                let run_scope = self.environment_scope.clone();
+                let run_thread = self.selected_thread.clone().unwrap_or_default();
+                let run_streaming = message["streaming"].as_bool().unwrap_or(false);
+                let run_assistant = role == "assistant";
+                let run_markdown = displayed.clone();
                 let wrapped = self
                     .conversation_presentation
                     .code_wrap
                     .get(message_id)
                     .copied()
                     .unwrap_or(true);
-                let mut style = gpui_kit::component::text::TextViewStyle::default();
+                let mut style = self.conversation_typography_style(cx);
                 style.code_block.text.white_space = Some(if wrapped {
                     gpui_kit::WhiteSpace::Normal
                 } else {
                     gpui_kit::WhiteSpace::Nowrap
                 });
                 style.code_block.overflow.x = Some(gpui_kit::Overflow::Scroll);
-                view.child(
-                    TextView::markdown(id, displayed)
-                        .selectable(true)
-                        .style(style)
-                        .on_link_click(move |href, _, window, cx| {
-                            let _ = link_app
-                                .update(cx, |app, cx| app.open_message_link(href, window, cx));
+                let source = self.citation_source_view(message_id, &displayed, cx);
+                let capture_source = source.clone();
+                let capture_message = message_id.to_owned();
+                let capture_scope = self.environment_scope.clone();
+                let capture_thread = self.selected_thread.clone().unwrap_or_default();
+                let capture_generation = self.generation;
+                let assistant = role == "assistant" && !run_streaming;
+                view.font_family(crate::settings_fonts::family(1, cx.theme().font_family.clone(), cx))
+                    .text_size(self.prose_font_size(cx))
+                    .child(
+                    div()
+                        .id(id)
+                        .debug_selector({
+                            let id = format!("citation-text-{message_id}");
+                            move || id.clone()
                         })
-                        .code_block_actions(move |block, _, cx| {
-                            let code = block.code().to_string();
-                            let key = format!("code:{code}");
-                            let copied = app.upgrade().is_some_and(|entity| {
-                                entity.read(cx).conversation_presentation.copied.as_ref()
-                                    == Some(&key)
-                            });
-                            let wrap_app = app.clone();
-                            let wrap_id = wrap_id.clone();
-                            let app = app.clone();
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(block.lang().unwrap_or_else(|| "Code".into()))
-                                .child(
-                                    Button::new("code-wrap")
-                                        .debug_selector(|| "code-wrap".into())
-                                        .ghost()
-                                        .xsmall()
-                                        .label(if wrapped { "No wrap" } else { "Wrap lines" })
-                                        .on_click(move |_, _, cx| {
-                                            let _ = wrap_app.update(cx, |app, cx| {
-                                                app.conversation_presentation
-                                                    .code_wrap
-                                                    .insert(wrap_id.clone(), !wrapped);
-                                                if let Some(index) =
-                                                    app.conversation_rows.iter().position(|row| {
-                                                        row.key == format!("message:{wrap_id}")
+                        .on_key_down(cx.listener(
+                            move |app, event: &gpui_kit::KeyDownEvent, window, cx| {
+                                let modifiers = event.keystroke.modifiers;
+                                if assistant
+                                    && event.keystroke.key == "l"
+                                    && modifiers.platform
+                                    && modifiers.shift
+                                    && !modifiers.alt
+                                    && !modifiers.control
+                                {
+                                    app.cite_assistant_selection(
+                                        &capture_message,
+                                        &capture_source,
+                                        (&capture_scope, &capture_thread, capture_generation),
+                                        window,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }
+                            },
+                        ))
+                        .child(
+                            TextView::new(&source)
+                                .selectable(true)
+                                .style(style)
+                                .on_link_click(move |href, _, window, cx| {
+                                    let _ = link_app.update(cx, |app, cx| {
+                                        if let Some(reference) =
+                                            href.strip_prefix("t3-context://v1/")
+                                        {
+                                            let record =
+                                                reference.split_once('/').and_then(|(kind, id)| {
+                                                    link_records.iter().find(|record| {
+                                                        record["kind"] == kind
+                                                            && record["contextId"] == id
                                                     })
-                                                {
-                                                    app.conversation_scroll
-                                                        .remeasure_items(index..index + 1);
-                                                }
+                                                });
+                                            if let Some(record) = record {
+                                                let key = received_context::disclosure_key(
+                                                    &link_message,
+                                                    record,
+                                                );
+                                                app.activity_expanded.insert(key, true);
+                                                app.conversation_scroll.pause_following_tail();
                                                 cx.notify();
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    Button::new("copy-code")
-                                        .ghost()
-                                        .xsmall()
-                                        .label(if copied { "Copied" } else { "Copy code" })
-                                        .on_click(move |_, _, cx| {
-                                            let _ = app.update(cx, |app, cx| {
-                                                app.copy_conversation_text(
-                                                    key.clone(),
-                                                    code.clone(),
-                                                    cx,
-                                                )
-                                            });
-                                        }),
-                                )
-                        }),
+                                            } else {
+                                                app.report_error(
+                                            "This context is no longer available in the message",
+                                            cx,
+                                        );
+                                            }
+                                        } else {
+                                            app.open_message_link(href, window, cx);
+                                        }
+                                    });
+                                })
+                                .table_actions(move |table, _, cx| {
+                                    let markdown = table.markdown.clone();
+                                    let csv = tables::csv(table);
+                                    let copied = table_app.upgrade().and_then(|entity| {
+                                        entity.read(cx).conversation_presentation.copied.clone()
+                                    });
+                                    let markdown_copied =
+                                        copied.as_ref() == Some(&format!("table:{markdown}"));
+                                    let csv_copied =
+                                        copied.as_ref() == Some(&format!("table:{csv}"));
+                                    let markdown_app = table_app.clone();
+                                    let csv_app = table_app.clone();
+                                    div()
+                                        .flex()
+                                        .gap_1()
+                                        .child(
+                                            Button::new("copy-table-markdown")
+                                                .debug_selector(|| "copy-table-markdown".into())
+                                                .ghost()
+                                                .xsmall()
+                                                .label(if markdown_copied {
+                                                    "Copied"
+                                                } else {
+                                                    "Copy table"
+                                                })
+                                                .on_click(move |_, _, cx| {
+                                                    let _ = markdown_app.update(cx, |app, cx| {
+                                                        app.copy_conversation_text(
+                                                            format!("table:{markdown}"),
+                                                            markdown.clone(),
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("copy-table-csv")
+                                                .debug_selector(|| "copy-table-csv".into())
+                                                .ghost()
+                                                .xsmall()
+                                                .label(if csv_copied {
+                                                    "Copied"
+                                                } else {
+                                                    "Copy CSV"
+                                                })
+                                                .on_click(move |_, _, cx| {
+                                                    let _ = csv_app.update(cx, |app, cx| {
+                                                        app.copy_conversation_text(
+                                                            format!("table:{csv}"),
+                                                            csv.clone(),
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        )
+                                })
+                                .code_block_actions(move |block, _, cx| {
+                                    let code = block.code().to_string();
+                                    let key = format!("code:{code}");
+                                    let completed = shell_fences::completed_code(
+                                        &run_markdown,
+                                        block.span.map(|span| span.start..span.end),
+                                        &code,
+                                    );
+                                    let eligible = run_assistant
+                                        && completed.as_ref().is_some_and(|code| {
+                                            shell_fences::runnable(
+                                                block.lang().as_deref().unwrap_or(""),
+                                                code,
+                                                run_streaming,
+                                            )
+                                        });
+                                    let run_reason = app.upgrade().map_or_else(
+                                        || Err("Conversation is unavailable".to_owned()),
+                                        |entity| {
+                                            entity
+                                                .read(cx)
+                                                .terminal_run_readiness(&run_scope, &run_thread)
+                                        },
+                                    );
+                                    let run_app = app.clone();
+                                    let command = code.trim().to_owned();
+                                    let scope = run_scope.clone();
+                                    let thread = run_thread.clone();
+                                    let copied = app.upgrade().is_some_and(|entity| {
+                                        entity.read(cx).conversation_presentation.copied.as_ref()
+                                            == Some(&key)
+                                    });
+                                    let wrap_app = app.clone();
+                                    let wrap_id = wrap_id.clone();
+                                    let app = app.clone();
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(block.lang().unwrap_or_else(|| "Code".into()))
+                                        .when(eligible, |view| {
+                                            view.child(
+                                                Button::new("run-shell-fence")
+                                                    .debug_selector(|| "run-shell-fence".into())
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .label("Run in terminal")
+                                                    .disabled(run_reason.is_err())
+                                                    .tooltip(run_reason.err().unwrap_or_else(
+                                                        || "Send to the attached terminal".into(),
+                                                    ))
+                                                    .on_click(move |_, _, cx| {
+                                                        let _ =
+                                                            run_app.update(cx, |app, cx| match app
+                                                                .terminal_run_scoped(
+                                                                    &scope, &thread, &command, cx,
+                                                                ) {
+                                                                Ok(()) => {
+                                                                    app.terminal_drawer.open = true;
+                                                                    cx.notify();
+                                                                }
+                                                                Err(reason) => {
+                                                                    app.report_error(reason, cx)
+                                                                }
+                                                            });
+                                                    }),
+                                            )
+                                        })
+                                        .child(
+                                            Button::new("code-wrap")
+                                                .debug_selector(|| "code-wrap".into())
+                                                .ghost()
+                                                .xsmall()
+                                                .label(if wrapped {
+                                                    "No wrap"
+                                                } else {
+                                                    "Wrap lines"
+                                                })
+                                                .on_click(move |_, _, cx| {
+                                                    let _ = wrap_app.update(cx, |app, cx| {
+                                                        app.conversation_presentation
+                                                            .code_wrap
+                                                            .insert(wrap_id.clone(), !wrapped);
+                                                        if let Some(index) = app
+                                                            .conversation_rows
+                                                            .iter()
+                                                            .position(|row| {
+                                                                row.key
+                                                                    == format!("message:{wrap_id}")
+                                                            })
+                                                        {
+                                                            app.conversation_scroll
+                                                                .remeasure_items(index..index + 1);
+                                                        }
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("copy-code")
+                                                .ghost()
+                                                .xsmall()
+                                                .label(if copied { "Copied" } else { "Copy code" })
+                                                .on_click(move |_, _, cx| {
+                                                    let _ = app.update(cx, |app, cx| {
+                                                        app.copy_conversation_text(
+                                                            key.clone(),
+                                                            code.clone(),
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        )
+                                }),
+                        ),
                 )
             })
             .map(|body| match role {
@@ -1093,12 +1318,21 @@ impl NativeApp {
         for item in items {
             let (activity, text_color) = match item {
                 ActivityItem::Tool(call) => {
+                    for activity in &call.activities {
+                        if let Some(agent) = self.render_timeline_agent(activity, cx) {
+                            log = log.child(agent);
+                        }
+                    }
                     log = log.child(self.render_tool_call(call, cx));
                     continue;
                 }
                 ActivityItem::Activity(activity) => (activity, muted_foreground),
                 ActivityItem::Error(activity) => (activity, danger),
             };
+            if let Some(agent) = self.render_timeline_agent(activity, cx) {
+                log = log.child(agent);
+                continue;
+            }
             let color = match activity["tone"].as_str().unwrap_or("info") {
                 "error" => danger,
                 "approval" => warning,
@@ -1409,7 +1643,38 @@ impl NativeApp {
         .detach();
     }
 
-    fn save_conversation_plan(&mut self, contents: String, cx: &mut Context<Self>) {
+    fn choose_conversation_plan_path(
+        &mut self,
+        plan: String,
+        contents: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.conversation_presentation.saving {
+            return;
+        }
+        let Some(cwd) = self.selected_workspace() else {
+            return;
+        };
+        let input = cx.new(|cx| single_line_input(window, cx));
+        input.update(cx, |input, cx| {
+            input.set_value("plan.md", window, cx);
+            input.focus(window, cx);
+        });
+        self.conversation_presentation.plan_save =
+            Some(crate::conversation_presentation::PlanSave {
+                generation: self.generation,
+                environment: self.environment_scope.clone(),
+                thread: self.selected_thread.clone(),
+                cwd,
+                plan,
+                contents,
+                path: input,
+            });
+        cx.notify();
+    }
+
+    pub(crate) fn save_conversation_plan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.connection_ready() {
             self.report_error("Reconnect before saving a plan", cx);
             return;
@@ -1421,8 +1686,32 @@ impl NativeApp {
             self.report_error("Connect and select a workspace to save a plan", cx);
             return;
         };
-        // A fresh path avoids overwriting a user's existing workspace file.
-        let path = format!("plan-{}.md", uuid::Uuid::new_v4());
+        let Some(chooser) = self.conversation_presentation.plan_save.as_ref() else {
+            return;
+        };
+        if chooser.generation != self.generation
+            || chooser.environment != self.environment_scope
+            || chooser.thread != self.selected_thread
+            || chooser.cwd != cwd
+        {
+            self.report_error(
+                "The plan save belongs to a different workspace; choose its path again",
+                cx,
+            );
+            return;
+        }
+        let path = chooser.path.read(cx).value().trim().to_owned();
+        if super::message_paths::workspace_link(&path, &cwd)
+            .is_none_or(|(resolved, line)| resolved != path || line.is_some())
+        {
+            self.report_error(
+                "Enter a file path relative to the workspace, without parent traversal",
+                cx,
+            );
+            return;
+        }
+        let contents = chooser.contents.clone();
+        let handle = window.window_handle();
         let generation = self.generation;
         let origin = self.environment_scope.clone();
         let thread = self.selected_thread.clone();
@@ -1435,24 +1724,32 @@ impl NativeApp {
                 serde_json::json!({"cwd":cwd,"relativePath":path,"contents":contents}),
             )
             .await;
-            let _ = entity.update(cx, |app, cx| {
-                app.conversation_presentation.saving = false;
-                if app.generation == generation
-                    && app.environment_scope == origin
-                    && app.selected_thread == thread
-                {
-                    match result {
-                        Ok(_) => app.report_success(&format!("Plan saved to {path}"), cx),
-                        Err(error) => app.report_error(format!("Could not save plan: {error}"), cx),
+            let _ = handle.update(cx, |_, window, cx| {
+                entity.update(cx, |app, cx| {
+                    app.conversation_presentation.saving = false;
+                    if app.generation == generation
+                        && app.environment_scope == origin
+                        && app.selected_thread == thread
+                    {
+                        match result {
+                            Ok(_) => {
+                                app.conversation_presentation.plan_save = None;
+                                app.composer.update(cx, |input, cx| input.focus(window, cx));
+                                app.report_success(&format!("Plan saved to {path}"), cx);
+                            }
+                            Err(error) => {
+                                app.report_error(format!("Could not save plan: {error}"), cx)
+                            }
+                        }
                     }
-                }
-                cx.notify();
+                    cx.notify();
+                })
             });
         })
         .detach();
     }
 
-    fn render_plan(&self, plan: &Value, cx: &Context<Self>) -> gpui_kit::Div {
+    fn render_plan(&mut self, plan: &Value, cx: &mut Context<Self>) -> gpui_kit::Div {
         let markdown = plan["planMarkdown"].as_str().unwrap_or("").to_owned();
         let muted_foreground = cx.theme().muted_foreground;
         let border = cx.theme().border;
@@ -1486,9 +1783,24 @@ impl NativeApp {
         } else {
             markdown.clone()
         };
+        let (displayed, images) =
+            crate::conversation_presentation::workspace_markdown_images(&displayed);
+        let workspace_media = self.render_workspace_media(images, cx);
         let copy_key = key.clone();
         let copy_text = markdown.clone();
         let save_text = markdown.clone();
+        let save_plan = implement_plan.clone();
+        let chooser = self
+            .conversation_presentation
+            .plan_save
+            .as_ref()
+            .filter(|chooser| {
+                chooser.plan == save_plan
+                    && chooser.generation == self.generation
+                    && chooser.environment == self.environment_scope
+                    && chooser.thread == self.selected_thread
+                    && self.selected_workspace().as_deref() == Some(chooser.cwd.as_str())
+            });
         let export_text = markdown.clone();
         let implement_text = markdown.clone();
         let refine_text = markdown;
@@ -1514,18 +1826,12 @@ impl NativeApp {
                         view.child(div().px_2().rounded_sm().bg(muted).child("implemented"))
                     }),
             )
-            .child(
-                TextView::markdown(
-                    id,
-                    crate::conversation_presentation::workspace_markdown_images(&displayed).0,
-                )
-                .on_link_click({
-                    let app = cx.weak_entity();
-                    move |href, _, window, cx| {
-                        let _ = app.update(cx, |app, cx| app.open_message_link(href, window, cx));
-                    }
-                }),
-            )
+            .child(div().font_family(crate::settings_fonts::family(1, cx.theme().font_family.clone(), cx)).text_size(self.prose_font_size(cx)).child(TextView::markdown(id, displayed).style(self.conversation_typography_style(cx)).on_link_click({
+                let app = cx.weak_entity();
+                move |href, _, window, cx| {
+                    let _ = app.update(cx, |app, cx| app.open_message_link(href, window, cx));
+                }
+            })))
             .child(
                 div()
                     .flex()
@@ -1581,15 +1887,20 @@ impl NativeApp {
                             .label(if self.conversation_presentation.saving {
                                 "Saving…"
                             } else {
-                                "Save new workspace file"
+                                "Save to workspace…"
                             })
                             .disabled(
                                 self.conversation_presentation.saving
                                     || !self.connection_ready()
                                     || self.selected_workspace().is_none(),
                             )
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.save_conversation_plan(save_text.clone(), cx)
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.choose_conversation_plan_path(
+                                    save_plan.clone(),
+                                    save_text.clone(),
+                                    window,
+                                    cx,
+                                )
                             })),
                     )
                     .when(!implemented, |view| {
@@ -1631,6 +1942,60 @@ impl NativeApp {
                         )
                     }),
             )
+            .child(workspace_media)
+            .when_some(chooser, |view, chooser| {
+                view.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_xs().child(format!(
+                            "Save relative to {} (existing files will be overwritten)",
+                            chooser.cwd
+                        )))
+                        .child(
+                            Input::new(&chooser.path)
+                                .disabled(self.conversation_presentation.saving),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("plan-save-confirm")
+                                        .debug_selector(|| "plan-save-confirm".into())
+                                        .primary()
+                                        .small()
+                                        .label(if self.conversation_presentation.saving {
+                                            "Saving…"
+                                        } else {
+                                            "Save"
+                                        })
+                                        .disabled(
+                                            self.conversation_presentation.saving
+                                                || !self.connection_ready(),
+                                        )
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.save_conversation_plan(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("plan-save-cancel")
+                                        .debug_selector(|| "plan-save-cancel".into())
+                                        .ghost()
+                                        .small()
+                                        .label("Cancel")
+                                        .disabled(self.conversation_presentation.saving)
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.conversation_presentation.plan_save = None;
+                                            app.composer
+                                                .update(cx, |input, cx| input.focus(window, cx));
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+            })
     }
 
     fn render_checkpoint(

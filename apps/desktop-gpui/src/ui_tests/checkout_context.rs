@@ -3,7 +3,7 @@ use super::branch_workflows::{complete_stop, finish_owned_stop, refresh_refs, st
 use super::*;
 
 fn call(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     tag: &str,
 ) -> (Value, async_channel::Sender<Result<Value, String>>) {
     let (actual, payload, reply) = loop {
@@ -41,7 +41,7 @@ fn other_checkout(app: &Entity<NativeApp>, cx: &mut VisualTestContext) {
 fn select_other(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) {
     cx.update(|window, cx| app.update(cx, |app, cx| app.select_thread("other", window, cx)));
     cx.run_until_parked();

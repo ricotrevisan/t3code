@@ -3,7 +3,7 @@ use super::*;
 use gpui_kit::component::{ActiveTheme, Theme};
 
 fn call(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     expected: &str,
 ) -> (Value, async_channel::Sender<Result<Value, String>>) {
     let connection::Command::Call {

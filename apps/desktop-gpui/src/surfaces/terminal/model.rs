@@ -110,6 +110,91 @@ impl Screen {
     pub fn selection(&self) -> Option<String> {
         self.term.selection_to_string()
     }
+    /// One-based buffer coordinates (including scrollback), not viewport rows.
+    pub fn selection_context(&self) -> Option<(usize, usize, String)> {
+        let text = self.selection()?.replace("\r\n", "\n");
+        let text = text.trim_matches('\n').to_owned();
+        if text.is_empty() {
+            return None;
+        }
+        let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+        let history = self.term.grid().history_size() as i32;
+        let start = (range.start.line.0 + history + 1).max(1) as usize;
+        let end = (range.end.line.0 + history + 1).max(start as i32) as usize;
+        Some((start, end, text))
+    }
+    /// Literal buffer search. Navigate with a stable buffer coordinate rather than a
+    /// viewport coordinate, so scrolling to an old match does not change the next result.
+    pub fn search(
+        &mut self,
+        query: &str,
+        after: Option<(i32, usize)>,
+        reverse: bool,
+    ) -> Option<(i32, usize)> {
+        if query.is_empty() {
+            return None;
+        }
+        let mut matches = Vec::new();
+        let grid = self.term.grid();
+        for row in -(grid.history_size() as i32)..self.size.rows as i32 {
+            let mut text = String::new();
+            let mut columns = Vec::new();
+            for col in 0..self.size.cols {
+                let cell = &grid[Line(row)][Column(col)];
+                if cell
+                    .flags
+                    .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                columns.extend(std::iter::repeat_n(col, cell.c.len_utf8()));
+                text.push(cell.c);
+                if let Some(extra) = cell.zerowidth() {
+                    for ch in extra {
+                        columns.extend(std::iter::repeat_n(col, ch.len_utf8()));
+                        text.push(*ch);
+                    }
+                }
+            }
+            for (byte, _) in text.match_indices(query) {
+                matches.push(((row, columns[byte]), columns[byte + query.len() - 1]));
+            }
+        }
+        let result = if reverse {
+            matches
+                .iter()
+                .rev()
+                .find(|(point, _)| after.is_none_or(|after| *point < after))
+                .or(matches.last())
+        } else {
+            matches
+                .iter()
+                .find(|(point, _)| after.is_none_or(|after| *point > after))
+                .or(matches.first())
+        }
+        .copied()?;
+        let ((row, start), end) = result;
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(row), Column(start)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(row), Column(end)), Side::Right);
+        self.term.selection = Some(selection);
+        let offset = self.term.grid().display_offset() as i32;
+        let desired = if row < -offset {
+            -row
+        } else if row >= self.size.rows as i32 - offset {
+            (self.size.rows as i32 - 1 - row).max(0)
+        } else {
+            offset
+        };
+        self.scroll(desired - offset);
+        Some((row, start))
+    }
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
     pub fn paste(&self, text: &str) -> String {
         if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
             format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
@@ -175,6 +260,20 @@ impl Screen {
 mod tests {
     use super::*;
     use alacritty_terminal::vte::ansi::NamedColor;
+    #[test]
+    fn terminal_search_wraps_both_directions_and_selects_unicode_scrollback() {
+        let mut screen = Screen::new(Size::new(20, 2));
+        screen.feed("first 猫\r\nsecond\r\nlast 猫");
+        let first = screen.search("猫", None, false).unwrap();
+        assert!(first.0 < 0);
+        assert_eq!(screen.selection().as_deref(), Some("猫"));
+        assert_eq!(screen.selection_context().unwrap(), (1, 1, "猫".into()));
+        let last = screen.search("猫", Some(first), false).unwrap();
+        assert!(last > first);
+        assert_eq!(screen.search("猫", Some(last), false), Some(first));
+        assert_eq!(screen.search("猫", Some(first), true), Some(last));
+        assert!(screen.search("missing", None, false).is_none());
+    }
     #[test]
     fn terminal_colours_cursor_clear_and_chunked_parser() {
         let mut screen = Screen::new(Size::new(10, 3));

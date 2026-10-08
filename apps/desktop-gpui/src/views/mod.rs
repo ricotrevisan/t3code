@@ -19,6 +19,7 @@ mod overlay;
 mod palette;
 mod settings;
 mod sidebar;
+pub(crate) mod r13_b_sidebar_rows;
 mod status_bar;
 mod thread_header;
 mod title_bar;

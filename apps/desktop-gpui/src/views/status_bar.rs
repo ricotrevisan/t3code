@@ -2,6 +2,7 @@ use gpui_kit::base::Selectable;
 use gpui_kit::component::{
     ActiveTheme as _, Sizable,
     button::{Button, ButtonVariants as _},
+    menu::{DropdownMenu as _, PopupMenuItem},
     tooltip::Tooltip,
 };
 use gpui_kit::{Anchor, Context, anchored, deferred, div, prelude::*, px};
@@ -27,13 +28,17 @@ impl NativeApp {
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
             .unwrap_or_else(|| self.environment_scope.clone());
-        let environment_label = format!(
-            "{} · {}",
-            self.environment_name
-                .as_deref()
-                .unwrap_or(&environment_host),
-            self.connection_state_text()
-        );
+        let environment_label = self
+            .server_config
+            .config(self.generation)
+            .and_then(|config| config["environment"]["label"].as_str())
+            .filter(|label| !label.trim().is_empty())
+            .or(self.environment_name.as_deref())
+            .unwrap_or(&environment_host)
+            .to_owned();
+        // Keep the phase readable as well as color-coded, including for unnamed hosts.
+        let environment_label = format!("{environment_label} · {}", self.connection_state_text());
+        let environment_choices = self.environment_choices(cx);
         // Size only the identity's contents, not a proportion of the whole bar.
         // The text system caches this shape; extra space is kit xs icon/padding.
         let environment_width = window
@@ -119,10 +124,16 @@ impl NativeApp {
                     .child(
                         div()
                             .w(environment_width.min(window.rem_size() * 20.))
-                            .min_w(px(24.))
+                            // On compact windows status feedback takes priority;
+                            // wide windows retain an ordinary host's full identity.
+                            .min_w(if window.viewport_size().width >= window.rem_size() * 80. {
+                                environment_width.min(window.rem_size() * 18.)
+                            } else {
+                                px(24.)
+                            })
                             .flex_shrink_1()
-                            .child(
-                                Button::new("environment-chip")
+                            .child({
+                                let button = Button::new("environment-chip")
                                     .debug_selector(|| "environment-chip".into())
                                     .icon(gpui_kit::assets::IconName::Settings)
                                     .w_full()
@@ -130,14 +141,76 @@ impl NativeApp {
                                     .ghost()
                                     .xsmall()
                                     .tooltip(format!(
-                                        "Open connection settings · {} · {}",
+                                        "Switch environment / connection settings · {} · {}",
                                         self.connection_state_text(),
                                         self.environment_scope
-                                    ))
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        app.open_settings("", window, cx)
-                                    })),
-                            ),
+                                    ));
+                                if environment_choices.is_empty() {
+                                    button
+                                        .on_click(cx.listener(|app, _, window, cx| {
+                                            app.open_settings("", window, cx)
+                                        }))
+                                        .into_any_element()
+                                } else {
+                                    let app = cx.entity().downgrade();
+                                    let choices = environment_choices.clone();
+                                    let active = self.environment_scope.clone();
+                                    button
+                                        .dropdown_menu_with_anchor(
+                                            Anchor::BottomLeft,
+                                            move |mut menu, _, _| {
+                                                menu = menu.label("Run on · saved endpoints");
+                                                for (index, (origin, label, enabled)) in
+                                                    choices.iter().enumerate()
+                                                {
+                                                    let app = app.clone();
+                                                    let origin = origin.clone();
+                                                    let label = if origin == active {
+                                                        format!("{label} · current")
+                                                    } else {
+                                                        label.clone()
+                                                    };
+                                                    menu = menu.item(
+                                                        PopupMenuItem::element(move |_, _| {
+                                                            div()
+                                                                .debug_selector(move || {
+                                                                    format!(
+                                                                        "environment-choice-{index}"
+                                                                    )
+                                                                })
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .child(label.clone())
+                                                        })
+                                                        .disabled(!enabled || origin == active)
+                                                        .on_click(move |_, window, cx| {
+                                                            _ = app.update(cx, |app, cx| {
+                                                                app.switch_environment(
+                                                                    &origin, window, cx,
+                                                                )
+                                                            });
+                                                        }),
+                                                    );
+                                                }
+                                                let settings_app = app.clone();
+                                                menu.separator().item(
+                                                    PopupMenuItem::new("Connection settings")
+                                                        .on_click(move |_, window, cx| {
+                                                            _ = settings_app.update(
+                                                                cx,
+                                                                |app, cx| {
+                                                                    app.open_settings(
+                                                                        "", window, cx,
+                                                                    )
+                                                                },
+                                                            );
+                                                        }),
+                                                )
+                                            },
+                                        )
+                                        .into_any_element()
+                                }
+                            }),
                     )
                     .when_some(status_worktree, |view, name| {
                         view.child(
@@ -179,6 +252,7 @@ impl NativeApp {
                         )
                     }),
             )
+            .child(self.render_usage_limits_entry(cx))
             .child(
                 div()
                     .flex()

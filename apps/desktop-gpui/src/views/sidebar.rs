@@ -131,7 +131,15 @@ impl NativeApp {
                     ("move-up", "Move up", false),
                     ("move-down", "Move down", true),
                 ] {
-                    if sidebar::move_key(order, &thread.id, forward, pinned).is_some() {
+                    if sidebar::move_assignments(
+                        order,
+                        &self.shell.threads,
+                        &thread.id,
+                        forward,
+                        pinned,
+                    )
+                    .is_some()
+                    {
                         rows.insert(0, (id.into(), label.into(), id.into()));
                     }
                 }
@@ -209,11 +217,6 @@ impl NativeApp {
                         "thread.unsettle",
                     ),
                     (
-                        "snooze",
-                        "Snooze applicable selected threads 1h",
-                        "thread.snooze",
-                    ),
-                    (
                         "unsnooze",
                         "Wake selected snoozed threads",
                         "thread.unsnooze",
@@ -229,6 +232,16 @@ impl NativeApp {
                         "unarchive",
                         "Restore selected archived threads",
                         "thread.unarchive",
+                    ),
+                    (
+                        "regenerate-title",
+                        "Regenerate selected titles",
+                        "thread.meta.update",
+                    ),
+                    (
+                        "delete",
+                        "Delete selected threads permanently (confirm)",
+                        "thread.delete",
                     ),
                 ] {
                     let applies = self.sidebar_state.selection.iter().any(|id| {
@@ -255,6 +268,41 @@ impl NativeApp {
                         ));
                     }
                 }
+                let can_snooze_all = self.sidebar_state.selection.iter().all(|id| {
+                    self.shell
+                        .threads
+                        .iter()
+                        .find(|thread| &thread.id == id)
+                        .is_some_and(|thread| {
+                            sidebar::thread_action_policy(Some(thread), "snooze", now, capabilities)
+                                && !self.queues.has_queued(id)
+                        })
+                });
+                if can_snooze_all {
+                    for (index, (label, until)) in sidebar::snooze_presets(chrono::Local::now())
+                        .into_iter()
+                        .enumerate()
+                    {
+                        rows.push((
+                            format!("bulk-snooze-preset-{index}"),
+                            format!("Snooze selected: {label}"),
+                            format!(
+                                "bulk-snooze-until:{}",
+                                until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                            ),
+                        ));
+                    }
+                    rows.push((
+                        "bulk-snooze-custom".into(),
+                        "Custom snooze selected…".into(),
+                        "bulk-snooze-custom".into(),
+                    ));
+                }
+                rows.push((
+                    "bulk-mark-unread".into(),
+                    "Mark selected unread".into(),
+                    "bulk-mark-unread".into(),
+                ));
             }
         }
         div()
@@ -304,7 +352,7 @@ impl NativeApp {
             )
     }
 
-    fn render_sidebar_row(
+    pub(crate) fn render_sidebar_row(
         &self,
         thread: &t3code_desktop_gpui::shell::Thread,
         now: chrono::DateTime<chrono::Utc>,
@@ -494,8 +542,23 @@ impl NativeApp {
                                         )
                                         .child(div().text_color(color).child(status.label()))
                                     })
-                                    .when(woke && status.is_none(), |view| {
-                                        view.child(div().text_color(warning).child("Woke"))
+                                    .when(woke, |view| {
+                                        let wake_id = thread.id.clone();
+                                        let selector = format!("dismiss-woke-{}", thread.id);
+                                        view.child(Button::new(SharedString::from(selector.clone()))
+                                            .debug_selector(move || selector.clone())
+                                            .label("Woke")
+                                            .tooltip("Dismiss Woke notification without marking unread history as read")
+                                            .ghost().xsmall()
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if let Some(thread) = app.shell.threads.iter().find(|thread| thread.id == wake_id)
+                                                    && let Some(at) = sidebar::woke_at(thread, chrono::Utc::now()) {
+                                                    app.sidebar_state.woke_acknowledged.insert((app.environment_scope.clone(), wake_id.clone()), at);
+                                                    if let Err(error) = app.sidebar_state.save_local() { app.report_error(error, cx); }
+                                                }
+                                                cx.notify();
+                                            })))
                                     })
                                     .when(has_pull_request, |view| {
                                         view.child(
@@ -540,6 +603,14 @@ impl NativeApp {
             self.sidebar_state.cleanup.review = None;
             self.sidebar_state.cleanup.selected.clear();
         }
+        self.sidebar_rows.retain(
+            &self.environment_scope,
+            if self.sidebar_view == sidebar::View::Archived {
+                &self.archived_shell.threads
+            } else {
+                &self.shell.threads
+            },
+        );
         self.sidebar_state.retain_rows(
             if self.sidebar_view == sidebar::View::Archived {
                 &self.archived_shell.threads
@@ -867,7 +938,7 @@ impl NativeApp {
                         continue;
                     }
                     for thread in group_threads {
-                        group = group.child(self.render_sidebar_row(thread, now, cx));
+                        group = group.child(self.cached_sidebar_row(thread, now, cx));
                     }
                 }
             }
@@ -913,26 +984,30 @@ impl NativeApp {
                     .child(
                         super::list_row(
                             format!("priority-{key}"),
-                            Some(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }),
+                            Some(if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            }),
                             format!("{} ({})", label.to_uppercase(), rows.len()),
                             false,
                         )
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(muted_foreground)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                if app.collapsed_groups.contains(&collapse_key) {
-                                    app.collapsed_groups.retain(|key| key != &collapse_key);
-                                } else {
-                                    app.collapsed_groups.push(collapse_key.clone());
-                                }
-                                app.reconcile_sidebar_selection();
-                                cx.notify();
-                            })),
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(muted_foreground)
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            if app.collapsed_groups.contains(&collapse_key) {
+                                app.collapsed_groups.retain(|key| key != &collapse_key);
+                            } else {
+                                app.collapsed_groups.push(collapse_key.clone());
+                            }
+                            app.reconcile_sidebar_selection();
+                            cx.notify();
+                        })),
                     );
                 if !collapsed {
                     for thread in rows {
-                        shelf = shelf.child(self.render_sidebar_row(thread, now, cx));
+                        shelf = shelf.child(self.cached_sidebar_row(thread, now, cx));
                     }
                 }
                 projects.push(shelf.into_any_element());
@@ -1116,7 +1191,7 @@ impl NativeApp {
                             .flex_col()
                             .gap_1()
                             .p_2()
-                            .child(div().text_xs().child(format!("Updated {}", record.title)))
+                            .child(div().text_xs().child(format!("Updated {}", record.label())))
                             .child(
                                 Button::new("undo-thread-navigation")
                                     .debug_selector(|| "undo-thread-navigation".into())
@@ -1185,6 +1260,9 @@ impl NativeApp {
                                 .on_click(cx.listener(
                                     move |app, _, window, cx| {
                                         app.sidebar_state.priority = priority;
+                                        if let Err(error) = app.sidebar_state.save_local() {
+                                            app.report_error(error, cx);
+                                        }
                                         app.sidebar_state.scroll.set_offset(Default::default());
                                         app.reveal_sidebar_selection();
                                         app.sidebar_state.scroll_selected(window, cx);
@@ -1316,6 +1394,7 @@ impl NativeApp {
                         .child(Input::new(&self.custom_snooze))
                         .child(
                             Button::new("row-custom-snooze")
+                                .debug_selector(|| "row-custom-snooze".into())
                                 .disabled(!self.connection_ready())
                                 .label("Snooze")
                                 .ghost()
@@ -1324,11 +1403,13 @@ impl NativeApp {
                         )
                         .child(
                             Button::new("row-cancel-snooze")
+                                .debug_selector(|| "row-cancel-snooze".into())
                                 .label("Cancel")
                                 .ghost()
                                 .small()
                                 .on_click(cx.listener(|app, _, _, cx| {
                                     app.sidebar_state.custom_snooze_target = None;
+                                    app.sidebar_state.bulk_snooze_review = None;
                                     cx.notify();
                                 })),
                         ),
@@ -1494,7 +1575,9 @@ impl NativeApp {
                             .label("Settings")
                             .ghost()
                             .small()
-                            .on_click(cx.listener(|app, _, window, cx| app.open_settings("", window, cx))),
+                            .on_click(
+                                cx.listener(|app, _, window, cx| app.open_settings("", window, cx)),
+                            ),
                     ),
             )
     }

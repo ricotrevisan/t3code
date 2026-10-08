@@ -5,6 +5,8 @@ pub mod conversation;
 pub mod credentials;
 pub mod dpop;
 pub mod drafts;
+pub mod draft_context;
+pub mod composer_edit;
 pub mod files;
 pub mod mentions;
 pub mod notification_platform;

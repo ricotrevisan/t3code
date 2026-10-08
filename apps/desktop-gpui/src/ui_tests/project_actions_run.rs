@@ -2,7 +2,7 @@
 use super::*;
 
 fn call(
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     expected: &str,
 ) -> (Value, async_channel::Sender<Result<Value, String>>) {
     let connection::Command::Call {
@@ -309,7 +309,7 @@ fn palette_actions_reveals_runnable_saved_actions(cx: &mut TestAppContext) {
 fn live_run(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
 ) -> String {
     saved(app, cx);
     let (open, receipt) = call(requests, "terminal.open");
@@ -330,7 +330,7 @@ fn fresh_sync(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
     scope: &str,
-) -> async_channel::Receiver<connection::Command> {
+) -> Requests {
     let (sender, requests) = async_channel::bounded(16);
     cx.update(|_, cx| app.update(cx, |app, cx| {
         app.environment_scope = scope.into();
@@ -343,7 +343,7 @@ fn fresh_sync(
         app.action_runs_synchronized(cx); // Exactly once, even on repeated sync notifications.
     }));
     cx.run_until_parked();
-    requests
+    requests.into()
 }
 
 fn recovered_stream(cx: &mut TestAppContext, switch_environment: bool) {
@@ -432,6 +432,7 @@ fn reconnect_attach_survives_command_channel_backpressure(cx: &mut TestAppContex
     let first = live_run(&app, cx, &requests);
     let second = live_run(&app, cx, &requests);
     let (sender, recovered) = async_channel::bounded(1);
+    let recovered = Requests::from(recovered);
     cx.update(|_, cx| app.update(cx, |app, cx| {
         app.disconnect(cx);
         app.commands = Some(sender);

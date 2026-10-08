@@ -11,6 +11,7 @@ pub(crate) enum Target {
     NewThread(String),
     Appearance(Appearance),
     ToggleTheme,
+    UsageLimits,
     Settings(&'static str),
 }
 #[derive(Clone)]
@@ -134,6 +135,7 @@ impl NativeApp {
                     target: Target::Command(entry.command),
                 }),
         );
+        items.push(Item { label: "Open usage limits".into(), target: Target::UsageLimits });
         items.push(Item {
             label: "Toggle theme".into(),
             target: Target::ToggleTheme,
@@ -208,6 +210,7 @@ impl NativeApp {
                 };
                 self.set_appearance(mode, window, cx);
             }
+            Target::UsageLimits => self.toggle_usage_limits(cx),
             Target::Settings(category) => {
                 self.open_settings(category, window, cx);
                 self.refresh_settings_providers(false, cx);

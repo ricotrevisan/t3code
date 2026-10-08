@@ -1,7 +1,10 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::base::FocusTrapElement;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable, Icon, Selectable, Sizable, input::Input, separator::Separator,
+    ActiveTheme as _, Disableable, Icon, Selectable, Sizable,
+    input::Input,
+    menu::{ContextMenuExt, PopupMenuItem},
+    separator::Separator,
     tooltip::Tooltip,
 };
 use gpui_kit::{App, Context, div, prelude::*, px};
@@ -65,7 +68,11 @@ impl NativeApp {
                                 .small()
                                 .primary()
                                 .label("Adopt / retry metadata")
-                                .disabled(op.running || op.destination.is_none() || !self.connection_ready())
+                                .disabled(
+                                    op.running
+                                        || op.destination.is_none()
+                                        || !self.connection_ready(),
+                                )
                                 .on_click(cx.listener(|app, _, window, cx| {
                                     app.retry_checkout_metadata(window, cx)
                                 })),
@@ -176,26 +183,45 @@ impl NativeApp {
                 let branch = row.name.clone();
                 let path = row.worktree_path.clone();
                 let is_current = workspaces::is_current(row, current.as_deref());
-                list_row(id, None, row.name.clone(), false)
-                    .check_icon(IconName::Check)
-                    .confirmed(is_current)
-                    .selected(
-                        index
-                            == if self.git_picker.query
-                                == self.branch_query.read(cx).value().as_str()
-                            {
-                                self.git_picker.index
-                            } else {
-                                0
+                let copy_branch = branch.clone();
+                div()
+                    .id(gpui_kit::SharedString::from(format!(
+                        "branch-context-{index}"
+                    )))
+                    .context_menu(move |menu, _, _| {
+                        let branch = copy_branch.clone();
+                        menu.item(PopupMenuItem::new("Copy branch name").on_click(
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                    branch.clone(),
+                                ));
                             },
-                    )
-                    .when_some(row.worktree_path.clone(), |item, path| {
-                        item.tooltip(move |window, cx| Tooltip::new(path.clone()).build(window, cx))
-                            .suffix(|_, _| Icon::new(IconName::FolderGit).xsmall())
+                        ))
                     })
-                    .on_click(cx.listener(move |app, _, window, cx| {
-                        app.pick_checkout(branch.clone(), path.clone(), window, cx)
-                    }))
+                    .child(
+                        list_row(id, None, row.name.clone(), false)
+                            .check_icon(IconName::Check)
+                            .confirmed(is_current)
+                            .selected(
+                                index
+                                    == if self.git_picker.query
+                                        == self.branch_query.read(cx).value().as_str()
+                                    {
+                                        self.git_picker.index
+                                    } else {
+                                        0
+                                    },
+                            )
+                            .when_some(row.worktree_path.clone(), |item, path| {
+                                item.tooltip(move |window, cx| {
+                                    Tooltip::new(path.clone()).build(window, cx)
+                                })
+                                .suffix(|_, _| Icon::new(IconName::FolderGit).xsmall())
+                            })
+                            .on_click(cx.listener(move |app, _, window, cx| {
+                                app.pick_checkout(branch.clone(), path.clone(), window, cx)
+                            })),
+                    )
             })
             .collect::<Vec<_>>();
         div()

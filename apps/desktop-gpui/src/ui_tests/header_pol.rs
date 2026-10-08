@@ -5,7 +5,7 @@ fn status(changes: bool) -> Value {
 fn open_git(
     app: &Entity<NativeApp>,
     cx: &mut VisualTestContext,
-    requests: &async_channel::Receiver<connection::Command>,
+    requests: &Requests,
     value: Value,
 ) {
     let bounds = cx.debug_bounds("push-pr").unwrap();

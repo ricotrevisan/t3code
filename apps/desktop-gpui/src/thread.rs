@@ -19,6 +19,10 @@ pub struct ThreadDetail {
     pub sequence: Option<u64>,
     pub thread: Option<std::sync::Arc<Value>>,
     pub synchronized: bool,
+    // Sealed adapter evidence: public projection mutation invalidates pointer identity.
+    owned_projection: Option<std::sync::Arc<Value>>,
+    unique_message_ids: bool,
+    message_tail_proof: Option<(std::sync::Arc<Value>, std::sync::Arc<Value>, String)>,
 }
 
 fn required<'a>(value: &'a Value, key: &str) -> Result<&'a Value, String> {
@@ -433,6 +437,21 @@ fn resolvable_context(value: &Value) -> bool {
 }
 
 impl ThreadDetail {
+    /// O(1) evidence that only the existing final assistant message was updated
+    /// through this adapter since `prepared`. Historical or unowned changes fail closed.
+    pub fn verified_message_tail(&self, prepared: &std::sync::Arc<Value>, turn: &str) -> bool {
+        self.message_tail_proof
+            .as_ref()
+            .is_some_and(|(base, current, owner)| {
+                owner == turn
+                    && std::sync::Arc::ptr_eq(base, prepared)
+                    && self
+                        .thread
+                        .as_ref()
+                        .is_some_and(|thread| std::sync::Arc::ptr_eq(thread, current))
+            })
+    }
+
     pub fn apply(&mut self, selected_id: &str, item: Value) -> Result<(), String> {
         match item["kind"].as_str() {
             Some("snapshot") => {
@@ -446,6 +465,14 @@ impl ThreadDetail {
                     .ok_or("Invalid snapshot sequence")?;
                 self.thread = Some(std::sync::Arc::new(thread.clone()));
                 self.tail_change = None;
+                self.message_tail_proof = None;
+                self.owned_projection = self.thread.clone();
+                let mut ids = std::collections::HashSet::new();
+                self.unique_message_ids = thread["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|message| message["id"].as_str().is_some_and(|id| ids.insert(id)));
                 self.revision = projection_revision();
                 self.sequence = Some(sequence);
                 self.synchronized = false;
@@ -494,7 +521,52 @@ impl ThreadDetail {
                             .map_or(self.revision, |(base, _)| *base);
                         (base, turn.to_owned())
                     });
+                    if !self
+                        .owned_projection
+                        .as_ref()
+                        .is_some_and(|owned| std::sync::Arc::ptr_eq(owned, thread))
+                    {
+                        self.unique_message_ids = false;
+                    }
+                    let sealed = self.unique_message_ids
+                        && self
+                            .owned_projection
+                            .as_ref()
+                            .is_some_and(|owned| std::sync::Arc::ptr_eq(owned, thread))
+                        && kind == "thread.message-sent"
+                        && event["payload"]["role"] == "assistant"
+                        && thread["messages"]
+                            .as_array()
+                            .and_then(|messages| messages.last())
+                            .is_some_and(|last| {
+                                last["id"] == event["payload"]["messageId"]
+                                    && last["role"] == "assistant"
+                                    && tail.is_some_and(|turn| last["turnId"] == turn)
+                            });
+                    let proof_base = if sealed {
+                        self.message_tail_proof
+                            .as_ref()
+                            .filter(|(_, current, turn)| {
+                                std::sync::Arc::ptr_eq(current, thread)
+                                    && tail == Some(turn.as_str())
+                            })
+                            .map_or_else(|| thread.clone(), |(base, _, _)| base.clone())
+                    } else {
+                        thread.clone()
+                    };
+                    let proof_turn = tail.map(str::to_owned);
                     self.thread = apply_event(thread, event)?.map(std::sync::Arc::new);
+                    self.message_tail_proof = if sealed {
+                        self.thread
+                            .as_ref()
+                            .map(|current| (proof_base, current.clone(), proof_turn.unwrap()))
+                    } else {
+                        None
+                    };
+                    self.owned_projection = self.thread.clone();
+                    if kind == "thread.message-sent" && !event["payload"]["messageId"].is_string() {
+                        self.unique_message_ids = false;
+                    }
                     self.tail_change = change;
                 }
                 self.sequence = Some(sequence);
@@ -505,6 +577,10 @@ impl ThreadDetail {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "r13_d2_thread_proof_tests.rs"]
+mod r13_d2_proof_tests;
 
 #[cfg(test)]
 #[path = "thread_tests.rs"]

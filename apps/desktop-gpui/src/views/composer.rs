@@ -22,6 +22,7 @@ enum ComposerCommand {
     Model,
     Mode(&'static str),
     Compact,
+    UsageLimits,
     Insert(String),
 }
 
@@ -77,6 +78,17 @@ impl NativeApp {
                             )
                     }),
                 ),
+            )
+            .child(
+                Button::new("skills-in-slash-menu")
+                    .debug_selector(|| "skills-in-slash-menu".into())
+                    .ghost()
+                    .small()
+                    .label("Show skills in / menu ($ always includes skills)")
+                    .selected(self.show_skills_in_slash_menu())
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        app.set_show_skills_in_slash_menu(!app.show_skills_in_slash_menu(), cx)
+                    })),
             )
             .child("Follow-up behavior (⌘⇧↩ uses the alternate)")
             .child(
@@ -137,18 +149,19 @@ impl NativeApp {
                 let Some(name) = command["name"].as_str() else {
                     continue;
                 };
-                if provider
-                    .skills_for_cwd(self.selected_workspace().as_deref())
-                    .iter()
-                    .any(|skill| {
-                        skill["name"]
-                            .as_str()
-                            .is_some_and(|skill| skill.eq_ignore_ascii_case(name))
-                    })
+                if self.show_skills_in_slash_menu()
+                    && provider
+                        .skills_for_cwd(self.selected_workspace().as_deref())
+                        .iter()
+                        .any(|skill| {
+                            skill["name"]
+                                .as_str()
+                                .is_some_and(|skill| skill.eq_ignore_ascii_case(name))
+                        })
                 {
                     continue;
                 }
-                if matches!(name, "model" | "plan" | "default" | "usage-limits") {
+                if matches!(name, "model" | "plan" | "default") {
                     continue;
                 }
                 if name == "compact" && self.compact_disabled_reason(cx).is_some() {
@@ -163,13 +176,19 @@ impl NativeApp {
                         .into(),
                     command: if name == "compact" {
                         ComposerCommand::Compact
+                    } else if name == "usage-limits" {
+                        ComposerCommand::UsageLimits
                     } else {
                         ComposerCommand::Insert(format!("/{name} "))
                     },
                 });
             }
         }
-        for skill in provider.skills_for_cwd(self.selected_workspace().as_deref()) {
+        for skill in provider
+            .skills_for_cwd(self.selected_workspace().as_deref())
+            .into_iter()
+            .filter(|_| marker == '$' || self.show_skills_in_slash_menu())
+        {
             let Some(name) = skill["name"].as_str() else {
                 continue;
             };
@@ -250,6 +269,7 @@ impl NativeApp {
                 self.change_thread_mode("thread.interaction-mode.set", "interactionMode", mode, cx)
             }
             ComposerCommand::Compact => self.compact_context(cx),
+            ComposerCommand::UsageLimits => self.toggle_usage_limits(cx),
             ComposerCommand::Insert(_) => {}
         }
         self.remember_composer_draft(cx);
@@ -464,6 +484,8 @@ impl NativeApp {
                 let key = if action.secondary { "cmd-enter" } else if action.shift { "shift-enter" } else { "enter" };
                 app.composer_action_key(key, window, cx);
             }))
+            .capture_action(cx.listener(|app, _: &gpui_kit::component::input::Copy, window, cx| app.composer_action_key("cmd-c", window, cx)))
+            .capture_action(cx.listener(|app, _: &gpui_kit::component::input::Cut, window, cx| app.composer_action_key("cmd-x", window, cx)))
             .capture_action(cx.listener(|app, _: &gpui_kit::component::input::MoveUp, window, cx| app.composer_action_key("up", window, cx)))
             .capture_action(cx.listener(|app, _: &gpui_kit::component::input::MoveDown, window, cx| app.composer_action_key("down", window, cx)))
             .on_drop::<gpui_kit::ExternalPaths>(cx.listener(|app, paths: &gpui_kit::ExternalPaths, _, cx| {
@@ -622,7 +644,7 @@ impl NativeApp {
                     })
                     .child(Textarea::new(&self.composer).on_paste({
                         let app = cx.entity().downgrade();
-                        move |clipboard, _, cx| app.update(cx, |app, cx| app.paste_composer(clipboard, cx)).unwrap_or(false)
+                        move |clipboard, window, cx| app.update(cx, |app, cx| app.paste_context_fragment(clipboard, window, cx) || app.paste_composer(clipboard, cx)).unwrap_or(false)
                     })),
             )
             .when(self.composer_state.pending_paste.as_ref().is_some_and(|(scope, _)| scope.origin == self.environment_scope && Some(&scope.thread) == self.selected_thread.as_ref()), |view| {
@@ -631,6 +653,37 @@ impl NativeApp {
                     .child(Button::new("paste-as-text").debug_selector(|| "paste-as-text".into()).ghost().small().label("Paste as text").disabled(self.attachment_drafts.uploading).on_click(cx.listener(|app, _, window, cx| app.finish_large_paste(true, window, cx))))
                     .child(Button::new("paste-cancel").debug_selector(|| "paste-cancel".into()).ghost().small().label("Cancel paste").disabled(self.attachment_drafts.uploading).on_click(cx.listener(|app, _, _, cx| { app.composer_state.pending_paste = None; cx.notify(); }))))
             })
+            .children(self.attachment_drafts.missing_stash_resources.iter().filter(|((origin, _), _)| origin == &self.environment_scope).flat_map(|((_, stash), resources)| resources.iter().map(move |r| (stash.clone(), r.clone()))).map(|(stash, resource)| {
+                let id = resource["id"].as_str().unwrap_or_default().to_owned();
+                let restore = stash.clone();
+                let retry_button = format!("stash-retry-{restore}-{id}");
+                div().flex().items_center().gap_2().text_xs().child(format!("Unavailable stash resource: {}", resource["name"].as_str().unwrap_or("file")))
+                    .child(Button::new(gpui_kit::SharedString::from(format!("stash-drop-{id}"))).ghost().small().label("Remove unavailable file").disabled(self.attachment_drafts.stash_writing).on_click(cx.listener(move |app, _, _, cx| app.discard_unavailable_stash_resource(&stash, &id, cx))))
+                    .child(Button::new(gpui_kit::SharedString::from(retry_button)).ghost().small().label("Retry restore").disabled(self.attachment_drafts.stash_writing).on_click(cx.listener(move |app, _, window, cx| app.restore_stash(&restore, window, cx))))
+            }))
+            .children(self.attachment_drafts.transfers.iter().filter(|r| r.owner == (self.environment_scope.clone(), self.selected_thread.clone().unwrap_or_default()) && r.phase != "Attached").map(|row| {
+                let cancel_id = row.id.clone();
+                let retry_id = row.id.clone();
+                let discard_id = row.id.clone();
+                let active = matches!(row.phase, "Waiting" | "Reading" | "Preparing" | "Uploading");
+                div().flex().items_center().gap_2().text_xs().child(format!("{} — {}", row.name, row.phase))
+                    .when(active, |view| view.child(Button::new(gpui_kit::SharedString::from(format!("transfer-cancel-{}", row.id))).ghost().small().label("Cancel").on_click(cx.listener(move |app, _, _, cx| app.cancel_transfer(&cancel_id, cx)))))
+                    .when(row.retry.is_some(), |view| view
+                        .child(Button::new(gpui_kit::SharedString::from(format!("transfer-retry-{}", row.id))).ghost().small().label("Retry").disabled(self.attachment_drafts.uploading).on_click(cx.listener(move |app, _, _, cx| app.retry_transfer(&retry_id, cx))))
+                        .child(Button::new(gpui_kit::SharedString::from(format!("transfer-discard-{}", row.id))).ghost().small().label("Discard failed transfer").on_click(cx.listener(move |app, _, _, cx| app.cancel_transfer(&discard_id, cx)))))
+            }))
+            .children(self.draft_context_records().into_iter().filter(|r| self.composer.read(cx).value().contains(&r.reference())).map(|record| {
+                let id = record.id().to_owned();
+                div().flex().items_center().gap_2().text_xs()
+                    .child(format!("{}: {}", record.kind(), record.label()))
+                    .when(record.kind() == "assistant-citation", |view| {
+                        let citation = record.value()["payload"].clone();
+                        view.child(Button::new(gpui_kit::SharedString::from(format!("draft-citation-source-{id}"))).ghost().small().label("Quoted source")
+                            .on_click(cx.listener(move |app, _, _, cx| app.jump_to_citation(&citation, cx))))
+                    })
+                    .child(Button::new(gpui_kit::SharedString::from(format!("context-remove-{id}"))).ghost().small().label("Remove")
+                        .on_click(cx.listener(move |app, _, window, cx| app.remove_draft_context(&id, window, cx))))
+            }))
             .when(!self.attachments.is_empty(), |view| {
                 view.child(
                     div().flex().flex_wrap().gap_1().children(
@@ -640,6 +693,9 @@ impl NativeApp {
                             .map(|(index, attachment)| {
                                 let id = attachment["id"].as_str().unwrap_or_default().to_owned();
                                 let attachment_scope = self.attachment_scope();
+                                let preview_id = id.clone();
+                                let expand_key = (self.environment_scope.clone(), id.clone());
+                                let has_preview = self.composer_state.previews.contains_key(&expand_key);
                                 let name = attachment["name"]
                                     .as_str()
                                     .unwrap_or("attachment")
@@ -653,7 +709,8 @@ impl NativeApp {
                                     .bg(muted)
                                     .text_xs()
                                     .text_color(muted_foreground)
-                                    .when_some(self.composer_state.previews.get(&(self.environment_scope.clone(), id.clone())), |view, preview| view.child(gpui_kit::img(preview.clone()).w(px(40.)).h(px(40.)).object_fit(gpui_kit::ObjectFit::Contain)))
+                                    .when_some(self.composer_state.previews.get(&(self.environment_scope.clone(), id.clone())), |view, preview| view.child(div().id(gpui_kit::SharedString::from(format!("expand-preview-{index}"))).debug_selector(move || format!("expand-preview-{index}")).child(gpui_kit::img(preview.clone()).w(px(40.)).h(px(40.)).object_fit(gpui_kit::ObjectFit::Contain)).on_click(cx.listener(move |app, _, _, cx| { app.composer_state.expanded_preview = Some(expand_key.clone()); cx.notify(); }))))
+                                    .when(!has_preview && attachment["type"] == "image", |view| view.child(Button::new(gpui_kit::SharedString::from(format!("recover-preview-{index}"))).ghost().small().label(if self.composer_state.preview_errors.contains(&(self.environment_scope.clone(), id.clone())) { "Retry preview" } else { "Load preview" }).disabled(self.composer_state.preview_loading.contains(&(self.environment_scope.clone(), id.clone()))).on_click(cx.listener(move |app, _, _, cx| app.recover_attachment_preview(preview_id.clone(), cx)))))
                                     .child(name)
                                     .child(
                                         Button::new(gpui_kit::SharedString::from(format!(
@@ -674,6 +731,11 @@ impl NativeApp {
                             }),
                     ),
                 )
+            })
+            .when_some(self.composer_state.expanded_preview.as_ref().filter(|(origin, id)| origin == &self.environment_scope && self.attachments.iter().any(|a| a["id"].as_str() == Some(id))), |view, key| {
+                view.child(div().flex().flex_col().gap_2()
+                    .when_some(self.composer_state.previews.get(key), |view, image| view.child(gpui_kit::img(image.clone()).w_full().h(px(240.)).object_fit(gpui_kit::ObjectFit::Contain)))
+                    .child(Button::new("composer-preview-close").debug_selector(|| "composer-preview-close".into()).ghost().small().label("Close preview").on_click(cx.listener(|app, _, _, cx| { app.composer_state.expanded_preview = None; cx.notify(); }))))
             })
             .when_some(slash_entries, |view, entries| {
                 view.child(

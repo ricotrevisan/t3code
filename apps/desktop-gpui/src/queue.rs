@@ -77,6 +77,7 @@ struct ThreadQueue {
     observed_tool: Option<String>,
     tools: HashMap<u64, Option<String>>,
     source_plans: HashMap<u64, Value>,
+    contexts: HashMap<u64, Value>,
     consumed_tools: HashSet<String>,
     /// Rejected messages require explicit retry or removal.
     held: HashSet<u64>,
@@ -150,11 +151,20 @@ impl Queues {
         let message = queue.messages.remove(index);
         queue.tools.remove(&id);
         queue.source_plans.remove(&id);
+        queue.contexts.remove(&id);
         queue.held.remove(&id);
         self.forget_if_empty(thread_id);
         Some(message)
     }
 
+    pub fn set_context(&mut self, thread_id: &str, id: u64, context: Value) {
+        if let Some(queue) = self.threads.get_mut(thread_id) {
+            queue.contexts.insert(id, context);
+        }
+    }
+    pub fn context(&self, thread_id: &str, id: u64) -> Option<Value> {
+        self.threads.get(thread_id)?.contexts.get(&id).cloned()
+    }
     pub fn set_source_plan(&mut self, thread_id: &str, id: u64, source: Value) {
         if let Some(queue) = self.threads.get_mut(thread_id) {
             queue.source_plans.insert(id, source);
@@ -291,6 +301,7 @@ impl Queues {
             queue.messages.retain(|message| message.id != id);
             queue.tools.remove(&id);
             queue.source_plans.remove(&id);
+            queue.contexts.remove(&id);
             queue.awaiting_turn =
                 queue.observed == queue.baseline && queue.observed_detail == queue.baseline_detail;
         } else {

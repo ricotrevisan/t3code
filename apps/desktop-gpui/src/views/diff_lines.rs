@@ -70,6 +70,36 @@ pub(crate) fn lines(patch: &str) -> Vec<DiffLine<'_>> {
         })
         .collect()
 }
+/// Pair adjacent removed/added runs; gaps never invent line numbers.
+pub(crate) fn split_rows<'a>(
+    rows: &'a [DiffLine<'a>],
+) -> Vec<(Option<&'a DiffLine<'a>>, Option<&'a DiffLine<'a>>)> {
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < rows.len() {
+        if matches!(rows[index].kind, '-' | '+') {
+            let start = index;
+            while index < rows.len() && matches!(rows[index].kind, '-' | '+') {
+                index += 1;
+            }
+            let old = rows[start..index]
+                .iter()
+                .filter(|line| line.kind == '-')
+                .collect::<Vec<_>>();
+            let new = rows[start..index]
+                .iter()
+                .filter(|line| line.kind == '+')
+                .collect::<Vec<_>>();
+            for offset in 0..old.len().max(new.len()) {
+                result.push((old.get(offset).copied(), new.get(offset).copied()));
+            }
+        } else {
+            result.push((Some(&rows[index]), Some(&rows[index])));
+            index += 1;
+        }
+    }
+    result
+}
 impl NativeApp {
     pub(crate) fn render_patch_lines(
         &self,
@@ -80,6 +110,57 @@ impl NativeApp {
         let muted = cx.theme().muted_foreground;
         let green = cx.theme().green;
         let danger = cx.theme().danger;
+        if self.diffs.split {
+            let rows = lines(patch);
+            return div()
+                .flex()
+                .flex_col()
+                .children(split_rows(&rows).into_iter().map(|(old, new)| {
+                    div()
+                        .flex()
+                        .min_w_0()
+                        .children(
+                            [(old, true), (new, false)]
+                                .into_iter()
+                                .map(|(line, before)| {
+                                    let number = line
+                                        .and_then(|line| if before { line.old } else { line.new });
+                                    let text =
+                                        line.map(|line| line.text.to_owned()).unwrap_or_default();
+                                    let color = match line.map(|line| line.kind) {
+                                        Some('-') => danger,
+                                        Some('+') => green,
+                                        Some('@') => muted,
+                                        _ => foreground,
+                                    };
+                                    div()
+                                        .flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_1()
+                                        .border_r_1()
+                                        .border_color(cx.theme().border)
+                                        .child(div().w_8().flex_shrink_0().text_color(muted).child(
+                                            number.map(|n| n.to_string()).unwrap_or_default(),
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .when(self.diffs.wrap, |view| {
+                                                    view.whitespace_normal()
+                                                })
+                                                .when(!self.diffs.wrap, |view| {
+                                                    view.whitespace_nowrap()
+                                                })
+                                                .text_color(color)
+                                                .child(text),
+                                        )
+                                }),
+                        )
+                }))
+                .into_any_element();
+        }
         div()
             .flex()
             .flex_col()
@@ -113,11 +194,23 @@ impl NativeApp {
                             .child(line.text.to_owned()),
                     )
             }))
+            .into_any_element()
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r13_e_split_pairs_replacements_and_preserves_unmatched_lines() {
+        let rows = lines("@@ -7,3 +9,2 @@\n-old1\n-old2\n+new\n same\n");
+        let pairs = split_rows(&rows);
+        assert_eq!(pairs[1].0.unwrap().old, Some(7));
+        assert_eq!(pairs[1].1.unwrap().new, Some(9));
+        assert_eq!(pairs[2].0.unwrap().old, Some(8));
+        assert!(pairs[2].1.is_none());
+        assert_eq!(pairs[3].0.unwrap().old, Some(9));
+        assert_eq!(pairs[3].1.unwrap().new, Some(10));
+    }
     #[test]
     fn unified_line_numbers_follow_hunks_not_metadata() {
         let rows =

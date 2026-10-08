@@ -23,6 +23,8 @@ pub enum Authorization {
     #[default]
     Unknown,
     NotDetermined,
+    Requesting,
+    Failed,
     Denied,
     Authorized,
     Unavailable,
@@ -146,6 +148,7 @@ pub enum Call {
     Badge(usize),
     Delivery(String),
     Receipt(String, DeliveryOutcome),
+    AuthorizationRequested,
 }
 
 pub struct Platform {
@@ -158,6 +161,7 @@ pub struct Platform {
     last_outcome: Option<DeliveryOutcome>,
     authorization: Authorization,
     authorization_epoch: u64,
+    authorization_requests: VecDeque<async_channel::Receiver<Authorization>>,
 }
 impl Platform {
     /// Recording mode never invokes AppKit, including in headless UI tests.
@@ -172,8 +176,67 @@ impl Platform {
             last_outcome: None,
             authorization: Authorization::Unknown,
             authorization_epoch: 0,
+            authorization_requests: VecDeque::new(),
         }
     }
+    /// Queue an OS permission receipt without invoking AppKit in headless tests.
+    pub fn queue_authorization(&mut self) -> async_channel::Sender<Authorization> {
+        assert!(self.recording);
+        let (sender, receiver) = async_channel::bounded(1);
+        self.authorization_requests.push_back(receiver);
+        sender
+    }
+
+    /// User-initiated authorization, independent of notification delivery. Never
+    /// sends a banner; the caller owns preference commit and stale-result guards.
+    pub fn request_authorization(&mut self) -> async_channel::Receiver<Authorization> {
+        self.authorization_epoch += 1;
+        let previous = self.authorization;
+        self.authorization = Authorization::Requesting;
+        if self.recording {
+            self.calls.push(Call::AuthorizationRequested);
+            if let Some(receiver) = self.authorization_requests.pop_front() {
+                return receiver;
+            }
+        }
+        let (sender, receiver) = async_channel::bounded(1);
+        if self.recording {
+            let _ = sender.try_send(previous);
+            return receiver;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use block2::RcBlock;
+            use objc2::runtime::Bool;
+            use objc2_foundation::{NSBundle, NSError};
+            use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
+            let bundle = NSBundle::mainBundle();
+            if bundle.bundleIdentifier().is_none()
+                || !bundle.bundlePath().to_string().ends_with(".app")
+            {
+                let _ = sender.try_send(Authorization::Unavailable);
+            } else {
+                let completion = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+                    let _ = sender.try_send(if !error.is_null() {
+                        Authorization::Failed
+                    } else if granted.as_bool() {
+                        Authorization::Authorized
+                    } else {
+                        Authorization::Denied
+                    });
+                });
+                UNUserNotificationCenter::currentNotificationCenter()
+                    .requestAuthorizationWithOptions_completionHandler(
+                        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Badge,
+                        &completion,
+                    );
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = sender.try_send(Authorization::Unavailable);
+        receiver
+    }
+
     /// Read-only permission probe: never requests authorization or sends a banner.
     pub fn probe_authorization(&mut self) -> async_channel::Receiver<Authorization> {
         self.authorization_epoch += 1;
@@ -221,6 +284,17 @@ impl Platform {
         receiver
     }
 
+    pub fn authorization_request_pending(&self) -> bool {
+        self.authorization == Authorization::Requesting
+    }
+
+    pub fn cancel_authorization_request(&mut self) {
+        if self.authorization_request_pending() {
+            self.authorization_epoch += 1;
+            self.authorization = Authorization::Unknown;
+        }
+    }
+
     pub fn authorization_epoch(&self) -> u64 {
         self.authorization_epoch
     }
@@ -249,11 +323,17 @@ impl Platform {
 
     pub fn state_text(&self) -> &'static str {
         match self.authorization {
+            Authorization::Requesting => {
+                return "Requesting notification authorization…";
+            }
+            Authorization::Failed => {
+                return "Could not determine notification authorization";
+            }
             Authorization::Denied => {
                 return "Notification authorization denied · enable it in system settings";
             }
             Authorization::NotDetermined => {
-                return "Notification authorization not determined · requested when a background event needs delivery";
+                return "Notification authorization not determined · choose a desktop-notification mode to request it";
             }
             Authorization::Unavailable => {
                 return "Desktop notifications unavailable · a bundled app on a supported platform is required";

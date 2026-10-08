@@ -3,10 +3,11 @@ use gpui_kit::base::Selectable;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable, Icon, Sizable,
     button::{Button, ButtonVariants as _},
+    menu::{ContextMenuExt, PopupMenuItem},
     tooltip::Tooltip,
 };
 use gpui_kit::{Context, FontWeight, anchored, deferred, div, prelude::*};
-use t3code_desktop_gpui::{conversation, palette, sidebar};
+use t3code_desktop_gpui::{conversation, sidebar};
 
 use crate::NativeApp;
 
@@ -57,21 +58,33 @@ impl NativeApp {
                 (files.len(), additions, deletions)
             })
             .filter(|(files, _, _)| *files > 0);
-        let linked_pr = self
-            .detail
-            .thread
-            .as_ref()
-            .filter(|detail| detail["id"].as_str() == self.selected_thread.as_deref())
-            .and_then(|detail| detail["pullRequests"].as_array())
-            .and_then(|links| links.first())
-            .and_then(|link| {
-                let url = link["url"].as_str()?.to_owned();
-                let number = link["number"].as_u64()?;
-                let state = link["snapshot"]["state"]
-                    .as_str()
-                    .unwrap_or("status unknown");
-                Some((format!("PR #{number} · {state}"), url))
-            });
+        let live_pr = self.live_git_status().and_then(|status| {
+            let pr = &status["pr"];
+            Some((
+                format!(
+                    "PR #{} · {}",
+                    pr["number"].as_u64()?,
+                    pr["state"].as_str().unwrap_or("status unknown")
+                ),
+                pr["url"].as_str()?.to_owned(),
+            ))
+        });
+        let linked_pr = live_pr.or_else(|| {
+            self.detail
+                .thread
+                .as_ref()
+                .filter(|detail| detail["id"].as_str() == self.selected_thread.as_deref())
+                .and_then(|detail| detail["pullRequests"].as_array())
+                .and_then(|links| links.first())
+                .and_then(|link| {
+                    let url = link["url"].as_str()?.to_owned();
+                    let number = link["number"].as_u64()?;
+                    let state = link["snapshot"]["state"]
+                        .as_str()
+                        .unwrap_or("status unknown");
+                    Some((format!("PR #{number} · {state}"), url))
+                })
+        });
         let header_project = self
             .selected_project
             .as_ref()
@@ -121,7 +134,16 @@ impl NativeApp {
                                     })
                                     .cursor_pointer()
                                     .on_click(cx.listener(|app, _, window, cx| app.new_thread(window, cx)))
-                                    .child(project),
+                                    .child(project)
+                                    .context_menu({
+                                        let entity = cx.entity().downgrade();
+                                        move |menu,_,_| {
+                                            let entity = entity.clone();
+                                            menu.item(PopupMenuItem::new("Project settings").on_click(move |_,window,cx| {
+                                                let _ = entity.update(cx,|app,cx|app.open_header_project_settings(window,cx));
+                                            }))
+                                        }
+                                    }),
                             )
                         })
                         .when_some(self.header_rename.input.as_ref(), |view, input| view.child(
@@ -151,7 +173,13 @@ impl NativeApp {
                                     }
                                 }))
                                 .child(header_title),
-                        )),
+                        ))
+                        .child(Button::new("header-title-actions").debug_selector(|| "header-title-actions".into())
+                            .ghost().small().icon(IconName::ChevronDown).tooltip("Thread actions")
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                let open = !app.thread_menu_open;
+                                app.close_thread_menu(); app.thread_menu_open = open; cx.notify();
+                            }))),
                 )
                 .child(
                     div()
@@ -226,7 +254,16 @@ impl NativeApp {
                             )
                         }),
                 )
-                // Diff totals have their own line rather than squeezing out runtime state.
+                .when_some(self.live_git_status().filter(|s| s["isRepo"] == true), |view, status| {
+                    let files = status["workingTree"]["files"].as_array().map_or(0, Vec::len);
+                    let insertions = status["workingTree"]["insertions"].as_u64().unwrap_or(0);
+                    let deletions = status["workingTree"]["deletions"].as_u64().unwrap_or(0);
+                    view.child(Button::new("header-current-diff").debug_selector(|| "header-current-diff".into())
+                        .ghost().small().label(format!("Working tree · {files} files +{insertions} -{deletions}"))
+                        .tooltip("Current checkout changes, not a turn checkpoint")
+                        .on_click(cx.listener(|app, _, _, cx| app.view_git_diff("working-tree", cx))))
+                })
+                // Checkpoint scope is explicit; it is not live working-tree status.
                 .when_some(header_diff, |view, (files, additions, deletions)| {
                     view.child(
                         div()
@@ -244,7 +281,7 @@ impl NativeApp {
                             .bg(muted)
                             .text_xs()
                             .text_color(muted_foreground)
-                            .child(format!("{files} files"))
+                            .child(format!("Last checkpoint · {files} files"))
                             .child(div().text_color(green).child(format!("+{additions}")))
                             .child(div().text_color(danger).child(format!("-{deletions}"))),
                     )
@@ -271,21 +308,8 @@ impl NativeApp {
                         )
                         .child(Button::new("open-editor-picker").ghost().small().label("Open in…")
                             .on_click(cx.listener(|app, _, _, cx| { app.editor_choice.open = !app.editor_choice.open; cx.notify(); })))
-                        .child(
-                            Button::new("project-actions-header")
-                                .debug_selector(|| "project-actions-header".into())
-                                .label("Actions")
-                                .ghost()
-                                .small()
-                                .tooltip("Edit project actions and setup scripts")
-                                .on_click(cx.listener(|app, _, window, cx| {
-                                    app.execute_command(
-                                        palette::Command::ProjectActions,
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        )
+                        .child(self.render_header_actions(cx))
+                        .child(self.render_shell_terminal_control(cx))
                         .child(
                             self.render_git_split(cx),
                         )

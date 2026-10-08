@@ -5,6 +5,7 @@ use gpui_kit::{
         ActiveTheme as _, Disableable as _, Selectable as _,
         button::{Button, ButtonVariants},
         input::Input,
+        menu::{ContextMenuExt as _, PopupMenuItem},
     },
     prelude::*,
     *,
@@ -78,6 +79,7 @@ impl NativeApp {
         let mut header = div()
             .px_2()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_1()
             .min_w_0()
@@ -87,7 +89,7 @@ impl NativeApp {
                     .debug_selector(|| "terminal-tabs".into())
                     .flex()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(120.))
                     .overflow_x_scroll()
                     .children(tab_buttons),
             )
@@ -103,6 +105,31 @@ impl NativeApp {
                     })),
             )
             .child(
+                Button::new("terminal-search")
+                    .debug_selector(|| "terminal-search".into())
+                    .ghost()
+                    .label("Find")
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        app.terminal_drawer.searching = !app.terminal_drawer.searching;
+                        if app.terminal_drawer.searching {
+                            app.terminal_drawer
+                                .search
+                                .update(cx, |input, cx| input.focus(window, cx));
+                        } else {
+                            app.terminal_drawer.focus.focus(window, cx);
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("terminal-discover")
+                    .debug_selector(|| "terminal-discover".into())
+                    .ghost()
+                    .label("Restore sessions")
+                    .disabled(!connected)
+                    .on_click(cx.listener(|app, _, _, cx| app.terminal_discover(cx))),
+            )
+            .child(
                 Button::new("terminal-hide")
                     .debug_selector(|| "terminal-hide".into())
                     .ghost()
@@ -112,7 +139,32 @@ impl NativeApp {
         if let Some(id) = &tab_id {
             let rename_id = id.clone();
             let close_id = id.clone();
+            let restart_id = id.clone();
+            let clear_id = id.clone();
+            let ready = self.terminal_active().is_some_and(|tab| {
+                tab.exists && tab.stream_ready && tab.attached == Some(self.generation)
+            });
             header = header
+                .child(
+                    Button::new("terminal-restart")
+                        .debug_selector(|| "terminal-restart".into())
+                        .ghost()
+                        .label("Restart")
+                        .disabled(!connected || tab_busy || !ready)
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.terminal_restart(&restart_id, false, cx)
+                        })),
+                )
+                .child(
+                    Button::new("terminal-clear")
+                        .debug_selector(|| "terminal-clear".into())
+                        .ghost()
+                        .label("Clear")
+                        .disabled(!connected || tab_busy || !ready)
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.terminal_rpc(&clear_id, "terminal.clear", json!({}), cx)
+                        })),
+                )
                 .child(
                     Button::new("terminal-rename")
                         .debug_selector(|| "terminal-rename".into())
@@ -123,7 +175,11 @@ impl NativeApp {
                                 .terminal_drawer
                                 .tabs
                                 .iter()
-                                .find(|tab| tab.id == rename_id)
+                                .find(|tab| {
+                                    tab.id == rename_id
+                                        && tab.scope == app.environment_scope
+                                        && Some(&tab.thread) == app.selected_thread.as_ref()
+                                })
                                 .unwrap()
                                 .title
                                 .clone();
@@ -174,6 +230,32 @@ impl NativeApp {
                     ),
             )
             .child(header);
+        if self.terminal_drawer.searching {
+            drawer = drawer.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .child(Input::new(&self.terminal_drawer.search).w(px(180.)))
+                    .child(
+                        Button::new("terminal-find-previous")
+                            .ghost()
+                            .label("Previous")
+                            .on_click(cx.listener(|app, _, _, cx| app.terminal_find(true, cx))),
+                    )
+                    .child(
+                        Button::new("terminal-find-next")
+                            .debug_selector(|| "terminal-find-next".into())
+                            .ghost()
+                            .label("Next")
+                            .on_click(cx.listener(|app, _, _, cx| app.terminal_find(false, cx))),
+                    )
+                    .when(self.terminal_drawer.search_missing, |this| {
+                        this.child("No matches")
+                    }),
+            );
+        }
         if let Some(id) = self.terminal_drawer.renaming.clone() {
             let save_id = id.clone();
             drawer = drawer.child(
@@ -196,14 +278,8 @@ impl NativeApp {
                                     .chars()
                                     .take(128)
                                     .collect::<String>();
-                                if !value.is_empty()
-                                    && let Some(tab) = app
-                                        .terminal_drawer
-                                        .tabs
-                                        .iter_mut()
-                                        .find(|tab| tab.id == save_id)
-                                {
-                                    tab.title = value;
+                                if !value.is_empty() {
+                                    app.terminal_rename(&save_id, value, cx);
                                 }
                                 app.terminal_drawer.renaming = None;
                                 app.terminal_drawer.focus.focus(window, cx);
@@ -265,6 +341,40 @@ impl NativeApp {
                     ),
             );
         }
+        if let Some(id) = self.terminal_drawer.restart_confirm.clone()
+            && self.terminal_active().is_some_and(|tab| tab.id == id)
+        {
+            drawer = drawer.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child("Restart this terminal? Its running process will be stopped.")
+                    .child(
+                        Button::new("terminal-confirm-restart")
+                            .debug_selector(|| "terminal-confirm-restart".into())
+                            .danger()
+                            .label("Restart terminal")
+                            .disabled(!connected || tab_busy)
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.terminal_restart(&id, true, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("terminal-cancel-restart")
+                            .ghost()
+                            .label("Cancel")
+                            .on_click(cx.listener(|app, _, window, cx| {
+                                app.terminal_drawer.restart_confirm = None;
+                                app.terminal_drawer.focus.focus(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        if let Some(error) = &self.terminal_drawer.local_error {
+            drawer = drawer.child(div().text_color(cx.theme().danger).child(error.clone()));
+        }
         if !connected {
             drawer = drawer
                 .child(div().child("Disconnected — input disabled; terminal state is unknown."));
@@ -272,7 +382,11 @@ impl NativeApp {
         let Some(id) = tab_id else {
             return Some(
                 drawer
-                    .child("Select a saved thread and connect to open a terminal.")
+                    .child(if self.terminal_drawer.pending_open.is_some() {
+                        "Discovering this thread's terminal sessions…"
+                    } else {
+                        "Select a saved thread and connect to open a terminal, or choose New."
+                    })
                     .into_any_element(),
             );
         };
@@ -297,7 +411,11 @@ impl NativeApp {
         let font_size = cx.theme().mono_font_size;
         let line_height = (font_size / px(1.) * 1.5).ceil();
         // Use the actual monospace advance, not a guessed character width.
-        let font = font(cx.theme().mono_font_family.clone());
+        let font = font(crate::settings_fonts::family(
+            3,
+            cx.theme().mono_font_family.clone(),
+            cx,
+        ));
         let theme = cx.theme().clone();
         let draw_id = id.clone();
         let resize_id = id.clone();
@@ -480,6 +598,7 @@ impl NativeApp {
         .size_full();
         // Input captures only when the grid owns focus; cmd-j bubbles to the app.
         let input_id = id.clone();
+        let menu_app = cx.entity().downgrade();
         let surface = div()
             .id("terminal-grid")
             .debug_selector(|| "terminal-grid".into())
@@ -488,6 +607,20 @@ impl NativeApp {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
+            .on_action(
+                cx.listener(|app, _: &gpui_kit::component::input::Copy, _, cx| {
+                    if let Some(capture) = app.terminal_capture() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(capture.text));
+                    }
+                    cx.stop_propagation();
+                }),
+            )
+            .on_action(
+                cx.listener(|app, _: &gpui_kit::component::input::Paste, window, cx| {
+                    app.terminal_paste(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_action(cx.listener(|app, key: &super::keys::TerminalKey, _, cx| {
                 if let Some(tab) = app.terminal_active() {
                     let id = tab.id.clone();
@@ -510,12 +643,11 @@ impl NativeApp {
                 {
                     return;
                 }
-                let Some(tab) = app
-                    .terminal_drawer
-                    .tabs
-                    .iter()
-                    .find(|tab| tab.id == input_id)
-                else {
+                let Some(tab) = app.terminal_drawer.tabs.iter().find(|tab| {
+                    tab.id == input_id
+                        && tab.scope == app.environment_scope
+                        && Some(&tab.thread) == app.selected_thread.as_ref()
+                }) else {
                     return;
                 };
                 if key.modifiers.platform && key.key == "c" {
@@ -545,11 +677,11 @@ impl NativeApp {
                     app.terminal_drawer.focus.focus(window, cx);
                     let width = app.terminal_drawer.cell_width;
                     if let Some((row, col)) = app.terminal_point(event.position, width, line_height)
-                        && let Some(tab) = app
-                            .terminal_drawer
-                            .tabs
-                            .iter_mut()
-                            .find(|tab| tab.id == draw_id)
+                        && let Some(tab) = app.terminal_drawer.tabs.iter_mut().find(|tab| {
+                            tab.id == draw_id
+                                && tab.scope == app.environment_scope
+                                && Some(&tab.thread) == app.selected_thread.as_ref()
+                        })
                     {
                         tab.screen.select(row, col, true);
                         cx.notify();
@@ -566,7 +698,11 @@ impl NativeApp {
                 let width = app.terminal_drawer.cell_width;
                 if let Some((row, col)) =
                     app.terminal_point(event.position, width, app.terminal_drawer.line_height)
-                    && let Some(tab) = app.terminal_drawer.tabs.iter_mut().find(|tab| tab.id == id)
+                    && let Some(tab) = app.terminal_drawer.tabs.iter_mut().find(|tab| {
+                        tab.id == id
+                            && tab.scope == app.environment_scope
+                            && Some(&tab.thread) == app.selected_thread.as_ref()
+                    })
                 {
                     tab.screen.select(row, col, false);
                     cx.notify();
@@ -576,7 +712,11 @@ impl NativeApp {
                 let Some(id) = app.terminal_active().map(|tab| tab.id.clone()) else {
                     return;
                 };
-                if let Some(tab) = app.terminal_drawer.tabs.iter_mut().find(|tab| tab.id == id) {
+                if let Some(tab) = app.terminal_drawer.tabs.iter_mut().find(|tab| {
+                    tab.id == id
+                        && tab.scope == app.environment_scope
+                        && Some(&tab.thread) == app.selected_thread.as_ref()
+                }) {
                     tab.screen.scroll(
                         (event
                             .delta
@@ -589,6 +729,124 @@ impl NativeApp {
                 cx.stop_propagation();
             }))
             .child(canvas);
+        let surface = surface.context_menu(move |menu, _, cx| {
+            let has_selection = menu_app
+                .upgrade()
+                .is_some_and(|app| app.read(cx).terminal_capture().is_some());
+            let can_paste = menu_app.upgrade().is_some_and(|app| {
+                let app = app.read(cx);
+                app.connection_phase.ready()
+                    && app.shell.synchronized
+                    && app.terminal_active().is_some_and(|tab| {
+                        tab.stream_ready && !tab.busy && tab.attached == Some(app.generation)
+                    })
+            });
+            let owner = menu_app
+                .upgrade()
+                .and_then(|app| app.read(cx).terminal_menu_owner());
+            let capture = menu_app
+                .upgrade()
+                .and_then(|app| app.read(cx).terminal_capture());
+            let context_owner = owner.clone();
+            let context_app = menu_app.clone();
+            let copy_owner = owner.clone();
+            let paste_owner = owner.clone();
+            let link_owner = owner;
+            let clipboard_text = menu_app.upgrade().and_then(|app| {
+                app.read(cx)
+                    .terminal_active()
+                    .and_then(|tab| tab.screen.selection())
+            });
+            let copy_app = menu_app.clone();
+            let paste_app = menu_app.clone();
+            let link_app = menu_app.clone();
+            let link = menu_app
+                .upgrade()
+                .and_then(|app| app.read(cx).terminal_capture())
+                .and_then(|capture| url::Url::parse(capture.text.trim()).ok())
+                .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
+            let menu = if let Some(url) = link {
+                menu.item(
+                    PopupMenuItem::element(|_, _| {
+                        div()
+                            .id("terminal-menu-link")
+                            .debug_selector(|| "terminal-menu-link".into())
+                            .child("Open selected link")
+                    })
+                    .on_click(move |_, _, cx| {
+                        if link_app
+                            .upgrade()
+                            .is_some_and(|app| app.read(cx).terminal_menu_current(&link_owner))
+                        {
+                            cx.open_url(url.as_str());
+                        }
+                    }),
+                )
+            } else {
+                menu
+            };
+            menu.item(
+                PopupMenuItem::element(|_, _| {
+                    div()
+                        .id("terminal-menu-chat")
+                        .debug_selector(|| "terminal-menu-chat".into())
+                        .child("Add to chat")
+                })
+                .disabled(capture.is_none())
+                .on_click(move |_, window, cx| {
+                    let _ = context_app.update(cx, |app, cx| {
+                        if !app.terminal_menu_current(&context_owner) {
+                            app.report_error(
+                                "Terminal selection belongs to a different session",
+                                cx,
+                            );
+                            return;
+                        }
+                        if let Some(capture) = &capture {
+                            app.terminal_intake_capture(capture, window, cx);
+                        }
+                    });
+                }),
+            )
+            .item(
+                PopupMenuItem::element(|_, _| {
+                    div()
+                        .id("terminal-menu-copy")
+                        .debug_selector(|| "terminal-menu-copy".into())
+                        .child("Copy")
+                })
+                .disabled(!has_selection)
+                .on_click(move |_, window, cx| {
+                    let _ = copy_app.update(cx, |app, cx| {
+                        if !app.terminal_menu_current(&copy_owner) {
+                            return;
+                        }
+                        if let Some(text) = &clipboard_text {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        }
+                        app.terminal_drawer.focus.focus(window, cx);
+                    });
+                }),
+            )
+            .item(
+                PopupMenuItem::element(|_, _| {
+                    div()
+                        .id("terminal-menu-paste")
+                        .debug_selector(|| "terminal-menu-paste".into())
+                        .child("Paste")
+                })
+                .disabled(!can_paste)
+                .on_click(move |_, window, cx| {
+                    let _ = paste_app.update(cx, |app, cx| {
+                        if !app.terminal_menu_current(&paste_owner) {
+                            return;
+                        }
+                        app.terminal_paste(window, cx);
+                        app.terminal_drawer.focus.focus(window, cx);
+                    });
+                }),
+            )
+        });
         Some(
             drawer
                 .child(div().flex().flex_1().min_h_0().px_2().pb_2().child(surface))

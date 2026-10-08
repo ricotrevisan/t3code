@@ -11,6 +11,9 @@ pub const TERMINAL_HEIGHT: (f32, f32, f32) = (180.0, 260.0, 900.0);
 pub struct WindowState {
     pub width: f32,
     pub height: f32,
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub maximized: bool,
     pub context_meter_hidden: bool,
     pub notifications: crate::notifications::Preferences,
     pub sidebar_open: bool,
@@ -26,6 +29,9 @@ impl Default for WindowState {
         Self {
             width: 0.0,
             height: 0.0,
+            x: None,
+            y: None,
+            maximized: false,
             context_meter_hidden: false,
             notifications: crate::notifications::Preferences::default(),
             sidebar_open: true,
@@ -39,9 +45,38 @@ impl Default for WindowState {
 }
 
 impl WindowState {
+    /// Recover a fully visible normal rectangle against current displays. A
+    /// disconnected display or corrupt position falls back to the primary;
+    /// legacy size-only state is centred there. Never restore off-screen chrome.
+    pub fn restore_rect(&self, displays: &[[f32; 4]]) -> Option<[f32; 4]> {
+        let [dx, dy, dw, dh] = *displays.first()?;
+        let (width, height) = self.size().unwrap_or((1280.0, 900.0));
+        if let (Some(x), Some(y)) = (self.x, self.y)
+            && x.is_finite()
+            && y.is_finite()
+            && displays.iter().any(|[dx, dy, dw, dh]| {
+                x >= *dx && y >= *dy && x + width <= dx + dw && y + height <= dy + dh
+            })
+        {
+            return Some([x, y, width, height]);
+        }
+        let width = width.min(dw);
+        let height = height.min(dh);
+        Some([
+            dx + (dw - width) / 2.0,
+            dy + (dh - height) / 2.0,
+            width,
+            height,
+        ])
+    }
+
     /// The saved size, when it is large enough to restore.
     pub fn size(&self) -> Option<(f32, f32)> {
-        (self.width >= 480.0 && self.height >= 360.0).then_some((self.width, self.height))
+        (self.width.is_finite()
+            && self.height.is_finite()
+            && self.width >= 480.0
+            && self.height >= 360.0)
+            .then_some((self.width, self.height))
     }
 }
 
@@ -93,14 +128,29 @@ mod tests {
     #[test]
     fn terminal_height_restart_legacy_and_clamped_restore() {
         assert_eq!(parse("{}").terminal_height, TERMINAL_HEIGHT.1);
-        assert_eq!(parse(r#"{"terminal_height":1200}"#).terminal_height, TERMINAL_HEIGHT.2);
-        assert_eq!(parse(r#"{"terminal_height":10}"#).terminal_height, TERMINAL_HEIGHT.0);
-        assert_eq!(parse(r#"{"terminal_height":-1}"#).terminal_height, TERMINAL_HEIGHT.1);
+        assert_eq!(
+            parse(r#"{"terminal_height":1200}"#).terminal_height,
+            TERMINAL_HEIGHT.2
+        );
+        assert_eq!(
+            parse(r#"{"terminal_height":10}"#).terminal_height,
+            TERMINAL_HEIGHT.0
+        );
+        assert_eq!(
+            parse(r#"{"terminal_height":-1}"#).terminal_height,
+            TERMINAL_HEIGHT.1
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("window.json");
-        let state = WindowState { terminal_height: 420.0, ..WindowState::default() };
+        let state = WindowState {
+            terminal_height: 420.0,
+            ..WindowState::default()
+        };
         save_to(&path, state).unwrap();
-        assert_eq!(parse(&std::fs::read_to_string(path).unwrap()).terminal_height, 420.0);
+        assert_eq!(
+            parse(&std::fs::read_to_string(path).unwrap()).terminal_height,
+            420.0
+        );
     }
 
     #[test]
@@ -142,6 +192,46 @@ mod tests {
                 assert_eq!(restarted.notifications, state.notifications);
             }
         }
+    }
+
+    #[test]
+    fn r13_a_window_position_recovers_disconnected_display_and_legacy_size() {
+        let displays = [[0., 0., 1440., 900.], [-1920., 0., 1920., 1080.]];
+        let state = WindowState {
+            x: Some(-1800.),
+            y: Some(40.),
+            width: 1280.,
+            height: 800.,
+            maximized: true,
+            ..WindowState::default()
+        };
+        assert_eq!(
+            state.restore_rect(&displays),
+            Some([-1800., 40., 1280., 800.])
+        );
+        assert_eq!(
+            state.restore_rect(&displays[..1]),
+            Some([80., 50., 1280., 800.])
+        );
+        assert_eq!(parse(&serde_json::to_string(&state).unwrap()), state);
+        assert_eq!(
+            parse(r#"{"width":1280,"height":800}"#).restore_rect(&displays),
+            Some([80., 50., 1280., 800.])
+        );
+        let corrupt = WindowState {
+            x: Some(f32::NAN),
+            width: f32::INFINITY,
+            ..state
+        };
+        assert_eq!(
+            corrupt.restore_rect(&displays),
+            Some([80., 0., 1280., 900.])
+        );
+        assert_eq!(
+            state.restore_rect(&[[0., 0., 800., 600.]]),
+            Some([0., 0., 800., 600.])
+        );
+        assert_eq!(state.restore_rect(&[]), None);
     }
 
     #[test]

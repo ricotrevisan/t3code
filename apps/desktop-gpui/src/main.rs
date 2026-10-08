@@ -4,8 +4,8 @@ use gpui_kit::component::{
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
 use gpui_kit::{
-    App, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, Point, Subscription, Task,
-    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    App, Context, Entity, FocusHandle, KeyBinding, Pixels, Point, Subscription, Task,
+    Window, WindowOptions, div, prelude::*, px, size,
 };
 use serde_json::Value;
 use t3code_desktop_gpui::{
@@ -124,10 +124,13 @@ enum InspectorSection {
 }
 
 mod app;
+mod platform_shell;
 #[path = "app/connection_health_config.rs"]
 mod server_config_projection;
 #[path = "surfaces/agents/view.rs"]
 mod runtime_agents;
+#[path = "surfaces/usage/view.rs"]
+mod runtime_usage;
 #[path = "surfaces/terminal/mod.rs"]
 mod runtime_terminal;
 mod conversation_presentation;
@@ -135,10 +138,13 @@ mod composer_state;
 mod composer_thumbnail;
 mod theme;
 mod settings_appearance;
+mod settings_theme_library;
+mod settings_fonts;
 mod settings_preferences;
 mod settings_keybindings;
 mod settings_environments;
 mod settings_provider;
+mod settings_provider_interaction;
 mod settings_palette;
 mod settings_projects;
 mod settings_project_actions;
@@ -187,6 +193,7 @@ struct NativeApp {
     selected_thread: Option<String>,
     sidebar_view: sidebar::View,
     sidebar_state: sidebar::State,
+    sidebar_rows: views::r13_b_sidebar_rows::Rows,
     server_config: server_config_projection::Projection,
     thread_undo: app::thread_undo::UndoState,
     sidebar_clock: Option<Task<()>>,
@@ -218,6 +225,9 @@ struct NativeApp {
     composer_state: composer_state::ComposerState,
     settings_open: bool,
     settings_query: Entity<InputState>,
+    theme_editor: settings_theme_library::Editor,
+    font_editor: settings_fonts::Editor,
+    provider_auth_editor: settings_provider_interaction::Editor,
     settings_provider_details: Vec<Value>,
     settings_provider_task: Option<Task<()>>,
     subscription_enqueues: std::collections::HashMap<String, Task<()>>,
@@ -235,6 +245,8 @@ struct NativeApp {
     workspace_split: Entity<ResizableState>,
     thread_menu_open: bool,
     git_header: app::git_actions::GitHeader,
+    git_live: app::git_live::LiveGit,
+    header_action_preferences: app::git_header_actions::ActionPreferences,
     git_picker: app::git_picker::PickerNavigation,
     editor_choice: app::git_editors::EditorChoice,
     header_rename: app::git_identity::HeaderRename,
@@ -342,6 +354,7 @@ struct NativeApp {
     notification_platform: t3code_desktop_gpui::notification_platform::Platform,
     toast_id: u64,
     thread_required_toast: Option<u64>,
+    thread_required_status: bool,
     /// Whether the window has OS focus; a focused window still notifies for other threads.
     window_active: bool,
     _subscriptions: Vec<Subscription>,
@@ -541,11 +554,8 @@ impl NativeApp {
         }));
         subscriptions.push(cx.observe_window_bounds(window, |app, window, cx| {
             app.reset_splits(cx);
-            if let gpui_kit::WindowBounds::Windowed(bounds) = window.window_bounds()
-                && let Some(state) = &mut app.saved_window
-            {
-                state.width = bounds.size.width / px(1.);
-                state.height = bounds.size.height / px(1.);
+            if let Some(state) = &mut app.saved_window {
+                platform_shell::remember_bounds(state, window);
             }
         }));
         let mut app = Self {
@@ -579,6 +589,7 @@ impl NativeApp {
             selected_thread: None,
             sidebar_view: sidebar::View::Active,
             sidebar_state: sidebar::State::default(),
+            sidebar_rows: views::r13_b_sidebar_rows::Rows::default(),
             server_config: server_config_projection::Projection::default(),
             thread_undo: app::thread_undo::UndoState::default(),
             sidebar_clock: None,
@@ -607,6 +618,9 @@ impl NativeApp {
             model_override: None,
             provider_catalog: vec![],
             settings_query: Self::create_settings_query(window, cx),
+            theme_editor: settings_theme_library::Editor::new(window, cx),
+            font_editor: settings_fonts::Editor::new(window, cx),
+            provider_auth_editor: settings_provider_interaction::Editor::new(window, cx),
             settings_provider_details: vec![],
             settings_provider_task: None,
             subscription_enqueues: Default::default(),
@@ -646,6 +660,8 @@ impl NativeApp {
             right_tab: RightTab::Inspector,
             available_editors: Vec::new(),
             git_header: Default::default(),
+            git_live: Default::default(),
+            header_action_preferences: app::git_header_actions::ActionPreferences::restore(),
             git_picker: Default::default(),
             editor_choice: app::git_editors::EditorChoice::restore(),
             header_rename: Default::default(),
@@ -738,6 +754,7 @@ impl NativeApp {
             ),
             toast_id: 0,
             thread_required_toast: None,
+            thread_required_status: false,
             window_active: window.is_window_active(),
             _subscriptions: subscriptions,
         };
@@ -805,6 +822,7 @@ impl Render for NativeApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.clamp_terminal_height(_window);
         self.terminal_synchronize(cx);
+        self.sync_git_status(cx);
         let background = cx.theme().background;
         let foreground = cx.theme().foreground;
         // Workspace: the conversation is primary; controls live in the inspector.
@@ -833,7 +851,7 @@ impl Render for NativeApp {
                         }
                     })
                     .child(
-                        resizable_panel().child(
+                        resizable_panel().size_range(px(360.)..px(f32::MAX)).child(
                             div()
                                 .flex()
                                 .flex_col()
@@ -866,6 +884,7 @@ impl Render for NativeApp {
         div()
             .relative()
             .key_context("NativeApp")
+            .map(|root| platform_shell::window_actions(root, cx))
             .track_focus(&self.focus)
             .on_action(cx.listener(|app, _: &UndoThreadNavigation, _, cx| app.undo_thread_navigation(cx)))
             .on_action(cx.listener(|app, _: &ContentSubmit, window, cx| {
@@ -938,7 +957,9 @@ impl Render for NativeApp {
             .on_action(cx.listener(|app, _: &ZoomReset, window, cx| app.change_scale(None, window, cx)))
             .on_action(cx.listener(|app, _: &OpenSettings, window, cx| app.toggle_settings(window, cx)))
             .on_action(cx.listener(|app, _: &SteerPrompt, window, cx| app.steer_prompt(window, cx)))
-            .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| app.toggle_terminal(window, cx)))
+            .on_action(cx.listener(|app, _: &ToggleTerminal, window, cx| {
+                if app.shell_terminal_available() { app.toggle_terminal(window, cx); }
+            }))
             .on_action(cx.listener(|app, _: &ToggleRightPanel, _, cx| {
                 app.set_inspector_open(!app.inspector_open, cx)
             }))
@@ -955,6 +976,7 @@ impl Render for NativeApp {
                 if self.sidebar_open {
                     row.child(
                         h_resizable("sidebar-split")
+                            .with_handle_appearance(platform_shell::sidebar_handle(cx))
                             .with_state(&self.sidebar_split)
                             .on_resize({
                                 let app = cx.entity().downgrade();
@@ -981,7 +1003,7 @@ impl Render for NativeApp {
                                     .flex_none()
                                     .child(self.render_sidebar(cx).into_any_element()),
                             )
-                            .child(resizable_panel().child(workspace)),
+                            .child(resizable_panel().size_range(px(640.)..px(f32::MAX)).child(workspace)),
                     )
                 } else {
                     row.child(workspace)
@@ -993,6 +1015,7 @@ impl Render for NativeApp {
 
 fn bind_native_keys(cx: &mut App) {
     runtime_terminal::keys::bind(cx);
+    platform_shell::bind(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-q", QuitNative, None),
         KeyBinding::new("cmd-z", UndoThreadNavigation, Some("NativeApp && !Input")),
@@ -1085,8 +1108,11 @@ fn main() {
                 gpui_kit::Menu {
                     name: "T3 Code Native".into(),
                     disabled: false,
-                    items: vec![gpui_kit::MenuItem::action("Quit", QuitNative)],
+                    items: platform_shell::application_items().into_iter()
+                        .chain([gpui_kit::MenuItem::action("Quit", QuitNative)]).collect(),
                 },
+                platform_shell::edit_menu(),
+                platform_shell::window_menu(),
                 gpui_kit::Menu {
                     name: "Thread".into(),
                     disabled: false,
@@ -1110,17 +1136,19 @@ fn main() {
                         gpui_kit::MenuItem::action("Toggle right panel", ToggleRightPanel),
                         gpui_kit::MenuItem::action("Workspace files", OpenFiles),
                         gpui_kit::MenuItem::action("Search contents", OpenContentSearch),
+                        gpui_kit::MenuItem::separator(),
+                        gpui_kit::MenuItem::action("Actual Size", ZoomReset),
+                        gpui_kit::MenuItem::action("Zoom In", ZoomIn),
+                        gpui_kit::MenuItem::action("Zoom Out", ZoomOut),
+                        gpui_kit::MenuItem::action("Toggle Full Screen", platform_shell::Fullscreen),
                     ],
                 },
             ]);
-            let window_size = window_state::load()
-                .size()
-                .map(|(width, height)| size(px(width), px(height)))
-                .unwrap_or_else(|| size(px(1280.), px(900.)));
-            let bounds = Bounds::centered(None, window_size, cx);
+            let bounds = platform_shell::initial_bounds(window_state::load(), cx);
             gpui_kit::open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(bounds),
+                    window_min_size: Some(size(px(848.), px(620.))),
                     ..TitleBar::window_options()
                 },
                 cx,

@@ -2,7 +2,7 @@
 
 use super::attachments::{AttachmentInput, AttachmentScope, upload_target};
 use crate::{NativeApp, attachment_mime};
-use gpui_kit::{App, Context, Focusable as _, KeyDownEvent, Window};
+use gpui_kit::{App, Context, EntityInputHandler as _, Focusable as _, KeyDownEvent, Window};
 use serde_json::json;
 use t3code_desktop_gpui::{commands, connection, files, mentions, queue};
 
@@ -68,6 +68,22 @@ impl NativeApp {
         }
         let key = &event.keystroke.key;
         let modifiers = event.keystroke.modifiers;
+        if matches!(key.as_str(), "c" | "x") && (modifiers.platform || modifiers.control) {
+            let selected = self.composer.read(cx).selected_value().to_string();
+            if let Ok((_, Some(context))) = t3code_desktop_gpui::draft_context::message_context(
+                &selected,
+                &self.draft_context_records(),
+            ) {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string_with_json_metadata(selected, json!({"version":1,"source":{"environmentId":self.environment_scope,"threadId":self.selected_thread},"records":context["records"]})));
+                if key == "x" {
+                    self.composer
+                        .update(cx, |input, cx| input.replace("", window, cx));
+                    self.remember_composer_draft(cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+        }
         if key == "enter" {
             let requires_modifier = self
                 .send_shortcut()
@@ -82,8 +98,25 @@ impl NativeApp {
                     self.send_prompt(window, cx);
                 }
             } else {
-                self.composer
-                    .update(cx, |input, cx| input.replace("\n", window, cx));
+                let input = self.composer.read(cx);
+                let edit = input
+                    .selected_range()
+                    .is_empty()
+                    .then(|| {
+                        t3code_desktop_gpui::composer_edit::list_continuation(
+                            &input.value(),
+                            input.cursor(),
+                        )
+                    })
+                    .flatten();
+                self.composer.update(cx, |input, cx| {
+                    if let Some((range, replacement)) = edit {
+                        input.set_selected_range(range, cx);
+                        input.replace(replacement, window, cx);
+                    } else {
+                        input.replace("\n", window, cx);
+                    }
+                });
                 self.remember_composer_draft(cx);
             }
             cx.stop_propagation();
@@ -95,6 +128,10 @@ impl NativeApp {
             || modifiers.platform
             || modifiers.control
             || !self.attachments.is_empty()
+            || self
+                .draft_context_records()
+                .iter()
+                .any(|r| self.composer.read(cx).value().contains(&r.reference()))
         {
             return;
         }
@@ -123,6 +160,29 @@ impl NativeApp {
             || (key == "down" && value[cursor..].contains('\n'))
         {
             return;
+        }
+        if !value.is_empty() {
+            if self.composer_state.history_id.is_none() {
+                return;
+            }
+            let edge = self
+                .composer
+                .update(cx, |input, cx| {
+                    let bounds = input.text_bounds()?;
+                    let current = value[..cursor].encode_utf16().count();
+                    let end = if key == "up" {
+                        0
+                    } else {
+                        value.encode_utf16().count()
+                    };
+                    let caret = input.bounds_for_range(current..current, bounds, window, cx)?;
+                    let edge = input.bounds_for_range(end..end, bounds, window, cx)?;
+                    Some((caret.origin.y - edge.origin.y).abs() < gpui_kit::px(1.))
+                })
+                .unwrap_or(false);
+            if !edge {
+                return;
+            }
         }
         let mut entries: Vec<(String, String)> = Vec::new();
         for message in self
@@ -198,6 +258,28 @@ impl NativeApp {
         });
         self.remember_composer_draft(cx);
         cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(crate) fn show_skills_in_slash_menu(&self) -> bool {
+        self.draft_store
+            .as_ref()
+            .map(|store| store.show_skills_in_slash_menu())
+            .unwrap_or(
+                self.composer_state
+                    .show_skills_in_slash_menu
+                    .unwrap_or(true),
+            )
+    }
+
+    pub(crate) fn set_show_skills_in_slash_menu(&mut self, show: bool, cx: &mut Context<Self>) {
+        if let Some(store) = &mut self.draft_store {
+            store.set_show_skills_in_slash_menu(show);
+            self.schedule_draft_save(cx);
+        } else {
+            self.composer_state.show_skills_in_slash_menu = Some(show);
+        }
+        self.slash_index = 0;
         cx.notify();
     }
 
@@ -500,7 +582,15 @@ impl NativeApp {
         if text.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
-        let record = t3code_desktop_gpui::drafts::StashEntry::new(text, self.attachments.clone());
+        let mut record =
+            t3code_desktop_gpui::drafts::StashEntry::new(text, self.attachments.clone());
+        record.context = match self.draft_message_context(&record.prompt) {
+            Ok(context) => context,
+            Err(error) => {
+                self.report_error(error, cx);
+                return;
+            }
+        };
         if let Some(store) = &mut self.draft_store {
             let origin = self.environment_scope.clone();
             let thread = self.selected_thread.clone();
@@ -562,6 +652,9 @@ impl NativeApp {
                                 && app.selected_thread == thread
                                 && app.composer.read(cx).value().as_str() == record.prompt
                             {
+                                if let (Some(thread), Some(context)) = (&thread, &record.context) {
+                                    app.consume_sent_context(&origin, thread, context);
+                                }
                                 app.composer
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                                 app.remember_composer_draft(cx);
@@ -587,6 +680,11 @@ impl NativeApp {
                 .entry(self.environment_scope.clone())
                 .or_default()
                 .push(record);
+            if let Some(thread) = self.selected_thread.clone() {
+                self.composer_state
+                    .contexts
+                    .remove(&(self.environment_scope.clone(), thread));
+            }
             self.attachments.clear();
             self.composer
                 .update(cx, |input, cx| input.set_value("", window, cx));
@@ -670,18 +768,18 @@ impl NativeApp {
             self.attachment_drafts.stash_writing = true;
             let handle = window.window_handle();
             cx.spawn(async move |entity, cx| {
-                let mut verified = true;
+                let mut missing = Vec::new();
                 for attachment in &entry.attachments {
                     if connection::call(&scope.sender, "assets.createUrl", json!({"resource":{"_tag":"attachment","attachmentId":attachment["id"]}})).await.is_err() {
-                        verified = false;
-                        break;
+                        missing.push(attachment.clone());
                     }
                 }
                 let _ = handle.update(cx, |_, window, cx| {
                     entity.update(cx, |app, cx| {
                         app.attachment_drafts.stash_writing = false;
-                        if !verified {
-                            app.report_error("Stashed resource is missing or could not be verified. Stash retained; reconnect and retry, or delete it and attach the source again.", cx);
+                        if !missing.is_empty() {
+                            app.attachment_drafts.missing_stash_resources.insert((scope.origin.clone(), entry.id.clone()), missing);
+                            app.report_error("Some stashed resources could not be verified. Retry verification, or explicitly remove each unavailable resource, restore, then reattach its source.", cx);
                         } else if app.attachment_selected(&scope) && app.attachment_connection_current(&scope)
                             && app.composer.read(cx).value().trim().is_empty() && app.attachments.is_empty() {
                             app.install_stash(&entry.id, window, cx);
@@ -695,8 +793,67 @@ impl NativeApp {
         self.install_stash(id, window, cx);
     }
 
+    pub(crate) fn discard_unavailable_stash_resource(
+        &mut self,
+        stash_id: &str,
+        resource_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut entry) = self
+            .composer_stashes()
+            .iter()
+            .find(|e| e.id == stash_id)
+            .cloned()
+        else {
+            return;
+        };
+        entry
+            .attachments
+            .retain(|a| a["id"].as_str() != Some(resource_id));
+        if let Some(records) = entry
+            .context
+            .as_mut()
+            .and_then(|c| c["records"].as_array_mut())
+        {
+            records.retain(|r| {
+                if r["attachmentId"].as_str() != Some(resource_id) {
+                    return true;
+                }
+                if let Ok(record) = serde_json::from_value::<
+                    t3code_desktop_gpui::draft_context::DraftContextRecord,
+                >(r.clone())
+                {
+                    entry.prompt = entry.prompt.replace(&record.reference(), "");
+                }
+                false
+            });
+        }
+        if let Some(store) = &mut self.draft_store {
+            store.update_stash(&self.environment_scope, entry);
+        } else if let Some(stashes) = self
+            .attachment_drafts
+            .stashes
+            .get_mut(&self.environment_scope)
+            && let Some(old) = stashes.iter_mut().find(|e| e.id == stash_id)
+        {
+            *old = entry;
+        }
+        if let Some(missing) = self
+            .attachment_drafts
+            .missing_stash_resources
+            .get_mut(&(self.environment_scope.clone(), stash_id.to_owned()))
+        {
+            missing.retain(|a| a["id"].as_str() != Some(resource_id));
+        }
+        self.schedule_draft_save(cx);
+        cx.notify();
+    }
+
     fn install_stash(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.composer_state.stash_picker = false;
+        self.attachment_drafts
+            .missing_stash_resources
+            .remove(&(self.environment_scope.clone(), id.to_owned()));
         let record = if let Some(store) = &mut self.draft_store {
             store.restore_record(
                 &self.environment_scope,
@@ -709,6 +866,24 @@ impl NativeApp {
         let Some(record) = record else {
             return;
         };
+        let records = record
+            .context
+            .as_ref()
+            .and_then(|v| v["records"].as_array())
+            .map(|records| {
+                records
+                    .iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.composer_state.contexts.insert(
+            (
+                self.environment_scope.clone(),
+                self.selected_thread.clone().unwrap_or_default(),
+            ),
+            records,
+        );
         self.attachments = record.attachments;
         self.composer.update(cx, |input, cx| {
             input.set_value(
@@ -893,7 +1068,7 @@ impl NativeApp {
     }
 
     pub(crate) fn compact_disabled_reason(&self, cx: &App) -> Option<&'static str> {
-        if self.commands.is_none() {
+        if !self.connection_ready() {
             return Some("Reconnect before compacting");
         }
         let Some(provider) = self.selected_provider(cx) else {
@@ -1013,6 +1188,14 @@ impl NativeApp {
         };
         match message.start_command(&id) {
             Ok(mut payload) => {
+                match self.draft_message_context(&message.text) {
+                    Ok(Some(context)) => payload["message"]["context"] = context,
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.report_error(error, cx);
+                        return;
+                    }
+                }
                 if let Some(source) = self.plan_followup_source(&message.text) {
                     payload["sourceProposedPlan"] = source;
                 }
@@ -1085,6 +1268,13 @@ impl NativeApp {
             cx.notify();
             return;
         }
+        let context = match self.draft_message_context(&message.text) {
+            Ok(context) => context,
+            Err(error) => {
+                self.report_error(error, cx);
+                return;
+            }
+        };
         let source = self.plan_followup_source(&message.text);
         let id = self.queues.push_at(
             &thread_id,
@@ -1092,6 +1282,10 @@ impl NativeApp {
             steer,
             state.as_ref().and_then(|state| state.tool.clone()),
         );
+        if let Some(context) = context {
+            self.consume_sent_context(&self.environment_scope.clone(), &thread_id, &context);
+            self.queues.set_context(&thread_id, id, context);
+        }
         if let Some(source) = source {
             self.queues.set_source_plan(&thread_id, id, source);
         }
@@ -1323,6 +1517,10 @@ impl NativeApp {
                 return;
             }
         };
+        let sent_context = self.queues.context(&thread_id, message.id);
+        if let Some(context) = &sent_context {
+            payload["message"]["context"] = context.clone();
+        }
         if let Some(source) = self.queues.source_plan(&thread_id, message.id) {
             payload["sourceProposedPlan"] = source;
         }
@@ -1367,6 +1565,8 @@ impl NativeApp {
                 }
                 if result.is_ok() {
                     app.consume_sent_attachments(&scope, &thread_id, &message.attachments);
+                    // Context was moved to queue ownership at capture; do not erase
+                    // a duplicate pasted into the live draft while this send awaited receipt.
                     app.schedule_draft_save(cx);
                 }
                 app.queues.settle(&thread_id, message.id, result.is_ok());
@@ -1466,6 +1666,133 @@ impl NativeApp {
         }
     }
 
+    /// Public handoff for source panels D/H. Reject stale environment/thread captures;
+    /// payload is a snapshot, not a pointer to mutable terminal/source state.
+    #[allow(dead_code)] // Public capture seam; source-panel owners wire callers independently.
+    pub(crate) fn intake_draft_context(
+        &mut self,
+        environment: &str,
+        thread: &str,
+        record: t3code_desktop_gpui::draft_context::DraftContextRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, &'static str> {
+        if self.environment_scope != environment || self.selected_thread.as_deref() != Some(thread)
+        {
+            return Err("Return to the captured draft before adding context");
+        }
+        record.validate()?;
+        if matches!(record.kind(), "file" | "image")
+            && !self.attachments.iter().any(|a| {
+                a["id"] == record.value()["attachmentId"]
+                    && a["name"] == record.value()["name"]
+                    && a["mimeType"] == record.value()["mimeType"]
+                    && a["sizeBytes"] == record.value()["sizeBytes"]
+            })
+        {
+            return Err("Attach the source file before adding its context record");
+        }
+        let records = self.draft_context_records();
+        if records.len() >= 200 {
+            return Err("Too many context records (maximum 200)");
+        }
+        let text = self.composer.read(cx).value().to_string();
+        let text = format!(
+            "{}{}{} ",
+            text,
+            if text.is_empty() || text.ends_with(char::is_whitespace) {
+                ""
+            } else {
+                " "
+            },
+            record.reference()
+        );
+        if text.encode_utf16().count() > 120_000 {
+            return Err("Prompt exceeds the message limit");
+        }
+        let id = record.id().to_owned();
+        let key = (environment.to_owned(), thread.to_owned());
+        self.composer_state
+            .contexts
+            .entry(key)
+            .or_insert(records)
+            .push(record);
+        self.composer.update(cx, |input, cx| {
+            input.set_value(crate::composer_state::prompt_content(&text), window, cx)
+        });
+        self.remember_composer_draft(cx);
+        cx.notify();
+        Ok(id)
+    }
+
+    pub(crate) fn draft_context_records(
+        &self,
+    ) -> Vec<t3code_desktop_gpui::draft_context::DraftContextRecord> {
+        let thread = self.selected_thread.as_deref().unwrap_or_default();
+        self.composer_state
+            .contexts
+            .get(&(self.environment_scope.clone(), thread.to_owned()))
+            .cloned()
+            .or_else(|| {
+                self.draft_store
+                    .as_ref()
+                    .map(|s| s.contexts(&self.environment_scope, thread))
+            })
+            .unwrap_or_default()
+    }
+    pub(crate) fn remove_draft_context(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(record) = self
+            .draft_context_records()
+            .into_iter()
+            .find(|r| r.id() == id)
+        else {
+            return;
+        };
+        let text = self
+            .composer
+            .read(cx)
+            .value()
+            .replace(&record.reference(), "");
+        // Keep payload for editor undo; removed references are excluded from transport.
+        self.composer.update(cx, |input, cx| {
+            input.set_value(crate::composer_state::prompt_content(&text), window, cx)
+        });
+        self.remember_composer_draft(cx);
+        cx.notify();
+    }
+    fn draft_message_context(&self, text: &str) -> Result<Option<serde_json::Value>, &'static str> {
+        t3code_desktop_gpui::draft_context::message_context(text, &self.draft_context_records())
+            .map(|(_, context)| context)
+    }
+    /// Release captured IDs only on an accepted receipt or a completed ownership
+    /// transfer into queue/stash. Later additions survive either operation.
+    pub(crate) fn consume_sent_context(
+        &mut self,
+        environment: &str,
+        thread: &str,
+        sent: &serde_json::Value,
+    ) {
+        let Some(sent) = sent["records"].as_array() else {
+            return;
+        };
+        let key = (environment.to_owned(), thread.to_owned());
+        let records = self.composer_state.contexts.entry(key).or_insert_with(|| {
+            self.draft_store
+                .as_ref()
+                .map(|s| s.contexts(environment, thread))
+                .unwrap_or_default()
+        });
+        records.retain(|r| !sent.iter().any(|v| v["contextId"].as_str() == Some(r.id())));
+        if let Some(store) = &mut self.draft_store {
+            store.set_contexts(environment, thread, records.clone());
+        }
+    }
+
     /// Persist the composer text as the selected thread's draft.
     pub(crate) fn remember_composer_draft(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.selected_thread.clone() else {
@@ -1473,7 +1800,9 @@ impl NativeApp {
         };
         let text = self.composer.read(cx).value().to_string();
         self.drafts.insert(id.clone(), text.clone());
+        let records = self.draft_context_records();
         if let Some(store) = &mut self.draft_store {
+            store.set_contexts(&self.environment_scope, &id, records);
             store.set(&self.environment_scope, &id, text);
             self.schedule_draft_save(cx);
         }
@@ -1597,6 +1926,82 @@ impl NativeApp {
         }
     }
 
+    /// Restored drafts keep authoritative refs, not signed URLs or decoded pixels.
+    /// Resolve a fresh URL on explicit preview request, bounded and off UI executor.
+    pub(crate) fn recover_attachment_preview(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(scope) = self.attachment_scope() else {
+            return;
+        };
+        if !self
+            .attachments
+            .iter()
+            .any(|a| a["id"] == id && a["type"] == "image")
+        {
+            return;
+        }
+        let key = (scope.origin.clone(), id.clone());
+        if !self.composer_state.preview_loading.insert(key.clone()) {
+            return;
+        }
+        self.composer_state.preview_errors.remove(&key);
+        cx.notify();
+        cx.spawn(async move |entity, cx| {
+            let response = connection::call(
+                &scope.sender,
+                "assets.createUrl",
+                json!({"resource":{"_tag":"attachment","attachmentId":id}}),
+            )
+            .await;
+            let url = response
+                .and_then(|v| crate::views::message_media::signed_asset_url(&scope.origin, &v));
+            let preview = if let Ok(url) = url {
+                let (tx, rx) = async_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let preview = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .ok()
+                        .and_then(|rt| {
+                            rt.block_on(async {
+                                let client = reqwest::Client::builder()
+                                    .redirect(reqwest::redirect::Policy::none())
+                                    .timeout(std::time::Duration::from_secs(30))
+                                    .build()
+                                    .ok()?;
+                                let mut response =
+                                    client.get(url).send().await.ok()?.error_for_status().ok()?;
+                                let mut bytes = Vec::new();
+                                while let Some(chunk) = response.chunk().await.ok()? {
+                                    if bytes.len() + chunk.len() > 10 * 1024 * 1024 {
+                                        return None;
+                                    }
+                                    bytes.extend_from_slice(&chunk);
+                                }
+                                crate::composer_thumbnail::thumbnail(&bytes)
+                            })
+                        });
+                    let _ = tx.send_blocking(preview);
+                });
+                rx.recv().await.ok().flatten()
+            } else {
+                None
+            };
+            let _ = entity.update(cx, |app, cx| {
+                app.composer_state.preview_loading.remove(&key);
+                if !app.attachment_connection_current(&scope) {
+                    return;
+                }
+                if let Some(preview) = preview {
+                    app.composer_state.cache_preview(scope.origin, id, preview);
+                } else {
+                    app.composer_state.preview_errors.insert(key);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn attachment_scope(&self) -> Option<AttachmentScope> {
         Some(AttachmentScope {
             origin: self.environment_scope.clone(),
@@ -1687,6 +2092,84 @@ impl NativeApp {
             });
         })
         .detach();
+    }
+
+    pub(crate) fn paste_context_fragment(
+        &mut self,
+        clipboard: &gpui_kit::ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(metadata) = clipboard.metadata().filter(|m| m.len() <= 16 * 1024 * 1024) else {
+            return false;
+        };
+        let Ok(fragment) = serde_json::from_str::<serde_json::Value>(metadata) else {
+            return false;
+        };
+        if fragment["version"] != 1 || fragment["source"]["environmentId"].as_str().is_none() {
+            return false;
+        }
+        let Some(records) = fragment["records"].as_array().filter(|r| r.len() <= 200) else {
+            return false;
+        };
+        let Some(thread) = self.selected_thread.clone() else {
+            self.report_error("Select a draft before pasting context", cx);
+            return true;
+        };
+        let mut text = clipboard.text().unwrap_or_default();
+        let mut imported = Vec::new();
+        for value in records {
+            let Ok(record) = serde_json::from_value::<
+                t3code_desktop_gpui::draft_context::DraftContextRecord,
+            >(value.clone()) else {
+                continue;
+            };
+            if record.validate().is_err() {
+                continue;
+            }
+            if matches!(record.kind(), "file" | "image") {
+                self.report_error(
+                    "Reattach the source file before pasting attachment context",
+                    cx,
+                );
+                return true;
+            }
+            let Ok(next) = t3code_desktop_gpui::draft_context::DraftContextRecord::capture(
+                record.kind(),
+                record.label(),
+                record.value().clone(),
+            ) else {
+                continue;
+            };
+            text = text.replace(
+                &format!("t3-context://v1/{}/{}", record.kind(), record.id()),
+                &format!("t3-context://v1/{}/{}", next.kind(), next.id()),
+            );
+            imported.push(next);
+        }
+        let mut owned = self.draft_context_records();
+        if owned.len() + imported.len() > 200 {
+            self.report_error("Too many context records", cx);
+            return true;
+        }
+        let value = self.composer.read(cx).value().to_string();
+        let range = self.composer.read(cx).selected_range();
+        let mut value = value;
+        value.replace_range(range.clone(), &text);
+        if value.encode_utf16().count() > 120_000 {
+            self.report_error("Pasted context exceeds the message limit", cx);
+            return true;
+        }
+        owned.extend(imported);
+        self.composer_state
+            .contexts
+            .insert((self.environment_scope.clone(), thread), owned);
+        self.composer.update(cx, |input, cx| {
+            input.set_value(crate::composer_state::prompt_content(&value), window, cx);
+            input.set_selected_range(range.start + text.len()..range.start + text.len(), cx);
+        });
+        self.remember_composer_draft(cx);
+        true
     }
 
     pub(crate) fn paste_composer(
@@ -1873,11 +2356,101 @@ impl NativeApp {
         let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
             return;
         };
-        self.attach_inputs(
-            scope,
-            paths.into_iter().map(AttachmentInput::Path).collect(),
-            cx,
-        );
+        let slots = 100usize.saturating_sub(if self.attachment_selected(&scope) {
+            self.attachments.len()
+        } else {
+            self.attachment_drafts
+                .shelves
+                .get(&scope.key())
+                .map_or(0, Vec::len)
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { super::attachments::expand_paths(paths, slots) })
+                .await;
+            let _ = entity.update(cx, |app, cx| match result {
+                Ok(paths) => app.attach_inputs(
+                    scope,
+                    paths.into_iter().map(AttachmentInput::Path).collect(),
+                    cx,
+                ),
+                Err(error) => app.attachment_notice(
+                    &scope,
+                    t3code_desktop_gpui::notifications::Outcome::Error,
+                    error,
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    fn transfer_phase(
+        &mut self,
+        id: &str,
+        phase: &'static str,
+        retry: Option<AttachmentInput>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(row) = self
+            .attachment_drafts
+            .transfers
+            .iter_mut()
+            .find(|r| r.id == id)
+        {
+            if row.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                && !phase.starts_with("Cancelled")
+            {
+                if phase == "Failed" {
+                    row.phase = "Cancelled";
+                    cx.notify();
+                }
+                return;
+            }
+            row.phase = phase;
+            row.retry = retry;
+        }
+        cx.notify();
+    }
+    pub(crate) fn cancel_transfer(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(row) = self
+            .attachment_drafts
+            .transfers
+            .iter_mut()
+            .find(|r| r.id == id)
+        {
+            row.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            row.phase = if matches!(row.phase, "Preparing" | "Uploading") {
+                "Cancelling"
+            } else {
+                "Cancelled"
+            };
+            row.retry = None;
+        }
+        cx.notify();
+    }
+    pub(crate) fn retry_transfer(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(scope) = self.attachment_scope() else {
+            return;
+        };
+        if self.attachment_drafts.uploading {
+            return;
+        }
+        let Some(index) = self
+            .attachment_drafts
+            .transfers
+            .iter()
+            .position(|r| r.id == id && r.owner == scope.key())
+        else {
+            return;
+        };
+        let Some(input) = self.attachment_drafts.transfers[index].retry.take() else {
+            return;
+        };
+        self.attachment_drafts.transfers.remove(index);
+        self.attach_inputs(scope, vec![input], cx);
     }
 
     pub(crate) fn attach_inputs(
@@ -1918,6 +2491,42 @@ impl NativeApp {
             );
             return;
         }
+        let retained: Vec<_> = self
+            .attachment_drafts
+            .transfers
+            .iter()
+            .filter_map(|row| row.retry.as_ref())
+            .collect();
+        if retained.len() + inputs.len() > 100 {
+            self.attachment_notice(
+                &scope,
+                t3code_desktop_gpui::notifications::Outcome::Error,
+                "Retry or discard failed transfers before adding more files",
+                cx,
+            );
+            return;
+        }
+        if inputs
+            .iter()
+            .chain(retained)
+            .map(|input| match input {
+                AttachmentInput::Bytes { bytes, .. } => bytes.len(),
+                AttachmentInput::Path(_) => 0,
+            })
+            .sum::<usize>()
+            > 100 * 1024 * 1024
+        {
+            self.attachment_notice(
+                &scope,
+                t3code_desktop_gpui::notifications::Outcome::Error,
+                "Attachment batch exceeds 100 MiB",
+                cx,
+            );
+            return;
+        }
+        self.attachment_drafts
+            .transfers
+            .retain(|row| row.retry.is_some());
         self.attachment_drafts.uploading = true;
         self.pending_actions += 1;
         self.attachment_notice(
@@ -1926,46 +2535,90 @@ impl NativeApp {
             "Uploading attachments…",
             cx,
         );
+        let inputs: Vec<_> = inputs
+            .into_iter()
+            .map(|input| {
+                let id = uuid::Uuid::new_v4().to_string();
+                let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.attachment_drafts
+                    .transfers
+                    .push(super::attachments::AttachmentTransfer {
+                        id: id.clone(),
+                        owner: scope.key(),
+                        name: input.name(),
+                        phase: "Waiting",
+                        cancelled: cancelled.clone(),
+                        retry: None,
+                    });
+                (input, id, cancelled)
+            })
+            .collect();
+        cx.notify();
         cx.spawn(async move |entity, cx| {
-            for input in inputs {
+            for (input, transfer_id, cancelled) in inputs {
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) { continue; }
                 let name = input.name();
                 let source = input.source();
                 if name.trim().is_empty() || name.encode_utf16().count() > 255 {
-                    let _ = entity.update(cx, |app, cx| app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, "Invalid attachment filename", cx));
+                    let _ = entity.update(cx, |app, cx| { app.transfer_phase(&transfer_id, "Invalid filename; reattach source", None, cx); app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, "Invalid attachment filename", cx); });
                     continue;
                 }
                 let mime = attachment_mime(&name).to_owned();
                 let image = mime.starts_with("image/");
-                let bytes = cx.background_executor().spawn(async move { input.read(image) }).await;
+                let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, "Reading", None, cx));
+                let read_input = input.clone();
+                let bytes = cx.background_executor().spawn(async move { read_input.read(image) }).await;
                 let bytes = match bytes {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        let _ = entity.update(cx, |app, cx| app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, error, cx));
+                        let _ = entity.update(cx, |app, cx| {
+                            app.transfer_phase(&transfer_id, "Failed", Some(input), cx);
+                            app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, error, cx);
+                        });
                         continue;
                     }
                 };
                 let ready = entity.update(cx, |app, _| app.attachment_connection_current(&scope)).unwrap_or(false);
-                if !ready { break; }
+                if !ready { let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, "Failed", Some(input), cx)); continue; }
                 let size = bytes.len() as u64;
-                let input = json!({"type":if image {"image"} else {"file"}, "name":name, "mimeType":mime, "sizeBytes":size});
-                let result = connection::call(&scope.sender, "attachments.createUploadUrl", input).await;
+                let upload_input = json!({"type":if image {"image"} else {"file"}, "name":name, "mimeType":mime, "sizeBytes":size});
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) { continue; }
+                let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, "Preparing", None, cx));
+                let result = connection::call(&scope.sender, "attachments.createUploadUrl", upload_input).await;
                 let target = result.and_then(|value| upload_target(&scope.origin, &value));
                 let (id, url) = match target {
                     Ok(target) => target,
                     Err(_) => {
-                        let _ = entity.update(cx, |app, cx| app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, "Could not prepare attachment upload", cx));
+                        let _ = entity.update(cx, |app, cx| {
+                            app.transfer_phase(&transfer_id, "Failed", Some(input), cx);
+                            app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, "Could not prepare attachment upload", cx);
+                        });
                         continue;
                     }
                 };
                 let ready = entity.update(cx, |app, _| app.attachment_connection_current(&scope)).unwrap_or(false);
-                if !ready { break; }
+                if !ready { let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, "Failed", Some(input), cx)); continue; }
                 let (bytes, preview) = cx.background_executor().spawn(async move {
                     let preview = image.then(|| crate::composer_thumbnail::thumbnail(&bytes)).flatten();
                     (bytes, preview)
                 }).await;
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    let cleanup = connection::call(&scope.sender, "attachments.delete", json!({"attachmentId":id})).await;
+                    let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, if cleanup.is_ok() { "Cancelled" } else { "Cancelled; cleanup failed" }, None, cx));
+                    continue;
+                }
+                let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, "Uploading", None, cx));
                 let result = connection::upload(&scope.sender, url, mime.clone(), bytes).await;
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    let cleanup = connection::call(&scope.sender, "attachments.delete", json!({"attachmentId":id})).await;
+                    let _ = entity.update(cx, |app, cx| {
+                        app.transfer_phase(&transfer_id, if cleanup.is_ok() { "Cancelled" } else { "Cancelled; cleanup failed" }, None, cx);
+                    });
+                    continue;
+                }
                 let _ = entity.update(cx, |app, cx| {
                     if result.is_ok() {
+                        app.transfer_phase(&transfer_id, "Attached", None, cx);
                         if let Some(preview) = preview { app.composer_state.cache_preview(scope.origin.clone(), id.clone(), preview); }
                         let mut attachment = json!({"type":if image {"image"} else {"file"}, "id":id, "name":name, "mimeType":mime, "sizeBytes":size});
                         if source.as_ref().is_some_and(|source| source["_tag"] == "pasted-text")
@@ -1981,6 +2634,7 @@ impl NativeApp {
                         app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Success, format!("Attached {name}"), cx);
                         cx.notify();
                     } else {
+                        app.transfer_phase(&transfer_id, "Failed", Some(input), cx);
                         app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, "Attachment upload failed; retry from the original draft", cx);
                     }
                 });

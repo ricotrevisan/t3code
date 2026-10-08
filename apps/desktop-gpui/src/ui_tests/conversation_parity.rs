@@ -100,6 +100,13 @@ fn conversation_plan_save_uses_selected_workspace_and_waits_for_receipt(cx: &mut
     let bounds = cx.debug_bounds("plan-save").unwrap();
     cx.simulate_click(bounds.center(), Modifiers::none());
     cx.run_until_parked();
+    assert!(
+        requests.try_recv().is_err(),
+        "choosing a path must not write a file"
+    );
+    let confirm = cx.debug_bounds("plan-save-confirm").unwrap();
+    cx.simulate_click(confirm.center(), Modifiers::none());
+    cx.run_until_parked();
     let connection::Command::Call {
         tag,
         payload,
@@ -111,12 +118,7 @@ fn conversation_plan_save_uses_selected_workspace_and_waits_for_receipt(cx: &mut
     assert_eq!(tag, "projects.writeFile");
     assert_eq!(payload["cwd"], "/tmp/fixture");
     assert_eq!(payload["contents"], "# Plan\n\nBuild the feature");
-    assert!(
-        payload["relativePath"]
-            .as_str()
-            .unwrap()
-            .starts_with("plan-")
-    );
+    assert_eq!(payload["relativePath"], "plan.md");
     assert!(app.read_with(cx, |app, _| app.conversation_presentation.saving));
     reply
         .send_blocking(Err("read-only workspace".into()))

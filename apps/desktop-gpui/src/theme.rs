@@ -73,12 +73,36 @@ fn contrast_source(source: &str, dark: bool) -> String {
     set.to_string()
 }
 
+pub(crate) fn bundled_names() -> &'static [&'static str] {
+    &[
+        "One Dark",
+        "One Light",
+        "High Contrast Dark",
+        "High Contrast Light",
+    ]
+}
+
+pub(crate) fn bundled_config(name: &str) -> gpui_kit::component::ThemeConfig {
+    let source = match name {
+        "One Light" => ONE_LIGHT.to_string(),
+        "High Contrast Dark" => contrast_source(ONE_DARK, true),
+        "High Contrast Light" => contrast_source(ONE_LIGHT, false),
+        _ => ONE_DARK.to_string(),
+    };
+    serde_json::from_str::<gpui_kit::component::ThemeSet>(&source)
+        .expect("bundled theme")
+        .themes
+        .remove(0)
+}
+
 fn path() -> std::path::PathBuf {
     t3code_desktop_gpui::drafts::default_path().with_file_name("appearance.json")
 }
 
 pub fn init(cx: &mut App) {
     crate::settings_environments::init(cx);
+    crate::settings_theme_library::init(cx);
+    crate::settings_fonts::init(cx);
     let contrast_dark = contrast_source(ONE_DARK, true);
     let contrast_light = contrast_source(ONE_LIGHT, false);
     for source in [ONE_DARK, ONE_LIGHT, &contrast_dark, &contrast_light] {
@@ -105,7 +129,7 @@ pub fn observe(window: &mut Window, cx: &mut App) {
         .detach();
 }
 
-fn apply(window: Option<&mut Window>, cx: &mut App) {
+pub(crate) fn apply(window: Option<&mut Window>, cx: &mut App) {
     let preferences = settings_appearance::current(cx);
     let appearance = window
         .as_ref()
@@ -121,10 +145,15 @@ fn apply(window: Option<&mut Window>, cx: &mut App) {
         (_, true) => "One Dark",
         (_, false) => "One Light",
     };
-    let config = ThemeRegistry::global(cx)
-        .themes()
-        .get(&SharedString::from(name))
-        .cloned();
+    let config = cx
+        .try_global::<crate::settings_theme_library::Library>()
+        .and_then(|library| library.selected(dark))
+        .or_else(|| {
+            ThemeRegistry::global(cx)
+                .themes()
+                .get(&SharedString::from(name))
+                .cloned()
+        });
     Theme::change(
         if dark {
             ThemeMode::Dark
@@ -134,7 +163,22 @@ fn apply(window: Option<&mut Window>, cx: &mut App) {
         None,
         cx,
     );
+    let fonts = crate::settings_fonts::current(cx);
     Theme::update(cx, |theme| {
+        // Config fields are optional: reset them before applying another variant,
+        // otherwise a removed custom family/radius/highlighter would leak into it.
+        let defaults = Theme::default();
+        theme.font_family = defaults.font_family;
+        theme.mono_font_family = defaults.mono_font_family;
+        theme.mono_font_size = defaults.mono_font_size;
+        theme.radius = defaults.radius;
+        theme.radius_lg = defaults.radius_lg;
+        theme.shadow = defaults.shadow;
+        theme.highlight_theme = if dark {
+            gpui_kit::component::highlighter::HighlightTheme::default_dark()
+        } else {
+            defaults.highlight_theme
+        };
         if let Some(config) = config {
             theme.apply_config(&config);
         }
@@ -143,6 +187,12 @@ fn apply(window: Option<&mut Window>, cx: &mut App) {
         theme.switch = theme.muted_foreground;
         theme.switch_thumb = theme.background;
         theme.font_size = px(preferences.effective_size());
+        if !fonts.families[0].is_empty() {
+            theme.font_family = fonts.families[0].clone().into();
+        }
+        if !fonts.families[2].is_empty() {
+            theme.mono_font_family = fonts.families[2].clone().into();
+        }
     });
     if let Some(window) = window {
         window.set_rem_size(px(preferences.effective_size()));

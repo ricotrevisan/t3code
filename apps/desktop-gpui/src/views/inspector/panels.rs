@@ -36,7 +36,8 @@ impl NativeApp {
                     .flex_wrap()
                     .gap_1()
                     .child(
-                        Button::new("diff-working-tree").debug_selector(|| "diff-working-tree".into())
+                        Button::new("diff-working-tree")
+                            .debug_selector(|| "diff-working-tree".into())
                             .ghost()
                             .small()
                             .label("Working tree")
@@ -46,7 +47,8 @@ impl NativeApp {
                             ),
                     )
                     .child(
-                        Button::new("diff-branch-range").debug_selector(|| "diff-branch-range".into())
+                        Button::new("diff-branch-range")
+                            .debug_selector(|| "diff-branch-range".into())
                             .ghost()
                             .small()
                             .label("Branch changes")
@@ -56,7 +58,8 @@ impl NativeApp {
                             ),
                     )
                     .child(
-                        Button::new("diff-refresh").debug_selector(|| "diff-refresh".into())
+                        Button::new("diff-refresh")
+                            .debug_selector(|| "diff-refresh".into())
                             .ghost()
                             .small()
                             .label("Refresh")
@@ -69,7 +72,8 @@ impl NativeApp {
                             })),
                     )
                     .child(
-                        Button::new("diff-wrap").debug_selector(|| "diff-wrap".into())
+                        Button::new("diff-wrap")
+                            .debug_selector(|| "diff-wrap".into())
                             .ghost()
                             .small()
                             .label("Wrap lines")
@@ -80,7 +84,8 @@ impl NativeApp {
                             })),
                     )
                     .child(
-                        Button::new("diff-expand-all").debug_selector(|| "diff-expand-all".into())
+                        Button::new("diff-expand-all")
+                            .debug_selector(|| "diff-expand-all".into())
                             .ghost()
                             .small()
                             .label("Expand all")
@@ -91,7 +96,8 @@ impl NativeApp {
                             })),
                     )
                     .child(
-                        Button::new("diff-collapse-all").debug_selector(|| "diff-collapse-all".into())
+                        Button::new("diff-collapse-all")
+                            .debug_selector(|| "diff-collapse-all".into())
                             .ghost()
                             .small()
                             .label("Collapse all")
@@ -102,6 +108,8 @@ impl NativeApp {
                             })),
                     ),
             )
+            .child(self.render_diff_options(cx))
+            .child(self.render_full_diff_file(cx))
             .when(self.diffs.truncated, |view| {
                 view.child(
                     div()
@@ -225,10 +233,7 @@ impl NativeApp {
                                 .justify_start()
                                 .selected(self.diffs.selected_file == index)
                                 .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.diffs.selected_file = index;
-                                    app.diffs.expand_all = false;
-                                    app.diffs.collapsed.remove(&index);
-                                    cx.notify();
+                                    app.select_diff_file(index, cx);
                                 }))
                         })),
                 )

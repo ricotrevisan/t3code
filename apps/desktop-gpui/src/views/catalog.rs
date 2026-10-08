@@ -139,6 +139,9 @@ impl NativeApp {
                     )
                 })
                 .child(div().flex().gap_2()
+                    .child(Button::new("catalog-favorites").debug_selector(|| "catalog-favorites".into()).ghost().small().label("Favorites").selected(self.composer_state.catalog_favorites_only).on_click(cx.listener(|app, _, _, cx| { app.composer_state.catalog_favorites_only = !app.composer_state.catalog_favorites_only; app.composer_state.catalog_index = 0; cx.notify(); })))
+                    .child(Button::new("catalog-show-hidden").debug_selector(|| "catalog-show-hidden".into()).ghost().small().label("Show hidden").selected(self.composer_state.catalog_show_hidden).on_click(cx.listener(|app, _, _, cx| { app.composer_state.catalog_show_hidden = !app.composer_state.catalog_show_hidden; app.composer_state.catalog_index = 0; cx.notify(); }))))
+                .child(div().flex().gap_2()
                     .child(div().flex().flex_col().gap_1().w(px(128.))
                         .child(Button::new("catalog-all-providers").debug_selector(|| "catalog-all-providers".into()).ghost().small().label("All providers").selected(self.composer_state.catalog_provider.is_none()).on_click(cx.listener(|app, _, _, cx| { app.composer_state.catalog_provider = None; app.composer_state.catalog_index = 0; cx.notify(); })))
                         .children(self.provider_catalog.iter().map(|provider| {
@@ -167,27 +170,23 @@ impl NativeApp {
                                     provider.explanation()
                                 )),
                         )
+                        .when(!provider.selectable() || provider.models.is_empty(), |view| view.child(Button::new(gpui_kit::SharedString::from(format!("catalog-setup-{}", provider.instance_id)))
+                            .debug_selector({ let instance = provider.instance_id.clone(); move || format!("catalog-setup-{instance}") })
+                            .ghost().small().label(format!("Set up {}", provider.label()))
+                            .on_click(cx.listener(|app, _, window, cx| { app.close_model_catalog(window, cx); app.open_settings("providers", window, cx); app.refresh_settings_providers(false, cx); }))))
                         .children(
-                            provider
-                                .models
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, model)| {
-                                    format!(
-                                        "{} {} {} {}",
-                                        provider.label(),
-                                        provider.instance_id,
-                                        model.name,
-                                        model.slug
-                                    )
-                                    .to_lowercase()
-                                    .contains(&self.composer_state.catalog_query)
-                                })
+                            self.catalog_models(provider)
+                                .into_iter()
                                 .map(|(index, model)| {
                                     let instance = provider.instance_id.clone();
                                     let slug = model.slug.clone();
                                     let enabled = provider.selectable();
-                                    div().id(gpui_kit::SharedString::from(format!("catalog-anchor-{}-{index}", provider.instance_id))).anchor_scroll((keyboard_selection.as_ref() == Some(&(instance.clone(), slug.clone()))).then(|| self.composer_state.catalog_anchor.clone()).flatten()).child(list_row(
+                                    let favorite_instance = instance.clone();
+                                    let favorite_slug = slug.clone();
+                                    let hidden_instance = instance.clone();
+                                    let hidden_slug = slug.clone();
+                                    let preference = self.model_preference(&instance, &slug);
+                                    div().flex().items_center().id(gpui_kit::SharedString::from(format!("catalog-anchor-{}-{index}", provider.instance_id))).anchor_scroll((keyboard_selection.as_ref() == Some(&(instance.clone(), slug.clone()))).then(|| self.composer_state.catalog_anchor.clone()).flatten()).child(list_row(
                                         format!("catalog-{}-{index}", provider.instance_id),
                                         (keyboard_selection.as_ref()
                                             == Some(&(instance.clone(), slug.clone())))
@@ -203,6 +202,14 @@ impl NativeApp {
                                             app.pick_model(&instance, &slug, window, cx)
                                         },
                                     )))
+                                    .child(Button::new(gpui_kit::SharedString::from(format!("catalog-favorite-{}-{index}", provider.instance_id)))
+                                        .debug_selector({ let instance = provider.instance_id.clone(); move || format!("catalog-favorite-{instance}-{index}") })
+                                        .ghost().small().label(if preference.is_some_and(|entry| entry.favorite) { "Unfavorite" } else { "Favorite" })
+                                        .on_click(cx.listener(move |app, _, _, cx| app.toggle_model_preference(&favorite_instance, &favorite_slug, true, cx))))
+                                    .child(Button::new(gpui_kit::SharedString::from(format!("catalog-hide-{}-{index}", provider.instance_id)))
+                                        .debug_selector({ let instance = provider.instance_id.clone(); move || format!("catalog-hide-{instance}-{index}") })
+                                        .ghost().small().label(if preference.is_some_and(|entry| entry.hidden) { "Unhide" } else { "Hide" })
+                                        .on_click(cx.listener(move |app, _, _, cx| app.toggle_model_preference(&hidden_instance, &hidden_slug, false, cx))))
                                 }),
                         )
                 }))))
@@ -311,17 +318,18 @@ impl NativeApp {
                                                         )
                                                     })
                                                     .ghost()
-                                                    .selected(selected.as_ref() == Some(&value))
+                                                    .selected(if self.composer.read(cx).value().to_lowercase().starts_with("ultrathink:") && option["promptInjectedValues"].as_array().is_some_and(|values| values.iter().any(|v| v == "ultrathink")) { value == "ultrathink" } else { selected.as_ref() == Some(&value) })
                                                     .label(
                                                         choice["label"]
                                                             .as_str()
                                                             .unwrap_or_default()
                                                             .to_owned(),
                                                     )
-                                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                                        app.choose_model_option(
+                                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                                        app.choose_composer_trait(
                                                             &id,
                                                             value.clone(),
+                                                            window,
                                                             cx,
                                                         )
                                                     }))

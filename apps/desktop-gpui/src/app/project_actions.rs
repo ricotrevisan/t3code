@@ -196,6 +196,7 @@ impl NativeApp {
             control_epoch: 0,
             escape: 0,
         };
+        self.remember_header_action(id, cx);
         self.start_action_run(run, cx);
     }
 

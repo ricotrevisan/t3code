@@ -10,9 +10,15 @@ use t3code_desktop_gpui::{
 impl NativeApp {
     /// Retain a cancellable send when the bounded queue is full. Replacing or
     /// unsubscribing the same key retires its old send; disconnect retires all.
-    pub(crate) fn enqueue_subscription(&mut self, command: connection::Command, cx: &mut Context<Self>) {
+    pub(crate) fn enqueue_subscription(
+        &mut self,
+        command: connection::Command,
+        cx: &mut Context<Self>,
+    ) {
         let key = match &command {
-            connection::Command::Subscribe { key, .. } | connection::Command::Unsubscribe(key) => key.clone(),
+            connection::Command::Subscribe { key, .. } | connection::Command::Unsubscribe(key) => {
+                key.clone()
+            }
             _ => unreachable!("subscription control only"),
         };
         self.subscription_enqueues.remove(&key);
@@ -21,16 +27,22 @@ impl NativeApp {
             return;
         };
         match sender.try_send(command) {
-            Ok(()) => {},
-            Err(async_channel::TrySendError::Closed(_)) => self.report_error("Subscription not requested: connection closed", cx),
+            Ok(()) => {}
+            Err(async_channel::TrySendError::Closed(_)) => {
+                self.report_error("Subscription not requested: connection closed", cx)
+            }
             Err(async_channel::TrySendError::Full(command)) => {
                 let generation = self.generation;
                 let scope = self.environment_scope.clone();
                 let task = cx.spawn(async move |entity, cx| {
                     let result = sender.send(command).await;
                     let _ = entity.update(cx, |app, cx| {
-                        if app.generation != generation || app.environment_scope != scope { return; }
-                        if result.is_err() { app.report_error("Subscription not requested: connection closed", cx); }
+                        if app.generation != generation || app.environment_scope != scope {
+                            return;
+                        }
+                        if result.is_err() {
+                            app.report_error("Subscription not requested: connection closed", cx);
+                        }
                         cx.notify();
                     });
                 });
@@ -326,17 +338,25 @@ impl NativeApp {
                                         if app.shell.synchronized && !was_synchronized {
                                             app.action_runs_synchronized(cx);
                                             app.perform("server.getConfig", json!({}), None, cx);
-                                            app.enqueue_subscription(connection::Command::Subscribe {
-                                                key: "server-config".into(), tag: "subscribeServerConfig".into(),
-                                                payload: json!({"usageLimitSources":true}),
-                                            }, cx);
+                                            app.enqueue_subscription(
+                                                connection::Command::Subscribe {
+                                                    key: "server-config".into(),
+                                                    tag: "subscribeServerConfig".into(),
+                                                    payload: json!({"usageLimitSources":true}),
+                                                },
+                                                cx,
+                                            );
                                             if app.inspector_section
                                                 == Some(InspectorSection::Clone)
                                             {
-                                                app.enqueue_subscription(connection::Command::Subscribe {
-                                                    key: "project-clones".into(), tag: "subscribeProjectClones".into(),
-                                                    payload: json!({}),
-                                                }, cx);
+                                                app.enqueue_subscription(
+                                                    connection::Command::Subscribe {
+                                                        key: "project-clones".into(),
+                                                        tag: "subscribeProjectClones".into(),
+                                                        payload: json!({}),
+                                                    },
+                                                    cx,
+                                                );
                                             }
                                         }
                                         if app.shell.synchronized {
@@ -345,7 +365,10 @@ impl NativeApp {
                                         result
                                     }
                                     connection::Update::Subscription { key, item } => {
-                                        if key.starts_with("checkout-stop-") {
+                                        if key.starts_with("header-vcs:") {
+                                            app.apply_git_status(&key, item, cx);
+                                            Ok(())
+                                        } else if key.starts_with("checkout-stop-") {
                                             app.apply_checkout_stop_subscription(&key, item);
                                             Ok(())
                                         } else if key.starts_with("queue-detail:") {
@@ -357,10 +380,19 @@ impl NativeApp {
                                             app.action_run_update(&key, item, cx);
                                             Ok(())
                                         } else if let Some(instance) = key.strip_prefix("auth:") {
-                                            if app.auth_state.as_ref().is_some_and(|state| state["instanceId"] == instance) {
+                                            if app.auth_state.as_ref().is_some_and(|state| {
+                                                state["instanceId"] == instance
+                                            }) {
                                                 match item {
-                                                    Ok(value) if value["instanceId"] == instance => app.accept_provider_auth(value, false, cx),
-                                                    Ok(_) => app.report_error("Invalid authentication state", cx),
+                                                    Ok(value)
+                                                        if value["instanceId"] == instance =>
+                                                    {
+                                                        app.accept_provider_auth(value, false, cx)
+                                                    }
+                                                    Ok(_) => app.report_error(
+                                                        "Invalid authentication state",
+                                                        cx,
+                                                    ),
                                                     Err(error) => app.report_error(error, cx),
                                                 }
                                             }
@@ -487,6 +519,12 @@ impl NativeApp {
         sent_prompt: Option<(String, gpui_kit::AnyWindowHandle)>,
         cx: &mut Context<Self>,
     ) {
+        // Initial configuration is part of synchronization. Every user action
+        // must wait for the owned shell projection, not merely a live sender.
+        if tag != "server.getConfig" && !self.connection_ready() {
+            self.report_error("Action unavailable while disconnected or synchronizing", cx);
+            return;
+        }
         let Some(sender) = self.commands.clone() else {
             self.report_error("Not connected", cx);
             cx.notify();
@@ -505,6 +543,7 @@ impl NativeApp {
         } else {
             Vec::new()
         };
+        let sent_context = sent_prompt.as_ref().and_then(|_| payload["message"].get("context").cloned());
         let reverting = payload["type"] == "thread.checkpoint.revert";
         self.pending_actions += 1;
         self.report_progress("Waiting for server receipt…", cx);
@@ -515,6 +554,10 @@ impl NativeApp {
             {
                 let _ = entity.update(cx, |app, cx| {
                     app.consume_sent_attachments(&attachment_origin, id, &sent_attachments);
+                    if let Some(context) = &sent_context {
+                        app.consume_sent_context(&attachment_origin, id, context);
+                    }
+                    app.schedule_draft_save(cx);
                     cx.notify();
                 });
             }
@@ -577,8 +620,17 @@ impl NativeApp {
                                 })
                                 .unwrap_or_default();
                         }
-                        if matches!(tag.as_str(), "provider.auth.start" | "provider.auth.complete" | "provider.auth.cancel") {
-                            app.accept_provider_auth(value.clone(), tag == "provider.auth.start", cx);
+                        if matches!(
+                            tag.as_str(),
+                            "provider.auth.start"
+                                | "provider.auth.complete"
+                                | "provider.auth.cancel"
+                        ) {
+                            app.accept_provider_auth(
+                                value.clone(),
+                                tag == "provider.auth.start",
+                                cx,
+                            );
                         }
                         if tag == "orchestration.getArchivedShellSnapshot" {
                             match serde_json::from_value::<shell::Snapshot>(value.clone()) {

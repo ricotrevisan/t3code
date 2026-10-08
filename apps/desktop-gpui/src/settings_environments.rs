@@ -14,6 +14,14 @@ use t3code_desktop_gpui::{auth, credentials};
 pub(crate) struct Environment {
     origin: String,
     enabled: bool,
+    #[serde(default)]
+    identity: Option<Identity>,
+}
+/// Server-owned identity is distinct from the credential/transport origin.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Identity {
+    pub id: String,
+    pub label: String,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Saved {
@@ -73,6 +81,9 @@ impl Saved {
                 .iter_mut()
                 .find(|e| e.origin == old)
                 .ok_or("Saved environment was removed")?;
+            if entry.origin != origin {
+                entry.identity = None;
+            }
             entry.origin = origin;
         } else {
             if self.environments.len() >= 64 {
@@ -81,6 +92,7 @@ impl Saved {
             self.environments.push(Environment {
                 origin,
                 enabled: true,
+                identity: None,
             });
         }
         Ok(())
@@ -95,8 +107,63 @@ pub(crate) fn init(cx: &mut App) {
         },
         editing: None,
     });
+    crate::runtime_usage::init(cx);
 }
 impl NativeApp {
+    /// Available endpoint choices only, not a claim of simultaneous sessions.
+    pub(crate) fn environment_choices(&self, cx: &App) -> Vec<(String, String, bool)> {
+        cx.global::<State>()
+            .saved
+            .environments
+            .iter()
+            .map(|entry| {
+                (
+                    entry.origin.clone(),
+                    entry
+                        .identity
+                        .as_ref()
+                        .map(|identity| identity.label.clone())
+                        .unwrap_or_else(|| entry.origin.clone()),
+                    entry.enabled,
+                )
+            })
+            .collect()
+    }
+
+    /// Called only after an owned config receipt; never trust a picker label as identity.
+    pub(crate) fn remember_environment_identity(
+        &mut self,
+        config: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = config["environment"]["environmentId"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+        else {
+            return;
+        };
+        let label = config["environment"]["label"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(id);
+        let mut saved = cx.global::<State>().saved.clone();
+        let Some(entry) = saved
+            .environments
+            .iter_mut()
+            .find(|entry| entry.origin == self.environment_scope)
+        else {
+            return;
+        };
+        let identity = Identity {
+            id: id.into(),
+            label: label.into(),
+        };
+        if entry.identity.as_ref() != Some(&identity) {
+            entry.identity = Some(identity);
+            self.persist_environments(saved, cx);
+        }
+    }
+
     fn persist_environments(&mut self, saved: Saved, cx: &mut Context<Self>) -> bool {
         if !cfg!(test)
             && let Err(error) = saved.save(&path())
@@ -117,6 +184,9 @@ impl NativeApp {
         }
         if self.persist_environments(saved, cx) {
             cx.global_mut::<State>().editing = None;
+            if let Some(config) = self.server_config.config(self.generation).cloned() {
+                self.remember_environment_identity(&config, cx);
+            }
             self.report_success("Environment saved on this device", cx);
         }
     }
@@ -179,7 +249,8 @@ impl NativeApp {
                 let forget = entry.origin.clone();
                 let active = self.commands.is_some() && self.access.as_ref().is_some_and(|a| a.origin == entry.origin);
                 div().flex().flex_col().gap_1()
-                    .child(div().text_sm().child(format!("{}{}", entry.origin, if active { " · active" } else { "" })))
+                    .child(div().text_sm().child(format!("{}{}", entry.identity.as_ref().map(|identity| identity.label.as_str()).unwrap_or(&entry.origin), if active { " · active" } else { "" })))
+                    .when(entry.identity.is_some(), |view| view.child(div().text_xs().child(entry.origin.clone())))
                     .child(div().flex().items_center().gap_1()
                         .child(Switch::new(("environment-enabled", index)).label("Enabled").checked(entry.enabled).small()
                             .on_click(cx.listener(move |app, enabled: &bool, _, cx| {
@@ -212,6 +283,37 @@ impl NativeApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r13_g_environment_identity_migrates_and_origin_edit_drops_old_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("environments.json");
+        std::fs::write(
+            &path,
+            r#"{"environments":[{"origin":"https://office.example/","enabled":true}]}"#,
+        )
+        .unwrap();
+        let mut saved = Saved::load(&path);
+        assert_eq!(saved.environments[0].origin, "https://office.example");
+        assert!(saved.environments[0].identity.is_none());
+        saved.environments[0].identity = Some(Identity {
+            id: "office-id".into(),
+            label: "Office Mac".into(),
+        });
+        saved.save(&path).unwrap();
+        assert_eq!(Saved::load(&path).environments, saved.environments);
+        saved
+            .upsert("https://office.example", Some("https://office.example"))
+            .unwrap();
+        assert!(saved.environments[0].identity.is_some());
+        saved
+            .upsert("https://lab.example", Some("https://office.example"))
+            .unwrap();
+        assert!(
+            saved.environments[0].identity.is_none(),
+            "endpoint edit must not inherit another server's identity"
+        );
+    }
+
     #[test]
     fn settings_fixc_saved_environments_edit_deduplicate_enable_and_restart() {
         let directory = tempfile::tempdir().unwrap();
