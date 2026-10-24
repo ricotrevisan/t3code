@@ -293,9 +293,46 @@ describe("ACP Registry probe", () => {
   });
 
   it.each(["config option", "session model state"] as const)(
+    "preserves large catalogs including custom providers from %s",
+    (source) => {
+      const customModelId = '["codex-lb","gpt-6.1-sol"]';
+      const models = Array.from({ length: 528 }, (_, index) => ({
+        modelId: index === 527 ? customModelId : `model-${index}`,
+        name: `Model ${index}`,
+      }));
+      const result = acpRegistryProbeResult(instanceId, {
+        sessionId: "probe-session",
+        initializeResult: { protocolVersion: 1 },
+        sessionSetupResult: {
+          sessionId: "probe-session",
+          ...(source === "config option"
+            ? {
+                configOptions: [
+                  {
+                    id: "model",
+                    name: "Model",
+                    category: "model",
+                    type: "select",
+                    currentValue: "model-0",
+                    options: models.map(({ modelId, name }) => ({ value: modelId, name })),
+                  },
+                ],
+              }
+            : { models: { currentModelId: "model-0", availableModels: models } }),
+        },
+        modelConfigId: source === "config option" ? "model" : undefined,
+      } satisfies AcpSessionRuntime.AcpSessionRuntimeStartResult);
+
+      expect(result.models).toHaveLength(528);
+      expect(result.models.at(-1)?.id).toBe(customModelId);
+      expect(result.currentModelId).toBe("model-0");
+    },
+  );
+
+  it.each(["config option", "session model state"] as const)(
     "retains the current model beyond the catalog cap from %s",
     (source) => {
-      const models = Array.from({ length: 257 }, (_, index) => ({
+      const models = Array.from({ length: 4_097 }, (_, index) => ({
         modelId: `model-${index}`,
         name: `Model ${index}`,
       }));
@@ -312,20 +349,20 @@ describe("ACP Registry probe", () => {
                     name: "Model",
                     category: "model",
                     type: "select",
-                    currentValue: "model-256",
+                    currentValue: "model-4096",
                     options: models.map(({ modelId, name }) => ({ value: modelId, name })),
                   },
                 ],
               }
-            : { models: { currentModelId: "model-256", availableModels: models } }),
+            : { models: { currentModelId: "model-4096", availableModels: models } }),
         },
         modelConfigId: source === "config option" ? "model" : undefined,
       } satisfies AcpSessionRuntime.AcpSessionRuntimeStartResult);
 
-      expect(result.models).toHaveLength(256);
+      expect(result.models).toHaveLength(4_096);
       expect(result.models[0]?.id).toBe("model-0");
-      expect(result.models.at(-1)?.id).toBe("model-256");
-      expect(result.currentModelId).toBe("model-256");
+      expect(result.models.at(-1)?.id).toBe("model-4096");
+      expect(result.currentModelId).toBe("model-4096");
     },
   );
 

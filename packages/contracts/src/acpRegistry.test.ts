@@ -119,6 +119,26 @@ describe("ACP Registry contracts", () => {
     ).toThrow();
   });
 
+  it("accepts large model catalogs while rejecting oversized catalogs", () => {
+    const probe = {
+      instanceId: "acpRegistry_primeagent",
+      ready: true,
+      icon: null,
+      authMethods: [],
+      models: Array.from({ length: 528 }, (_, index) => ({
+        id: `model-${index}`,
+        name: `Model ${index}`,
+        description: null,
+      })),
+      currentModelId: "model-0",
+      configOptions: [],
+    };
+    expect(decodeProbeResult(probe).models).toHaveLength(528);
+    expect(() =>
+      decodeProbeResult({ ...probe, models: Array.from({ length: 4_097 }, () => probe.models[0]) }),
+    ).toThrow();
+  });
+
   it("decodes valid probe metadata and rejects oversized or invalid payloads", () => {
     const authMethod = {
       id: "oauth",
