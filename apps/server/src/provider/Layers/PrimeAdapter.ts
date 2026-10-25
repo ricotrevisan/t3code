@@ -49,6 +49,7 @@ import {
   resolvePrimeAgentDir,
 } from "../prime/primePackageCatalogExtensions.ts";
 import { preparePrimeOpenRouterCatalogExtension } from "../prime/primeOpenRouterCatalogExtension.ts";
+import { preparePrimeUserInputExtension } from "../prime/primeUserInputExtension.ts";
 import {
   parsePrimeModelSlug,
   primeModelSlug,
@@ -1673,6 +1674,21 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
               }),
           ),
         );
+        const userInputExtensionPath = yield* preparePrimeUserInputExtension(
+          serverConfig.baseDir,
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "prepare",
+                detail: "Could not install the T3 user input extension.",
+                cause,
+              }),
+          ),
+        );
         const approvalExtensionPath = supervised
           ? yield* preparePrimeApprovalExtension(serverConfig.baseDir).pipe(
               Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -1723,6 +1739,8 @@ export function makePrimeAdapter(primeSettings: PrimeSettings, options?: PrimeAd
           ...(disableDiscoveredExtensions ? ["--no-extensions"] : []),
           "--extension",
           catalogExtensionPath,
+          "--extension",
+          userInputExtensionPath,
           ...packageCatalogExtensionArgs,
           ...(approvalExtensionPath !== undefined
             ? [

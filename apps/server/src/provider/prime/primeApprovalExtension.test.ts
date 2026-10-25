@@ -226,6 +226,38 @@ describe("primeApprovalExtension", () => {
     ),
   );
 
+  it.live("asks for user input without a redundant approval", () =>
+    provide(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-prime-input-approval-",
+          });
+          const extensionPath = yield* preparePrimeApprovalExtension(baseDir);
+          const harness = yield* loadExtensionHarness(extensionPath, "approval-required");
+          let confirmations = 0;
+          const result = yield* Effect.promise(() =>
+            harness.toolCall(
+              { toolName: "request_user_input", input: { question: "Which color?" } },
+              {
+                hasUI: true,
+                ui: {
+                  confirm: async () => {
+                    confirmations += 1;
+                    return false;
+                  },
+                },
+              },
+            ),
+          );
+          expect(result).toBeUndefined();
+          expect(confirmations).toBe(0);
+        }),
+      ),
+    ),
+  );
+
   it.live("fails closed for missing, deny, and invalid modes", () =>
     provide(
       Effect.scoped(

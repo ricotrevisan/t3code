@@ -193,6 +193,7 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       );
       assert.isTrue(extensionPaths.some((path) => path.endsWith("t3-approval-v1.ts")));
       assert.isTrue(extensionPaths.some((path) => path.endsWith("t3-openrouter-catalog.ts")));
+      assert.isTrue(extensionPaths.some((path) => path.endsWith("t3-user-input.ts")));
       assert.include(handshake?.args ?? [], "--t3-approval-mode=approval-required");
 
       const response = recorded.find((entry) => entry.command.type === "extension_ui_response");
@@ -1105,6 +1106,15 @@ it.layer(primeAdapterTestLayer, { excludeTestServices: true })("PrimeAdapter", (
       const firstLine = log.split("\n").find((line) => line.trim().length > 0);
       assert.isDefined(firstLine);
       const recorded = decodeRequestLog(firstLine!);
+      const userInputExtensionPath = NodePath.join(
+        config.baseDir,
+        "prime-agent",
+        "extensions",
+        "t3-user-input.ts",
+      );
+      const extensionIndex = recorded.args.indexOf(userInputExtensionPath);
+      assert.isAbove(extensionIndex, 0);
+      assert.equal(recorded.args[extensionIndex - 1], "--extension");
       assert.includeMembers(
         [...recorded.args],
         [

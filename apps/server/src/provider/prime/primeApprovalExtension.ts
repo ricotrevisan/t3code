@@ -74,6 +74,11 @@ export default function t3ApprovalExtension(pi: ExtensionAPI) {
       return { block: true, reason: "T3 approval UI is unavailable" };
     }
 
+    // Asking the user is not a privileged operation.
+    if (event.toolName === "request_user_input") {
+      return undefined;
+    }
+
     let input = "[unserializable input]";
     try {
       input = JSON.stringify(event.input, null, 2) ?? input;
