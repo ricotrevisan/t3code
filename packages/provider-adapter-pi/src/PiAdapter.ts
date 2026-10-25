@@ -26,6 +26,7 @@ import {
 } from "@t3tools/provider-adapter";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as Exit from "effect/Exit";
@@ -45,6 +46,28 @@ const PROBE_THREAD_ID = ThreadId.make("pi-provider-probe");
 const MAX_RPC_LINE_CHARS =
   2_000_000 +
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS * Math.ceil(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / 3) * 4;
+
+// Pi answers a command only once the work behind it finished, so the wait has to cover that work
+// rather than RPC latency. `prompt` acks after preflight, which auto-compacts whenever the thread
+// outgrew the model's context (a 250k-token compaction measured ~46s), and `switch_session` /
+// `get_entries` ack after reading a session file that reaches tens of megabytes. Capping those at
+// the control-command budget reports a turn that is running fine as a failed turn start. The short
+// budget stays as the liveness guard for the in-memory commands.
+const WORK_GATED_COMMAND_TIMEOUT = Duration.minutes(10);
+const CONTROL_COMMAND_TIMEOUT = Duration.seconds(30);
+const WORK_GATED_COMMANDS: ReadonlySet<string> = new Set([
+  "prompt",
+  "switch_session",
+  "get_entries",
+]);
+
+/** How long to wait for Pi's acknowledgement of one RPC command. */
+export const piRpcCommandTimeout = (commandType: string): Duration.Duration =>
+  commandType === "abort"
+    ? Duration.minutes(2)
+    : WORK_GATED_COMMANDS.has(commandType)
+      ? WORK_GATED_COMMAND_TIMEOUT
+      : CONTROL_COMMAND_TIMEOUT;
 
 export const PI_PROVIDER_ADAPTER_CAPABILITIES = {
   protocolVersion: 1,
@@ -621,7 +644,7 @@ function makeConnection(input: {
         );
       }
       return yield* Deferred.await(reply).pipe(
-        Effect.timeout(command.type === "abort" ? "2 minutes" : "30 seconds"),
+        Effect.timeout(piRpcCommandTimeout(String(command.type))),
         Effect.mapError((cause) =>
           isAdapterError(cause)
             ? cause

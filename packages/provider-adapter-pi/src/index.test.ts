@@ -1,7 +1,9 @@
+import * as Duration from "effect/Duration";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   mapPiModelIdentity,
+  piRpcCommandTimeout,
   PI_PROVIDER_ADAPTER_CAPABILITIES,
   PI_PROVIDER_ADAPTER_DEFAULT_CONFIG,
   PI_PROVIDER_ADAPTER_MANIFEST,
@@ -34,6 +36,20 @@ describe("Pi provider adapter package", () => {
     expect(PI_PROVIDER_ADAPTER_CAPABILITIES.features).toContain("reasoning.selection");
     expect(PI_PROVIDER_ADAPTER_CAPABILITIES.features).not.toContain("request.approval");
     expect(PI_PROVIDER_ADAPTER_CAPABILITIES.features).not.toContain("conversation.rollback");
+  });
+});
+
+describe("piRpcCommandTimeout", () => {
+  it("waits out the work behind a prompt instead of a round trip, because preflight can compact", () => {
+    expect(piRpcCommandTimeout("prompt")).toStrictEqual(Duration.minutes(10));
+    expect(piRpcCommandTimeout("switch_session")).toStrictEqual(Duration.minutes(10));
+    expect(piRpcCommandTimeout("get_entries")).toStrictEqual(Duration.minutes(10));
+  });
+
+  it("keeps the short liveness guard for in-memory commands and a longer abort", () => {
+    expect(piRpcCommandTimeout("get_state")).toStrictEqual(Duration.seconds(30));
+    expect(piRpcCommandTimeout("set_model")).toStrictEqual(Duration.seconds(30));
+    expect(piRpcCommandTimeout("abort")).toStrictEqual(Duration.minutes(2));
   });
 });
 

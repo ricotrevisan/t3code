@@ -97,5 +97,6 @@ export const PI_PROVIDER_ADAPTER_PACKAGE: ProviderAdapterPackageV1<
 export {
   makePiAdapter,
   mapPiModelIdentity,
+  piRpcCommandTimeout,
   PI_PROVIDER_ADAPTER_CAPABILITIES,
 } from "./PiAdapter.ts";
