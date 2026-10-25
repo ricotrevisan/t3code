@@ -17,6 +17,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -35,6 +36,7 @@ import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import * as ProviderSessionRuntime from "../src/persistence/ProviderSessionRuntime.ts";
 import * as ExternalLauncher from "../src/process/externalLauncher.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
+import { ProviderAdapterRequestError } from "../src/provider/Errors.ts";
 import * as ProviderService from "../src/provider/Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../src/provider/Services/ProviderSessionDirectory.ts";
 import * as ProviderSessionReaper from "../src/provider/Services/ProviderSessionReaper.ts";
@@ -483,4 +485,182 @@ it.effect.each(["opt-in desktop restart", "marked remote update"] as const)(
         ),
       ),
     ),
+);
+
+it.effect.each([
+  "Prime ownership conflict",
+  "unclassified request failure",
+  "unexpected defect",
+  "non-Prime ownership text",
+  "unrelated Prime method",
+] as const)("logs a safe restart diagnostic for %s and settles the thread", (scenario) =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const activeTurnId = TurnId.make("interrupted-prime-turn");
+    const driver = scenario === "non-Prime ownership text" ? "codex" : "primeAgent";
+    const primeInstanceId = ProviderInstanceId.make(driver);
+    const settled = yield* Deferred.make<void>();
+    const logs: unknown[] = [];
+    const renderedLogs: string[] = [];
+    const logger = Logger.make((options) => {
+      logs.push(options.message);
+      renderedLogs.push(Logger.formatSimple.log(options));
+    });
+    let sendCount = 0;
+
+    yield* Effect.gen(function* () {
+      const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("create-prime-restart-project"),
+        projectId,
+        title: "Prime restart continuation",
+        workspaceRoot: "/tmp/startup-orphan-project",
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-prime-restart-thread"),
+        threadId,
+        projectId,
+        title: "Interrupted Prime turn",
+        modelSelection: { instanceId: primeInstanceId, model: "test-model" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("persist-prime-running-turn"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: driver,
+          providerInstanceId: primeInstanceId,
+          runtimeMode: "full-access",
+          activeTurnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make(driver),
+        providerInstanceId: primeInstanceId,
+        status: "running",
+        resumeCursor,
+        runtimePayload: {
+          activeTurnId,
+          continueAfterServerUpdate: activeTurnId,
+          continueAfterServerUpdatePrepared: null,
+          unrelated: "preserve-me",
+        },
+      });
+    }).pipe(Effect.provide(makePersistedRuntimeLayer(config.dbPath)));
+
+    yield* Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const provider = yield* ProviderService.ProviderService;
+      yield* ServerRuntimeStartup.reconcileProviderSessions.pipe(
+        Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
+          ...engine,
+          dispatch: (command) =>
+            engine
+              .dispatch(command)
+              .pipe(
+                Effect.tap(() =>
+                  command.type === "thread.session.set" && command.session.status === "error"
+                    ? Deferred.succeed(settled, undefined)
+                    : Effect.void,
+                ),
+              ),
+        }),
+        Effect.provideService(ProviderService.ProviderService, {
+          ...provider,
+          getCapabilities: () => Effect.succeed({ promptlessTurnContinuation: true }),
+          sendTurn: () => {
+            sendCount += 1;
+            if (scenario === "unexpected defect") {
+              return Effect.die(new Error("credential-sentinel /private/session-path-sentinel"));
+            }
+            return Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: driver,
+                method: scenario === "unrelated Prime method" ? "request-sentinel" : "get_state",
+                detail:
+                  scenario === "unclassified request failure"
+                    ? "RPC rejected token=credential-sentinel /private/session-path-sentinel"
+                    : "Prime RPC process failed: Process exited with code 1. Error: Session is already active in runtime-sentinel: /private/session-path-sentinel.jsonl token=credential-sentinel",
+                cause: {
+                  request: "request-sentinel",
+                  config: { apiKey: "config-sentinel" },
+                },
+              }),
+            );
+          },
+        }),
+        Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+      );
+      yield* Deferred.await(settled);
+      const after = Option.getOrThrow(yield* query.getThreadDetailById(threadId));
+      assert.equal(after.session?.status, "error");
+      assert.equal(after.session?.activeTurnId, null);
+      assert.equal(
+        after.session?.lastError,
+        "Could not continue this thread after the server restart. Send a new message to continue.",
+      );
+      const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(binding.status, "stopped");
+      assert.deepStrictEqual(binding.resumeCursor, resumeCursor);
+      assert.deepStrictEqual(binding.runtimePayload, {
+        activeTurnId: null,
+        continueAfterServerUpdate: null,
+        continueAfterServerUpdatePrepared: null,
+        unrelated: "preserve-me",
+      });
+      assert.equal(sendCount, 1);
+      assert.deepInclude(logs, [
+        "failed to continue provider session after server restart",
+        {
+          threadId,
+          provider: driver,
+          phase: "restart-continuation",
+          errorKind: scenario === "unexpected defect" ? "Defect" : "ProviderAdapterRequestError",
+          message:
+            scenario === "Prime ownership conflict"
+              ? "Saved Prime session is still owned by another active runtime."
+              : scenario === "unexpected defect"
+                ? "Unexpected failure while continuing the saved session."
+                : "Provider request failed while continuing the saved session.",
+        },
+      ]);
+      const output = JSON.stringify(logs) + renderedLogs.join("\n");
+      assert.notInclude(output, "[Object]");
+      for (const sensitive of [
+        "runtime-sentinel",
+        "session-path-sentinel",
+        "credential-sentinel",
+        "request-sentinel",
+        "config-sentinel",
+      ]) {
+        assert.notInclude(output, sensitive);
+      }
+    }).pipe(
+      Effect.provide(Layer.mergeAll(makePersistedRuntimeLayer(config.dbPath), startupDependencies)),
+    );
+  }).pipe(
+    Effect.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-restart-diagnostic-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
+  ),
 );

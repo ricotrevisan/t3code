@@ -39,6 +39,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import type { ProviderServiceError } from "./provider/Errors.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
@@ -351,6 +352,45 @@ class ProviderSessionContinuationError extends Schema.TaggedError<ProviderSessio
   override get message(): string {
     return `Could not continue thread '${this.threadId}': the provider instance is missing.`;
   }
+}
+
+// Provider errors can embed RPC output, credentials and session paths. Log only
+// typed error kinds and controlled descriptions, never the cause or raw message.
+function continuationFailureDiagnostic(
+  provider: string,
+  cause: Cause.Cause<ProviderServiceError | ProviderSessionContinuationError>,
+) {
+  const failure = Cause.findErrorOption(cause);
+  if (Option.isNone(failure)) {
+    return {
+      errorKind: "Defect",
+      message: "Unexpected failure while continuing the saved session.",
+    };
+  }
+  const error = failure.value;
+  let message = "Provider could not continue the saved session.";
+  switch (error._tag) {
+    case "ProviderAdapterRequestError":
+      message =
+        provider === "primeAgent" &&
+        error.provider === "primeAgent" &&
+        error.method === "get_state" &&
+        /Session is already active in\b/.test(error.detail)
+          ? "Saved Prime session is still owned by another active runtime."
+          : "Provider request failed while continuing the saved session.";
+      break;
+    case "ProviderAdapterProcessError":
+      message = "Provider process failed while continuing the saved session.";
+      break;
+    case "ProviderInstanceNotFoundError":
+    case "ProviderSessionContinuationError":
+      message = "The saved session's provider instance is missing.";
+      break;
+    case "ProviderWorkspaceMissingError":
+      message = "The saved session's workspace folder is missing.";
+      break;
+  }
+  return { errorKind: error._tag, message };
 }
 
 export class ServerUpdateThreadContinuationError extends Schema.TaggedError<ServerUpdateThreadContinuationError>()(
@@ -721,7 +761,9 @@ export const reconcileProviderSessions = Effect.gen(function* () {
           }
           yield* Effect.logWarning("failed to continue provider session after server restart", {
             threadId: thread.id,
-            cause: continuationExit.cause,
+            provider: binding.value.provider,
+            phase: "restart-continuation",
+            ...continuationFailureDiagnostic(binding.value.provider, continuationExit.cause),
           });
           yield* settleAsError(
             "Could not continue this thread after the server restart. Send a new message to continue.",
