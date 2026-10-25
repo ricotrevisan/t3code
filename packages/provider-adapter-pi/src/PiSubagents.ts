@@ -24,8 +24,10 @@ const Result = Schema.Struct({
     Schema.Struct({
       input: Schema.Finite,
       output: Schema.Finite,
-      cacheRead: Schema.Finite,
-      cacheWrite: Schema.Finite,
+      // Early failures (for example an unknown agent) have input/output and
+      // turns only; requiring cache fields drops the entire terminal result.
+      cacheRead: Schema.optional(Schema.Finite),
+      cacheWrite: Schema.optional(Schema.Finite),
     }),
   ),
   messages: Schema.optional(
@@ -138,10 +140,11 @@ export function makePiSubagents() {
       if (result.usage) {
         const u = result.usage;
         child.usage = {
-          totalTokens: count(u.input) + count(u.output) + count(u.cacheRead) + count(u.cacheWrite),
-          inputTokens: count(u.input) + count(u.cacheWrite),
+          totalTokens:
+            count(u.input) + count(u.output) + count(u.cacheRead ?? 0) + count(u.cacheWrite ?? 0),
+          inputTokens: count(u.input) + count(u.cacheWrite ?? 0),
           outputTokens: count(u.output),
-          cachedInputTokens: count(u.cacheRead),
+          cachedInputTokens: count(u.cacheRead ?? 0),
         };
       }
       const typedUsage = add(child.base, child.usage);

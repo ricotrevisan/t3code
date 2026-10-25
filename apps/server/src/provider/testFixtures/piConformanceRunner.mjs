@@ -424,6 +424,29 @@ const program = Effect.gen(function* () {
       ends[0]?.payload.typedUsage?.totalTokens === run * 20,
     );
   }
+  const unknownAgent = yield* complete("!unknown-agent");
+  const unknownEnds = unknownAgent.filter((event) => event.type === "task.completed");
+  check(
+    "sparse unknown-agent result emits exactly one failed task completion",
+    unknownEnds.length === 1 &&
+      unknownEnds[0].payload.status === "failed" &&
+      unknownEnds[0].payload.summary === "Unknown agent general" &&
+      unknownEnds[0].payload.typedUsage.totalTokens === 0,
+  );
+  // Reproduce historical ingestion with the task completion missing, while
+  // retaining the real adapter's linked tool result and running task rows.
+  const historical = unknownAgent
+    .filter((event) => event.type !== "task.completed")
+    .flatMap((event) => runtimeEventToActivities(event));
+  const historicalAgent = foldSubagentActivities(historical, { sessionLive: true })[0];
+  const finalTool = historical.find((activity) => activity.kind === "tool.completed");
+  check(
+    "historical unknown-agent card settles at the parent tool completion",
+    historicalAgent?.status === "failed" &&
+      historicalAgent?.error === "Unknown agent general" &&
+      historicalAgent?.completedAt === finalTool?.createdAt &&
+      historicalAgent?.activationCount === 1,
+  );
   const tool = yield* complete("!tool ls");
   check(
     "tool item lifecycle",

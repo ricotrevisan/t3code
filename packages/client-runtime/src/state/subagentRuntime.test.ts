@@ -891,3 +891,151 @@ describe("nested agents vs subagent shells", () => {
     expect(agents.map((agent) => agent.id)).toEqual(["nested-1"]);
   });
 });
+
+describe("historical Pi tool-result reconciliation", () => {
+  const call = "toolu_014L7uHFqyvkL11DZLnwTMma";
+  const taskId = `pi:${call}:0`;
+  const startAt = "2026-09-28T04:23:42.326Z";
+  const endAt = "2026-09-28T04:23:42.327Z";
+  const running = (id = taskId, toolUseId = call) => [
+    activity(
+      "task.started",
+      { taskId: id, taskType: "subagent", title: "general", toolUseId },
+      startAt,
+    ),
+    activity("task.updated", { taskId: id, status: "running", toolUseId }, startAt),
+    activity(
+      "task.progress",
+      { taskId: id, status: "running", toolUseId, typedUsage: { totalTokens: 0 } },
+      startAt,
+    ),
+  ];
+  const result = (overrides: Record<string, unknown> = {}) => ({
+    callIndex: 0,
+    agent: "general",
+    exitCode: 1,
+    usage: { input: 0, output: 0, turns: 0 },
+    stopReason: "error",
+    errorMessage: "Unknown agent general",
+    ...overrides,
+  });
+  const completed = (results: unknown[] = [result()], toolCallId = call) =>
+    activity(
+      "tool.completed",
+      {
+        toolCallId,
+        status: "failed",
+        data: { details: { kind: "pi-subagent", failed: true, results } },
+      },
+      endAt,
+    );
+
+  it("settles the persisted unknown-agent failure without task.completed or session death", () => {
+    const [agent] = foldSubagentActivities([...running(), completed()], { sessionLive: true });
+    expect(agent).toMatchObject({
+      status: "failed",
+      error: "Unknown agent general",
+      startedAt: startAt,
+      completedAt: endAt,
+      activationCount: 1,
+      usage: { totalTokens: 0 },
+    });
+    expect(deriveAgentPanelModel({ agents: [agent!] })).toMatchObject({
+      liveCount: 0,
+      settledCount: 1,
+    });
+  });
+
+  it("reconciles terminal tools retained before task rows and pins the first completion time", () => {
+    const later = { ...completed(), createdAt: "2026-09-28T05:00:00.000Z" };
+    expect(fold([completed(), ...running(), later])[0]).toMatchObject({
+      status: "failed",
+      completedAt: endAt,
+      activationCount: 1,
+    });
+  });
+
+  it("matches children individually instead of applying the batch failure to every agent", () => {
+    const second = `pi:${call}:1`;
+    const third = `pi:${call}:2`;
+    const agents = fold([
+      ...running(),
+      ...running(second),
+      ...running(third),
+      completed([
+        result(),
+        result({ callIndex: 1, exitCode: 0, errorMessage: undefined }),
+        result({ callIndex: 2, exitCode: -1 }),
+      ]),
+    ]);
+    expect(agents.map((agent) => agent.status)).toEqual(["failed", "completed", "running"]);
+  });
+
+  it("does not settle unrelated tools, malformed results, or an unlinked agent", () => {
+    for (const completion of [
+      completed([result()], "unrelated"),
+      completed([null, { callIndex: 0, exitCode: "1" }]),
+      activity(
+        "tool.completed",
+        {
+          toolCallId: call,
+          status: "failed",
+          data: { details: { kind: "other", results: [result()] } },
+        },
+        endAt,
+      ),
+    ]) {
+      expect(fold([...running(), completion])[0]?.status).toBe("running");
+    }
+    expect(
+      fold([activity("task.started", { taskId, taskType: "subagent" }, startAt), completed()])[0]
+        ?.status,
+    ).toBe("running");
+    expect(fold([completed()])).toEqual([]);
+  });
+
+  it("preserves explicit task completion and does not settle a resumed session from its old tool", () => {
+    const explicit = activity(
+      "task.completed",
+      { taskId, status: "stopped", summary: "User stopped" },
+      startAt,
+    );
+    expect(fold([...running(), explicit, completed()])[0]).toMatchObject({
+      status: "interrupted",
+      completedAt: startAt,
+    });
+    const namedId = "pi:named-session";
+    const oldEnd = completed([result({ session: { id: "named-session" } })]);
+    expect(fold([...running(namedId), oldEnd, ...running(namedId, "new-call")])[0]?.status).toBe(
+      "running",
+    );
+  });
+
+  it("maps aborted named sessions and merges partial usage without losing its breakdown", () => {
+    const id = "pi:named-session";
+    const agents = fold([
+      ...running(id),
+      activity(
+        "task.progress",
+        {
+          taskId: id,
+          typedUsage: { totalTokens: 20, inputTokens: 15, outputTokens: 5 },
+        },
+        startAt,
+      ),
+      completed([
+        result({
+          session: { id: "named-session" },
+          exitCode: 130,
+          stopReason: "aborted",
+          errorMessage: "Cancelled",
+        }),
+      ]),
+    ]);
+    expect(agents[0]).toMatchObject({
+      status: "interrupted",
+      completedAt: endAt,
+      usage: { totalTokens: 20, inputTokens: 15, outputTokens: 5 },
+    });
+  });
+});

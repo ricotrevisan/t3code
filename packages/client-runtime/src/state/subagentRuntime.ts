@@ -449,6 +449,85 @@ function asRuntimeStatus(value: unknown): RuntimeSubagentStatus | undefined {
     : undefined;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Historical Pi releases could persist a final tool result but lose the task
+ * completion. Recover only linked children with their own terminal result,
+ * never infer a whole batch's outcome from the parent tool's status. */
+function reconcilePiToolResults(
+  agents: Map<string, MutableAgent>,
+  toolUseIds: ReadonlyMap<string, string>,
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): void {
+  const completions = new Map<
+    string,
+    Map<
+      string,
+      {
+        at: string;
+        status: RuntimeSubagentStatus;
+        summary: string | undefined;
+      }
+    >
+  >();
+  for (const activity of activities) {
+    if (activity.kind !== "tool.completed") continue;
+    const payload = asRecord(activity.payload);
+    const toolCallId = asString(payload?.toolCallId);
+    const details = asRecord(asRecord(payload?.data)?.details);
+    if (!toolCallId || details?.kind !== "pi-subagent" || !Array.isArray(details.results)) continue;
+    for (const [index, raw] of details.results.entries()) {
+      const result = asRecord(raw);
+      if (
+        !result ||
+        !asString(result.agent) ||
+        typeof result.exitCode !== "number" ||
+        !Number.isSafeInteger(result.exitCode) ||
+        result.exitCode < 0
+      )
+        continue;
+      const callIndex = result.callIndex ?? index;
+      if (typeof callIndex !== "number" || !Number.isSafeInteger(callIndex) || callIndex < 0)
+        continue;
+      const sessionId = asString(asRecord(result.session)?.id);
+      const id = `pi:${sessionId ?? `${toolCallId}:${callIndex}`}`;
+      let batch = completions.get(toolCallId);
+      if (!batch) {
+        batch = new Map();
+        completions.set(toolCallId, batch);
+      }
+      if (!batch.has(id)) {
+        batch.set(id, {
+          at: activity.createdAt,
+          status:
+            result.stopReason === "aborted"
+              ? "interrupted"
+              : result.exitCode === 0
+                ? "completed"
+                : "failed",
+          summary: asString(result.errorMessage),
+        });
+      }
+    }
+  }
+  for (const agent of agents.values()) {
+    // Explicit task lifecycle always wins. Latest linkage prevents an old
+    // result from settling a named session that resumed in another tool call.
+    if (isTerminalSubagentStatus(agent.status)) continue;
+    const toolUseId = toolUseIds.get(agent.id);
+    const completion = toolUseId ? completions.get(toolUseId)?.get(agent.id) : undefined;
+    if (!completion) continue;
+    applyStatus(agent, completion.status, completion.at);
+    if (completion.status === "failed" && completion.summary)
+      agent.error = bounded(completion.summary);
+    agent.updatedAt = completion.at;
+  }
+}
+
 /**
  * Folds a thread's persisted activities into subagent state. Tolerant by
  * construction: malformed rows are skipped individually; unknown kinds are
@@ -465,6 +544,7 @@ export function foldSubagentActivities(
   options?: { readonly sessionLive?: boolean },
 ): ReadonlyArray<RuntimeSubagent> {
   const agents = new Map<string, MutableAgent>();
+  const toolUseIds = new Map<string, string>();
 
   for (const activity of activities) {
     if (typeof activity.payload !== "object" || activity.payload === null) {
@@ -472,6 +552,11 @@ export function foldSubagentActivities(
     }
     const payload = activity.payload as Record<string, unknown>;
     const at = activity.createdAt;
+    if (activity.kind.startsWith("task.")) {
+      const taskId = asString(payload.taskId);
+      const toolUseId = asString(payload.toolUseId);
+      if (taskId && toolUseId) toolUseIds.set(taskId, toolUseId);
+    }
 
     switch (activity.kind) {
       case "task.started": {
@@ -631,6 +716,8 @@ export function foldSubagentActivities(
         break;
     }
   }
+
+  reconcilePiToolResults(agents, toolUseIds, activities);
 
   // Consistency pass: when a workflow coordinator has settled, members that
   // never received their own terminal row cannot still be in-flight — the

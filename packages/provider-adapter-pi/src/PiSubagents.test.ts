@@ -160,3 +160,54 @@ describe("Pi subagent snapshots", () => {
     ).toEqual(["failed", "failed"]);
   });
 });
+
+describe("Pi early failure lifecycle", () => {
+  it("emits a terminal failure for the real sparse unknown-agent result", () => {
+    const tracker = makePiSubagents();
+    tracker.observe("call", snapshot(child({ session: undefined, callIndex: 0 })));
+    const events = tracker.observe(
+      "call",
+      snapshot({
+        callIndex: 0,
+        agent: "general",
+        exitCode: 1,
+        usage: { input: 0, output: 0, turns: 0 },
+        stopReason: "error",
+        errorMessage: "Unknown agent general",
+      }),
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "task.completed",
+      payload: {
+        taskId: "pi:call:0",
+        status: "failed",
+        summary: "Unknown agent general",
+      },
+    });
+    expect(tracker.finish("call", "failed", "Missing result")).toEqual([]);
+  });
+
+  it("emits start and completion when an early failure is the first observation", () => {
+    const tracker = makePiSubagents();
+    const events = tracker.observe(
+      "call",
+      snapshot({
+        callIndex: 0,
+        agent: "general",
+        exitCode: 1,
+        usage: { input: 0, output: 0, turns: 0 },
+        errorMessage: "Unknown agent general",
+      }),
+    );
+    expect(events.map((event) => event.type)).toEqual([
+      "task.started",
+      "task.updated",
+      "task.completed",
+    ]);
+    expect(events.at(-1)?.payload).toMatchObject({
+      status: "failed",
+      typedUsage: { totalTokens: 0 },
+    });
+  });
+});

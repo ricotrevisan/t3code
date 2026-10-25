@@ -145,6 +145,41 @@ const runTurn = (message, reply) => {
       isError: true,
     });
   }
+  if (message.startsWith("!unknown-agent")) {
+    const toolCallId = `unknown-agent-${state.entries.length}`;
+    const toolName = "subagent";
+    const running = {
+      callIndex: 0,
+      agent: "general",
+      exitCode: -1,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    };
+    emit({ type: "tool_execution_start", toolCallId, toolName, args: { agent: "general" } });
+    emit({
+      type: "tool_execution_update",
+      toolCallId,
+      toolName,
+      partialResult: { details: { kind: "pi-subagent", results: [running] } },
+    });
+    const result = {
+      details: {
+        kind: "pi-subagent",
+        failed: true,
+        results: [
+          {
+            callIndex: 0,
+            agent: "general",
+            exitCode: 1,
+            usage: { input: 0, output: 0, turns: 0 },
+            stopReason: "error",
+            errorMessage: "Unknown agent general",
+          },
+        ],
+      },
+    };
+    pushEntry({ role: "toolResult", toolCallId, toolName, ...result });
+    emit({ type: "tool_execution_end", toolCallId, toolName, result, isError: true });
+  }
   if (message.startsWith("!tool")) {
     emit({
       type: "message_update",
