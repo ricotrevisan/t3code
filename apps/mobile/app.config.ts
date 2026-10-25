@@ -69,7 +69,7 @@ const VARIANT_CONFIG = {
   development: {
     appName: "T3 Code Dev",
     scheme: "t3code-dev",
-    iosBundleIdentifier: "com.t3tools.t3code.dev",
+    iosBundleIdentifier: "com.ricotrevisan.t3code.dev",
     androidPackage: "com.t3tools.t3code.dev",
     relyingParty: "clerk.t3.codes",
     assets: DEVELOPMENT_ASSETS,
@@ -85,7 +85,7 @@ const VARIANT_CONFIG = {
   production: {
     appName: "T3 Code",
     scheme: "t3code",
-    iosBundleIdentifier: "com.t3tools.t3code",
+    iosBundleIdentifier: "com.ricotrevisan.t3code",
     androidPackage: "com.t3tools.t3code",
     relyingParty: "clerk.t3.codes",
     assets: RELEASE_ASSETS,
@@ -192,7 +192,7 @@ const config: ExpoConfig = {
     // showcase capture build requires full screen (see infoPlist below).
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
-    // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
+    // Pin code signing to the fork's Apple team so non-interactive `expo run:ios`
     // does not fall back to a personal team (which cannot sign app groups,
     // Sign in with Apple, or push notification entitlements).
     appleTeamId: "B3VB4EPWT9",

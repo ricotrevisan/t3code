@@ -59,6 +59,52 @@ Set `T3CODE_CLERK_JWT_TEMPLATE=t3-relay` for clients and
 also defines `CLERK_JWT_TEMPLATE`. The audience stays the same across relay stages; the relay
 URL selects the deployment.
 
+## Fork iOS notifications and Live Activities
+
+Fork iOS builds use Apple team `B3VB4EPWT9` and bundle IDs
+`com.ricotrevisan.t3code.dev`, `com.ricotrevisan.t3code.preview`, and
+`com.ricotrevisan.t3code`. They need a relay with APNs credentials authorized for
+those identifiers. The upstream relay cannot deliver push for this Apple identity.
+
+Start with the preview identifier in a paid Apple Developer account. Enable Push
+Notifications and register its App Group `group.com.ricotrevisan.t3code.preview`
+for the app and its extensions. Build with the widget extension to support Live
+Activities and push-to-start. Personal Team builds (`T3CODE_IOS_PERSONAL_TEAM=1`)
+disable agent-awareness push and omit the required capabilities.
+
+Configure a fork-owned Clerk application with the JWT template and CLI OAuth
+application described below. Enable its Native API and allow
+`t3code-preview://app/`; add `t3code-dev://app/` and `t3code://app/` when using
+the other variants. Configure the public client values above for both the phone
+build and the environment host so they sign in to the same relay.
+
+In the ignored `infra/relay/.env`, set `APNS_TEAM_ID=B3VB4EPWT9`, the APNs key ID
+and private key, `APNS_BUNDLE_ID=com.ricotrevisan.t3code.preview`, and
+`APNS_ENVIRONMENT=production`. Supply the fork's Clerk credentials and relay API
+and tunnel zones, then follow the [relay deployment instructions](../../infra/relay/README.md#deployment)
+for Cloudflare, PlanetScale, Axiom, and the retained `prod` stage. Keep private
+keys in local secret storage and the GitHub `production` environment, never client
+configuration. Configure that environment before enabling automatic relay deployment.
+
+Device registrations report their bundle ID and APNs environment, allowing the
+relay to route development builds to sandbox and distributed builds to production.
+The relay's APNs bundle and environment settings are fallbacks for registrations
+without that metadata. Its APNs key must authorize every variant being used.
+
+Verify on a signed device build: inspect the installed app's `aps-environment`
+entitlement, sign in on both the phone and host, and enable notifications. Check
+approval, input, completion, and failure notifications, their thread links, and
+Live Activity start, update, and end. Use [relay traces](./relay-observability.md)
+to investigate delivery failures.
+
+Before production submission, verify `submit.production.ios.ascAppId` in
+`apps/mobile/eas.json` identifies the App Store Connect record for
+`com.ricotrevisan.t3code` in the fork's account. The inherited value `6787819824`
+has not been verified for this bundle. Replace it with that record's Apple ID
+before running the production workflow, which automatically submits builds.
+This is a submission target, separate from the signing team and bundle ID; see
+[EAS iOS submission](https://docs.expo.dev/submit/ios/).
+
 ## Desktop OAuth redirects
 
 Enable Clerk's Native API and add the desktop redirects to its SSO redirect allowlist:
