@@ -91,6 +91,7 @@ import {
   type ThreadInspectorMode,
 } from "./thread-inspector-content-stack";
 import { threadRouteIsHydrating } from "./thread-route-hydration";
+import { recordLastViewedThread } from "../../state/last-viewed-thread";
 
 function ThreadHeader(
   props: Parameters<typeof useThreadHeaderOptions>[0] & {
@@ -271,6 +272,13 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
       ? null
       : scopedThreadKey(selectedThread.environmentId, selectedThread.id);
   const selectedThreadDetailState = useSelectedThreadDetailState();
+  useFocusEffect(
+    useCallback(() => {
+      if (selectedThread !== null && selectedThreadKey === routeThreadKey) {
+        recordLastViewedThread(selectedThread.environmentId, selectedThread.id);
+      }
+    }, [selectedThread, selectedThreadKey, routeThreadKey]),
+  );
 
   if (environmentId === null || threadIdRaw === null) {
     return <OpeningThreadLoadingScreen />;

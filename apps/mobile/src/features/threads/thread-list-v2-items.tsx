@@ -49,6 +49,7 @@ import {
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
+import { useLastViewedThread } from "../../state/use-last-viewed-thread";
 
 /**
  * Thread List v2 renders one flat native list: rich edge-to-edge rows for
@@ -556,6 +557,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const theme = useUniwindTheme();
   const sidebarPane = props.pane === "sidebar";
   const selected = props.selected === true;
+  const lastViewed = useLastViewedThread(thread.environmentId, thread.id);
+  const lastViewedStyle =
+    lastViewed && !selected
+      ? { borderLeftWidth: 3, borderLeftColor: theme["--color-primary"] }
+      : undefined;
   const rowAppearance = getThreadListV2RowAppearance(theme, sidebarPane, selected);
 
   const status = resolveThreadListV2Status(thread);
@@ -1077,7 +1083,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         interactionClassName={rowAppearance.interactionClassName}
         interactionOpacity={rowAppearance.interactionOpacity}
         className={rowAppearance.className}
-        accessibilityHint={swipeAccessibilityHint}
+        accessibilityHint={
+          lastViewed ? `Last viewed thread. ${swipeAccessibilityHint}` : swipeAccessibilityHint
+        }
         accessibilityLabel={
           props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
         }
@@ -1087,7 +1095,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           close();
           onSelectThread(thread);
         }}
-        style={rowAppearance.cardStyle}
+        style={[rowAppearance.cardStyle, lastViewedStyle]}
       >
         {sidebarPane ? (
           cardContent
@@ -1109,7 +1117,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         key={`${thread.environmentId}:${thread.id}`}
         interactionClassName={rowAppearance.interactionClassName}
         interactionOpacity={rowAppearance.interactionOpacity}
-        accessibilityHint={swipeAccessibilityHint}
+        accessibilityHint={
+          lastViewed ? `Last viewed thread. ${swipeAccessibilityHint}` : swipeAccessibilityHint
+        }
         accessibilityLabel={
           props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
         }
@@ -1120,7 +1130,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           close();
           onSelectThread(thread);
         }}
-        style={rowAppearance.style}
+        style={[rowAppearance.style, lastViewedStyle]}
       >
         {/* Settled history recedes: dimmed favicon + muted title. */}
         <View
