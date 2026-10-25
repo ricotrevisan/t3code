@@ -313,11 +313,23 @@ impl NativeApp {
                 ));
             }
         }
-        let deletion_review = self.sidebar_state.bulk_delete_review.as_ref().filter(
-            |(generation, environment, _)| {
-                *generation == self.generation && environment == &self.environment_scope
+        let single_review = self.sidebar_state.single_delete_review.as_ref().filter(
+            |(generation, environment, ids)| {
+                *generation == self.generation
+                    && environment == &self.environment_scope
+                    && ids.first() == self.confirm_delete.as_ref()
+                    && ids.first() == target.as_ref()
             },
         );
+        let single = single_review.is_some();
+        let deletion_review = single_review.or_else(|| {
+            self.sidebar_state
+                .bulk_delete_review
+                .as_ref()
+                .filter(|(generation, environment, _)| {
+                    *generation == self.generation && environment == &self.environment_scope
+                })
+        });
         if deletion_review.is_some() {
             rows.clear();
         }
@@ -344,7 +356,11 @@ impl NativeApp {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(format!("Delete {} threads?", ids.len()))
+                        .child(if single {
+                            "Delete this thread?".into()
+                        } else {
+                            format!("Delete {} threads?", ids.len())
+                        })
                         .child(
                             "This permanently clears conversation history. This cannot be undone.",
                         )
@@ -364,8 +380,23 @@ impl NativeApp {
                                 .debug_selector(|| "bulk-delete".into())
                                 .danger()
                                 .label(format!("Delete {} threads permanently", ids.len()))
-                                .on_click(cx.listener(|app, _, window, cx| {
-                                    app.sidebar_menu_action("", "bulk-delete-confirm", window, cx);
+                                .disabled(
+                                    !self.connection_ready()
+                                        || (self.sidebar_state.bulk_busy
+                                            && self.sidebar_state.bulk_generation
+                                                == self.generation),
+                                )
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.sidebar_menu_action(
+                                        "",
+                                        if single {
+                                            "single-delete-confirm"
+                                        } else {
+                                            "bulk-delete-confirm"
+                                        },
+                                        window,
+                                        cx,
+                                    );
                                 })),
                         )
                         .child(

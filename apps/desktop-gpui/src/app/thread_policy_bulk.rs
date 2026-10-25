@@ -188,6 +188,18 @@ impl NativeApp {
         window: Option<gpui_kit::AnyWindowHandle>,
         cx: &mut Context<Self>,
     ) {
+        self.thread_lifecycle_targets(action, kind, until, window, None, cx);
+    }
+
+    pub(crate) fn thread_lifecycle_targets(
+        &mut self,
+        action: &str,
+        kind: &str,
+        until: Option<String>,
+        window: Option<gpui_kit::AnyWindowHandle>,
+        targets: Option<Vec<String>>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.connection_ready()
             || (self.sidebar_state.bulk_busy
                 && self.sidebar_state.bulk_generation == self.generation)
@@ -195,6 +207,8 @@ impl NativeApp {
             return;
         }
         self.reconcile_sidebar_selection();
+        let single = targets.is_some();
+        let targets = targets.unwrap_or_else(|| self.sidebar_state.selection.clone());
         let Some(sender) = self.commands.clone() else {
             self.report_error("Not connected", cx);
             return;
@@ -203,7 +217,7 @@ impl NativeApp {
             && self
                 .selected_thread
                 .as_ref()
-                .is_some_and(|id| self.sidebar_state.selection.contains(id))
+                .is_some_and(|id| targets.contains(id))
             && !self.can_change_checkout(cx)
         {
             return;
@@ -219,16 +233,19 @@ impl NativeApp {
         let review = (
             self.generation,
             self.environment_scope.clone(),
-            self.sidebar_state.selection.clone(),
+            targets.clone(),
         );
-        if action == "delete" && self.sidebar_state.bulk_delete_review.as_ref() != Some(&review) {
+        if action == "delete"
+            && !single
+            && self.sidebar_state.bulk_delete_review.as_ref() != Some(&review)
+        {
             self.sidebar_state.bulk_delete_review = Some(review);
             cx.notify();
             return;
         }
         self.sidebar_state.bulk_delete_review = None;
         if action == "snooze"
-            && !self.sidebar_state.selection.iter().all(|id| {
+            && !targets.iter().all(|id| {
                 self.shell
                     .threads
                     .iter()
@@ -243,7 +260,7 @@ impl NativeApp {
             return;
         }
         let mut calls: Vec<(String, Value, Vec<Value>)> = Vec::new();
-        for id in &self.sidebar_state.selection {
+        for id in &targets {
             if let Some(thread) = self
                 .shell
                 .threads
@@ -281,7 +298,7 @@ impl NativeApp {
         let departing = matches!(action, "delete" | "archive" | "settle" | "snooze");
         let captured_selection = self.selected_thread.clone();
         let captured_order = self.sidebar_selectable_order();
-        let batch_targets = self.sidebar_state.selection.clone();
+        let batch_targets = targets;
         let action = action.to_owned();
         let capabilities = capabilities.clone();
         let generation = self.generation;
@@ -305,7 +322,7 @@ impl NativeApp {
                         checkout_safe
                             && app.generation == generation
                             && app.environment_scope == environment
-                            && app.sidebar_selectable_order().contains(&id)
+                            && (single || app.sidebar_selectable_order().contains(&id))
                             && app
                                 .shell
                                 .threads

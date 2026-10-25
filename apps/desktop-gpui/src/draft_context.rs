@@ -145,10 +145,16 @@ impl DraftContextRecord {
                         .is_none_or(|_| string("fenceLanguage", 64, false))
                     && self.0.get("pullRequest").is_none_or(|pr| {
                         pr.is_object()
-                            && pr["number"].as_u64().is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
-                            && ["title", "url", "headBranch", "baseBranch"].iter().all(|key| {
-                                pr[key].as_str().is_some_and(|s| s.encode_utf16().count() <= 2048)
-                            })
+                            && pr["number"]
+                                .as_u64()
+                                .is_some_and(|n| n > 0 && n <= 9_007_199_254_740_991)
+                            && ["title", "url", "headBranch", "baseBranch"]
+                                .iter()
+                                .all(|key| {
+                                    pr[key]
+                                        .as_str()
+                                        .is_some_and(|s| s.encode_utf16().count() <= 2048)
+                                })
                             && matches!(pr["state"].as_str(), Some("open" | "closed" | "merged"))
                             && pr["isDraft"].is_boolean()
                     })
@@ -171,6 +177,52 @@ impl DraftContextRecord {
             Err("Invalid or unsupported context payload")
         }
     }
+}
+
+/// Parse canonical links with escaped labels. Literal escaped brackets are not
+/// chips; source byte ranges are shared by editor rehydration and validation.
+pub fn context_links(text: &str) -> Vec<(std::ops::Range<usize>, String, String)> {
+    let mut links = Vec::new();
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\\' {
+            cursor += 1;
+            if cursor < bytes.len() {
+                cursor += text[cursor..].chars().next().unwrap().len_utf8();
+            }
+            continue;
+        }
+        if bytes[cursor] != b'[' {
+            cursor += text[cursor..].chars().next().unwrap().len_utf8();
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        let mut label = String::new();
+        while cursor < bytes.len() && !matches!(bytes[cursor], b'[' | b']' | b'\n' | b'\r') {
+            if bytes[cursor] == b'\\' {
+                cursor += 1;
+                if cursor == bytes.len() {
+                    break;
+                }
+            }
+            let character = text[cursor..].chars().next().unwrap();
+            label.push(character);
+            cursor += character.len_utf8();
+        }
+        if !text[cursor..].starts_with("](t3-context://v1/") {
+            continue;
+        }
+        let href_start = cursor + 2;
+        let Some(relative_end) = text[href_start..].find(')') else {
+            break;
+        };
+        let end = href_start + relative_end + 1;
+        links.push((start..end, text[href_start..end - 1].to_owned(), label));
+        cursor = end;
+    }
+    links
 }
 
 /// Only referenced payloads ride the message. Retain unreferenced records in the
@@ -201,6 +253,19 @@ pub fn message_context(
     if records.len() > 200 {
         return Err("Too many context records (maximum 200)");
     }
+    // A chip without its owned snapshot must never silently become text-only
+    // context. This also rejects forged/incomplete structured clipboard data.
+    for (_, href, _) in context_links(&text) {
+        let (kind, id) = href["t3-context://v1/".len()..]
+            .split_once('/')
+            .ok_or("Malformed context reference")?;
+        if !records
+            .iter()
+            .any(|record| record["kind"] == kind && record["contextId"] == id)
+        {
+            return Err("Context reference is missing its source record");
+        }
+    }
     Ok((
         text,
         (!records.is_empty()).then(|| json!({"version":1,"records":records})),
@@ -211,18 +276,44 @@ pub fn message_context(
 mod tests {
     use super::*;
     #[test]
+    fn r18_c_context_reference_requires_matching_owned_kind_and_identity() {
+        let record = DraftContextRecord::terminal("Build", "t", "Build", 1, 1, "snapshot").unwrap();
+        assert!(message_context(&record.reference(), &[]).is_err());
+        assert!(message_context(&record.reference(), std::slice::from_ref(&record)).is_ok());
+        let mismatched = record.reference().replace("/terminal/", "/review-comment/");
+        assert!(message_context(&mismatched, &[record]).is_err());
+        assert!(message_context(&crate::mentions::file_link("src/main.rs"), &[]).is_ok());
+        assert!(message_context("literal text", &[]).is_ok());
+    }
+
+    #[test]
     fn r14_int_review_metadata_validates_and_survives_message_transport() {
         let fields = json!({"sectionId":"pr:17","sectionTitle":"Review","filePath":"src/main.rs","startIndex":0,"endIndex":1,"rangeLabel":"1","text":"Review","diff":"","pullRequest":{"number":17,"title":"Fix","url":"https://host.test/pull/17","headBranch":"fix","baseBranch":"main","state":"open","isDraft":false}});
-        let record = DraftContextRecord::capture("review-comment", "PR #17", fields.clone()).unwrap();
+        let record =
+            DraftContextRecord::capture("review-comment", "PR #17", fields.clone()).unwrap();
         let (_, context) = message_context(&record.reference(), &[record]).unwrap();
-        assert_eq!(context.unwrap()["records"][0]["pullRequest"], fields["pullRequest"]);
-        for (key, value) in [("number", json!(0)), ("state", json!("unknown")), ("isDraft", Value::Null), ("title", json!("😀".repeat(1025)))] {
+        assert_eq!(
+            context.unwrap()["records"][0]["pullRequest"],
+            fields["pullRequest"]
+        );
+        for (key, value) in [
+            ("number", json!(0)),
+            ("state", json!("unknown")),
+            ("isDraft", Value::Null),
+            ("title", json!("😀".repeat(1025))),
+        ] {
             let mut malformed = fields.clone();
             malformed["pullRequest"][key] = value;
-            assert!(DraftContextRecord::capture("review-comment", "PR", malformed).is_err(), "{key}");
+            assert!(
+                DraftContextRecord::capture("review-comment", "PR", malformed).is_err(),
+                "{key}"
+            );
         }
         let mut missing = fields;
-        missing["pullRequest"].as_object_mut().unwrap().remove("url");
+        missing["pullRequest"]
+            .as_object_mut()
+            .unwrap()
+            .remove("url");
         assert!(DraftContextRecord::capture("review-comment", "PR", missing).is_err());
     }
 

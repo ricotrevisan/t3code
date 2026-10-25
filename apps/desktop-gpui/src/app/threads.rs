@@ -73,7 +73,13 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let super::thread_defaults::ResolvedCreation { defaults, choice, project_file, project_file_loaded, base_branch } = resolved;
+        let super::thread_defaults::ResolvedCreation {
+            defaults,
+            choice,
+            project_file,
+            project_file_loaded,
+            base_branch,
+        } = resolved;
         if !self.can_change_checkout(cx) {
             return;
         }
@@ -109,14 +115,15 @@ impl NativeApp {
                 }
             }
         };
-        let mut command = match commands::create_thread(&project_id, "New thread", selection, &defaults) {
-            Ok(value) => value,
-            Err(error) => {
-                self.report_error(error, cx);
-                cx.notify();
-                return;
-            }
-        };
+        let mut command =
+            match commands::create_thread(&project_id, "New thread", selection, &defaults) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.report_error(error, cx);
+                    cx.notify();
+                    return;
+                }
+            };
         if let Some((id, branch, path)) = &self.new_thread_checkout
             && id == &project_id
         {
@@ -131,7 +138,14 @@ impl NativeApp {
                 return;
             }
             let mut value = json!({"projectCwd":cwd,"baseBranch":base,"startFromOrigin":defaults.start_from_origin});
-            let branch = if choice.environment == self.environment_scope && choice.project == project_id && choice.workspace_mode.as_deref() == Some("worktree") { self.worktree_branch.read(cx).value().trim().to_owned() } else { String::new() };
+            let branch = if choice.environment == self.environment_scope
+                && choice.project == project_id
+                && choice.workspace_mode.as_deref() == Some("worktree")
+            {
+                self.worktree_branch.read(cx).value().trim().to_owned()
+            } else {
+                String::new()
+            };
             if !branch.is_empty() {
                 value["branch"] = json!(branch);
             }
@@ -470,12 +484,19 @@ impl NativeApp {
             "thread.turn.interrupt" | "thread.session.stop" => {
                 payload["createdAt"] = json!(commands::now())
             }
-            "thread.delete" if self.confirm_delete.as_deref() != Some(id) => {
+            "thread.delete" => {
+                if !self.connection_ready() {
+                    self.report_error("Connect before reviewing deletion", cx);
+                    return;
+                }
+                self.sidebar_state.bulk_delete_review = None;
+                self.sidebar_state.single_delete_review = Some((
+                    self.generation,
+                    self.environment_scope.clone(),
+                    vec![id.to_owned()],
+                ));
                 self.confirm_delete = Some(id.to_owned());
-                self.set_status(
-                    "Click Delete again to confirm permanent thread deletion",
-                    cx,
-                );
+                self.thread_menu_open = true;
                 cx.notify();
                 return;
             }
@@ -531,7 +552,32 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if kind == "single-delete-confirm" {
+            let review = self.sidebar_state.single_delete_review.take();
+            let Some((generation, environment, ids)) = review else {
+                return;
+            };
+            if generation != self.generation
+                || environment != self.environment_scope
+                || ids.first() != self.confirm_delete.as_ref()
+                || ids.first() != self.thread_menu_target().as_ref()
+            {
+                self.close_thread_menu();
+                self.report_error("Deletion target changed; review again", cx);
+                return;
+            }
+            self.thread_lifecycle_targets(
+                "delete",
+                "thread.delete",
+                None,
+                Some(window.window_handle()),
+                Some(ids),
+                cx,
+            );
+            return;
+        }
         if kind == "bulk-delete-cancel" {
+            self.sidebar_state.single_delete_review = None;
             self.sidebar_state.bulk_delete_review = None;
             self.close_thread_menu();
             cx.notify();

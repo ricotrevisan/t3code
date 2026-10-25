@@ -12,6 +12,7 @@ mod catalog;
 mod composer;
 mod conversation;
 pub(crate) mod message_media;
+pub(crate) mod r18_d_html_media;
 mod message_paths;
 mod diff_lines;
 pub(crate) mod r14_e_diff;

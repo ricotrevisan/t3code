@@ -26,29 +26,72 @@ pub(crate) fn prompt_content(text: &str) -> InputContent {
     }
     content
 }
+/// Insert source as native edits, preserving token history and surrounding annotations.
+/// Kit 0.7.1 exposes individual atomic edits, not a multi-token transaction;
+/// undo traverses the pasted segments without losing the pre-paste history.
+pub(crate) fn insert_prompt_content(
+    input: &mut gpui_kit::component::input::TextareaState,
+    text: &str,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::Context<gpui_kit::component::input::TextareaState>,
+) {
+    let content = prompt_content(text);
+    if !input.selected_range().is_empty() {
+        input.replace("", window, cx);
+    }
+    let mut offset = 0;
+    for span in content.tokens() {
+        let range = span.range();
+        if offset < range.start {
+            input.replace(&text[offset..range.start], window, cx);
+        }
+        let _ = input.replace_with_token(span.token().clone(), window, cx);
+        offset = range.end;
+    }
+    if offset < text.len() {
+        input.replace(&text[offset..], window, cx);
+    }
+}
+
 /// Canonical source is the clipboard/undo representation; Kit owns atomic caret editing.
 fn context_tokens(text: &str) -> Vec<(std::ops::Range<usize>, InlineToken)> {
-    let mut tokens = Vec::new();
-    for (start, _) in text.match_indices('[') {
-        let Some(relative) = text[start..].find("](t3-context://v1/") else {
-            continue;
-        };
-        if text[start + 1..start + relative].contains('[') {
-            continue;
-        }
-        let href_start = start + relative + 2;
-        let Some(end) = text[href_start..].find(')') else {
-            continue;
-        };
-        let end = href_start + end + 1;
-        let href = &text[href_start..end - 1];
-        tokens.push((
-            start..end,
-            InlineToken::new(href.to_owned(), text[start..end].to_owned())
-                .with_label(text[start + 1..start + relative].to_owned()),
-        ));
+    t3code_desktop_gpui::draft_context::context_links(text)
+        .into_iter()
+        .map(|(range, href, label)| {
+            let token = InlineToken::new(href, text[range.clone()].to_owned()).with_label(label);
+            (range, token)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn r18_c_escaped_unicode_context_labels_rehydrate_without_partial_chips() {
+        let record = t3code_desktop_gpui::draft_context::DraftContextRecord::terminal(
+            "Build [日本語] \\ output",
+            "t",
+            "Build",
+            1,
+            1,
+            "output",
+        )
+        .unwrap();
+        let text = format!("Before {} after", record.reference());
+        let content = prompt_content(&text);
+        assert_eq!(content.tokens().len(), 1);
+        let span = &content.tokens()[0];
+        assert_eq!(&text[span.range()], record.reference());
+        assert_eq!(span.token().label().as_ref(), record.label());
     }
-    tokens
+
+    #[test]
+    fn r18_c_escaped_open_bracket_is_literal_not_a_context_chip() {
+        let text = r"\[Build](t3-context://v1/terminal/ctx_1)";
+        assert!(prompt_content(text).tokens().is_empty());
+    }
 }
 use gpui_kit::{Entity, Subscription, Task};
 

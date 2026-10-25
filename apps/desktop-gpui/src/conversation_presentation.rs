@@ -313,10 +313,12 @@ impl ConversationPresentation {
 /// Remove inline workspace image URLs from generic Markdown rendering. The
 /// caller renders these resources through the same exact-file asset service.
 /// External images are explicit links; local reference definitions use the
-/// same bounded loader. Data and raw HTML previews remain unavailable.
+/// same bounded loader. Raw HTML img tags are normalized into that loader;
+/// data previews remain unavailable.
 /// Only the bounded loader may hand image bytes to GPUI.
 pub(crate) fn workspace_markdown_images(markdown: &str) -> (String, Vec<(String, String)>) {
-    let resolved = resolve_workspace_image_references(markdown);
+    let normalized = crate::views::r18_d_html_media::normalize(markdown);
+    let resolved = resolve_workspace_image_references(&normalized);
     let markdown = resolved.as_str();
     let mut rendered = String::new();
     let mut images = Vec::new();
@@ -523,7 +525,7 @@ mod tests {
         let (text, images) = workspace_markdown_images(
             "<IMG src=\"https://example.com/bomb.gif\">\n![reference][huge]\n[huge]: https://example.com/bomb.gif\n```html\n<img src=\"literal\">\n```\n",
         );
-        assert!(text.contains("&lt;IMG"));
+        assert!(text.contains("[Image: ](https://example.com/bomb.gif)"));
         assert!(text.contains("[Image: reference][huge]"));
         assert!(
             text.contains("<img src=\"literal\">"),

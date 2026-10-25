@@ -32,6 +32,7 @@ pub struct State {
     pub selection: Vec<String>,
     pub selection_anchor: Option<String>,
     pub bulk_delete_review: Option<(u64, String, Vec<String>)>,
+    pub single_delete_review: Option<(u64, String, Vec<String>)>,
     pub bulk_snooze_review: Option<Vec<String>>,
     pub bulk_snooze_window: Option<gpui_kit::AnyWindowHandle>,
     pub bulk_busy: bool,

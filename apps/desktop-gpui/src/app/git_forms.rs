@@ -1,9 +1,9 @@
 use crate::NativeApp;
 use gpui_kit::component::{
-    Disableable, Selectable, Sizable,
+    Disableable, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    input::{Input, InputState},
+    input::{Input, InputState, Textarea, TextareaState},
 };
 use gpui_kit::{AppContext as _, Context, Entity, Window, div, prelude::*};
 use serde_json::{Value, json};
@@ -12,6 +12,7 @@ use t3code_desktop_gpui::connection;
 pub(crate) struct GitForm {
     pub action: String,
     pub input: Entity<InputState>,
+    pub message: Option<Entity<TextareaState>>,
     pub paths: Vec<String>,
     pub excluded: Vec<String>,
     pub providers: Vec<String>,
@@ -78,6 +79,13 @@ impl NativeApp {
                 "Commit message (optional; blank generates one)"
             })
         });
+        let message = (action != "publish").then(|| {
+            cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(3, 6)
+                    .placeholder("Commit message (optional; blank generates one)")
+            })
+        });
         let paths = self
             .git_header
             .status
@@ -91,6 +99,7 @@ impl NativeApp {
         self.git_header.form = Some(GitForm {
             action: action.into(),
             input: input.clone(),
+            message: message.clone(),
             paths,
             excluded: Vec::new(),
             providers: Vec::new(),
@@ -101,7 +110,11 @@ impl NativeApp {
                 .then(|| cx.new(|cx| crate::single_line_input(window, cx).default_value("origin"))),
             https: false,
         });
-        input.update(cx, |input, cx| input.focus(window, cx));
+        if let Some(message) = message {
+            message.update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            input.update(cx, |input, cx| input.focus(window, cx));
+        }
         if action == "publish"
             && let Some(sender) = self.commands.clone()
         {
@@ -173,8 +186,16 @@ impl NativeApp {
         let Some(form) = self.git_header.form.as_ref() else {
             return;
         };
-        let message = form.input.read(cx).value().trim().to_owned();
+        let message = form.message.as_ref().map_or_else(
+            || form.input.read(cx).value().trim().to_owned(),
+            |input| input.read(cx).value().trim().to_owned(),
+        );
         if form.action != "publish" {
+            if message.encode_utf16().count() > 10_000 {
+                self.git_header.error = Some("Commit message exceeds 10,000 characters".into());
+                cx.notify();
+                return;
+            }
             let paths: Vec<_> = form
                 .paths
                 .iter()
@@ -244,12 +265,33 @@ impl NativeApp {
             form.provider.is_some() && valid_repository(form.input.read(cx).value().trim())
         } else {
             form.paths.len() > form.excluded.len()
+                && form.message.as_ref().is_some_and(|input| {
+                    input.read(cx).value().trim().encode_utf16().count() <= 10_000
+                })
         };
+        let totals = self.git_header.status.as_ref().and_then(|status| {
+            let files = status["workingTree"]["files"].as_array()?;
+            form.paths
+                .iter()
+                .filter(|path| !form.excluded.contains(path))
+                .try_fold((0_u64, 0_u64), |(insertions, deletions), path| {
+                    let file = files
+                        .iter()
+                        .find(|file| file["path"].as_str() == Some(path))?;
+                    Some((
+                        insertions + file["insertions"].as_u64()?,
+                        deletions + file["deletions"].as_u64()?,
+                    ))
+                })
+        });
         div().flex().flex_col().gap_2()
             .child(if publish { "Publish repository" } else { "Commit changes" })
             .when_some(self.git_header.status.as_ref().and_then(|status| status["refName"].as_str()).map(str::to_owned), |view, branch| view.child(div().text_xs().child(format!("Branch: {branch}"))))
             .when(self.git_header.status.as_ref().is_some_and(|status| status["isDefaultRef"] == true), |view| view.child("Default branch"))
-            .child(Input::new(&form.input).small().disabled(busy))
+            .when(publish, |view| view.child(Input::new(&form.input).small().disabled(busy)))
+            .when_some(form.message.as_ref(), |view, input| view
+                .child(Textarea::new(input).small().disabled(busy))
+                .when(input.read(cx).value().trim().encode_utf16().count() > 10_000, |view| view.child(div().text_xs().child("Commit message exceeds 10,000 characters"))))
             .when(publish, |view| view
                 .child(if form.discovering { "Checking provider readiness…" } else if form.providers.is_empty() { "No ready publishing provider. Configure source control credentials on this environment." } else { "Creates a remote repository and pushes this checkout. Review visibility before publishing." })
                 .children(form.providers.iter().map(|provider| {
@@ -260,15 +302,31 @@ impl NativeApp {
                 .when_some(form.remote.as_ref(), |view, input| view.child("Remote name").child(Input::new(input).small().disabled(busy)))
                 .child(Checkbox::new("git-publish-https").label("Use HTTPS (default: SSH)").checked(form.https).disabled(busy).on_click(cx.listener(|app, checked: &bool, _, cx| { if let Some(form) = app.git_header.form.as_mut() { form.https = *checked; } cx.notify(); })))
                 .child(Checkbox::new("git-publish-public").label("Public repository (default: private)").checked(form.public).disabled(busy).on_click(cx.listener(|app, checked: &bool, _, cx| { if let Some(form) = app.git_header.form.as_mut() { form.public = *checked; } cx.notify(); }))))
-            .when(!publish, |view| view.children(form.paths.iter().map(|path| {
+            .when(!publish, |view| view
+                .child(Checkbox::new("git-files-all").debug_selector(|| "git-files-all".into())
+                    .label(format!("Files ({} of {})", form.paths.len() - form.excluded.len(), form.paths.len()))
+                    .checked(form.excluded.is_empty()).disabled(busy)
+                    .on_click(cx.listener(|app, checked: &bool, _, cx| {
+                        if let Some(form) = app.git_header.form.as_mut() {
+                            form.excluded = if *checked { Vec::new() } else { form.paths.clone() };
+                        }
+                        cx.notify();
+                    })))
+                .child(div().id("git-changed-files").max_h_40().overflow_y_scroll().children(form.paths.iter().map(|path| {
                 let path = path.clone();
-                Checkbox::new(gpui_kit::SharedString::from(format!("git-file-{path}"))).debug_selector({ let path = path.clone(); move || format!("git-file-{path}") }).label(path.clone()).checked(!form.excluded.contains(&path)).disabled(busy).on_click(cx.listener(move |app, checked: &bool, _, cx| {
+                let editor_path = path.clone();
+                div().flex().items_center().gap_2().child(Checkbox::new(gpui_kit::SharedString::from(format!("git-file-{path}"))).debug_selector({ let path = path.clone(); move || format!("git-file-{path}") }).label(path.clone()).checked(!form.excluded.contains(&path)).disabled(busy).on_click(cx.listener(move |app, checked: &bool, _, cx| {
                     if let Some(form) = app.git_header.form.as_mut() { form.excluded.retain(|p| p != &path); if !checked { form.excluded.push(path.clone()); } } cx.notify();
-                }))
-            })))
+                }))).child(Button::new(gpui_kit::SharedString::from(format!("git-file-editor-{editor_path}")))
+                    .debug_selector({ let path = editor_path.clone(); move || format!("git-file-editor-{path}") })
+                    .small().ghost().icon(IconName::ExternalLink).tooltip("Open changed file in preferred editor")
+                    .disabled(busy || !self.connection_ready() || self.editor_unavailable_reason().is_some())
+                    .on_click(cx.listener(move |app, _, _, cx| app.open_git_form_file_editor(&editor_path, cx))))
+            }))))
+            .when(!publish, |view| view.when_some(totals, |view, (insertions, deletions)| view.child(div().text_xs().child(format!("Selected files: +{insertions} / -{deletions}")))))
             .child(Button::new("git-form-submit").debug_selector(|| "git-form-submit".into()).small().primary().label(match form.action.as_str() { "publish" => "Create repository & publish", "commit_push" => "Commit & push selected files", "commit_push_pr" => "Commit, push & create PR", _ => "Commit selected files" }).disabled(busy || !valid || !self.connection_ready()).on_click(cx.listener(|app, _, window, cx| { app.submit_git_form(cx); if app.git_header.form.is_none() { app.focus.focus(window,cx); } })))
             .when(!publish, |view| view.child(Button::new("git-form-new-branch").debug_selector(|| "git-form-new-branch".into()).small().ghost().label("Commit on new branch").disabled(busy || !valid || !self.connection_ready()).on_click(cx.listener(|app, _, window, cx| { app.submit_git_form_with_branch(true, cx); if app.git_header.form.is_none() { app.focus.focus(window, cx); } }))))
-            .child(Button::new("git-form-cancel").small().ghost().label("Cancel").disabled(busy).on_click(cx.listener(|app, _, window, cx| { app.git_header.form = None; app.focus.focus(window,cx); cx.notify(); })))
+            .child(Button::new("git-form-cancel").debug_selector(|| "git-form-cancel".into()).small().ghost().label("Cancel").disabled(busy).on_click(cx.listener(|app, _, window, cx| { app.git_header.form = None; app.focus.focus(window,cx); cx.notify(); })))
     }
 }
 fn valid_repository(value: &str) -> bool {

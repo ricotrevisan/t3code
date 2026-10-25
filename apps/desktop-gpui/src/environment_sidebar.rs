@@ -6,7 +6,30 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{AnyElement, Context, SharedString, div, prelude::*};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum GroupKey {
+    Machine(String),
+    Repository(String),
+    Unidentified { origin: String, project: String },
+}
+
+fn group_key(project: &shell::Project, origin: &str, by_machine: bool) -> GroupKey {
+    if by_machine {
+        return GroupKey::Machine(origin.into());
+    }
+    project
+        .repository_identity
+        .as_ref()
+        .and_then(|identity| identity["canonicalKey"].as_str())
+        .filter(|key| !key.is_empty())
+        .map(|key| GroupKey::Repository(key.into()))
+        .unwrap_or_else(|| GroupKey::Unidentified {
+            origin: origin.into(),
+            project: project.id.clone(),
+        })
+}
 use t3code_desktop_gpui::shell;
 
 #[derive(Clone)]
@@ -17,12 +40,17 @@ struct Member {
     threads: Vec<shell::Thread>,
 }
 impl NativeApp {
-    fn sidebar_members(&self, cx: &Context<Self>) -> Vec<Member> {
+    fn sidebar_members(
+        &self,
+        visible_origins: &BTreeSet<String>,
+        cx: &Context<Self>,
+    ) -> Vec<Member> {
         let pages: Vec<_> = self
             .environment_hub
             .borrow()
             .pages
             .iter()
+            .filter(|(origin, _)| visible_origins.contains(*origin))
             .map(|(origin, page)| (origin.clone(), page.clone()))
             .collect();
         let mut members = Vec::new();
@@ -132,21 +160,9 @@ impl NativeApp {
                     cx.notify();
                 })),
         );
-        let mut groups: BTreeMap<String, Vec<Member>> = BTreeMap::new();
-        for member in self.sidebar_members(cx) {
-            let key = member
-                .project
-                .repository_identity
-                .as_ref()
-                .and_then(|identity| identity["canonicalKey"].as_str())
-                .filter(|key| !key.is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{}:{}", member.origin, member.project.id));
-            let key = if by_machine {
-                member.origin.clone()
-            } else {
-                key
-            };
+        let mut groups: BTreeMap<GroupKey, Vec<Member>> = BTreeMap::new();
+        for member in self.sidebar_members(&visible_origins, cx) {
+            let key = group_key(&member.project, &member.origin, by_machine);
             groups.entry(key).or_default().push(member);
         }
         let muted = cx.theme().muted_foreground;

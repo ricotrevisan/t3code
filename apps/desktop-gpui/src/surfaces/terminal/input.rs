@@ -101,13 +101,19 @@ impl EntityInputHandler for NativeApp {
         }
     }
 
+    // AppKit can query the old input handler synchronously during responder
+    // transfer, before the deferred blur observer clears preedit. Reads and
+    // candidate geometry must honor actual focus just like commit callbacks.
     fn text_for_range(
         &mut self,
         range: Range<usize>,
         adjusted: &mut Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
+        if !self.terminal_drawer.focus.is_focused(window) || self.terminal_text_target().is_none() {
+            return None;
+        }
         let text = self
             .terminal_composition()
             .map_or("", |mark| mark.text.as_str());
@@ -120,10 +126,12 @@ impl EntityInputHandler for NativeApp {
     fn selected_text_range(
         &mut self,
         ignore_disabled: bool,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        if !ignore_disabled && self.terminal_text_target().is_none() {
+        if !self.terminal_drawer.focus.is_focused(window)
+            || (!ignore_disabled && self.terminal_text_target().is_none())
+        {
             return None;
         }
         Some(UTF16Selection {
@@ -134,7 +142,14 @@ impl EntityInputHandler for NativeApp {
         })
     }
 
-    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        if !self.terminal_drawer.focus.is_focused(window) || self.terminal_text_target().is_none() {
+            return None;
+        }
         self.terminal_composition()
             .map(|mark| 0..mark.text.encode_utf16().count())
     }
@@ -227,9 +242,12 @@ impl EntityInputHandler for NativeApp {
         &mut self,
         _: Range<usize>,
         bounds: Bounds<Pixels>,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if !self.terminal_drawer.focus.is_focused(window) || self.terminal_text_target().is_none() {
+            return None;
+        }
         let cell = self
             .terminal_active()?
             .screen
@@ -251,9 +269,12 @@ impl EntityInputHandler for NativeApp {
     fn character_index_for_point(
         &mut self,
         _: Point<Pixels>,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<usize> {
+        if !self.terminal_drawer.focus.is_focused(window) || self.terminal_text_target().is_none() {
+            return None;
+        }
         Some(
             self.terminal_composition()
                 .map_or(0, |mark| mark.selection.end),

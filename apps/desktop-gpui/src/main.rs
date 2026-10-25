@@ -153,6 +153,7 @@ mod environment_pages;
 mod environment_sidebar;
 mod settings_provider;
 mod settings_provider_interaction;
+mod settings_provider_instances;
 mod settings_palette;
 mod settings_projects;
 mod settings_project_actions;
@@ -215,6 +216,7 @@ struct NativeApp {
     keystroke_guard: bool,
     sidebar_rows: views::r13_b_sidebar_rows::Rows,
     server_config: server_config_projection::Projection,
+    usage_state: runtime_usage::State,
     thread_undo: app::thread_undo::UndoState,
     sidebar_clock: Option<Task<()>>,
     sidebar_rename: Entity<InputState>,
@@ -248,6 +250,7 @@ struct NativeApp {
     theme_editor: settings_theme_library::Editor,
     font_editor: settings_fonts::Editor,
     provider_auth_editor: settings_provider_interaction::Editor,
+    provider_instance_editor: settings_provider_instances::Editor,
     settings_provider_details: Vec<Value>,
     settings_provider_task: Option<Task<()>>,
     subscription_enqueues: std::collections::HashMap<String, Task<()>>,
@@ -649,6 +652,7 @@ impl NativeApp {
             keystroke_guard: !cfg!(test),
             sidebar_rows: views::r13_b_sidebar_rows::Rows::default(),
             server_config: server_config_projection::Projection::default(),
+            usage_state: runtime_usage::State::default(),
             thread_undo: app::thread_undo::UndoState::default(),
             sidebar_clock: None,
             sidebar_rename: cx.new(|cx| single_line_input(window, cx).placeholder("Thread title")),
@@ -679,6 +683,7 @@ impl NativeApp {
             theme_editor: settings_theme_library::Editor::new(window, cx),
             font_editor: settings_fonts::Editor::new(window, cx),
             provider_auth_editor: settings_provider_interaction::Editor::new(window, cx),
+            provider_instance_editor: settings_provider_instances::Editor::new(window, cx),
             settings_provider_details: vec![],
             settings_provider_task: None,
             subscription_enqueues: Default::default(),

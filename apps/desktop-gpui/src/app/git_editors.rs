@@ -77,18 +77,52 @@ impl NativeApp {
         if !self.connection_ready() {
             return;
         }
-        let (Some(file), Some(cwd), Some(editor)) = (
-            self.diffs.files.get(self.diffs.selected_file),
-            self.selected_workspace(),
-            self.preferred_editor(),
-        ) else {
+        let Some(file) = self.diffs.files.get(self.diffs.selected_file) else {
             return;
         };
-        if file.path.starts_with('/') || file.path.split(['/', '\\']).any(|part| part == "..") {
+        let path = file.path.clone();
+        self.open_checkout_file_editor(&path, cx);
+    }
+    pub(crate) fn open_git_form_file_editor(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.git_header.context.as_ref() != Some(&self.checkout_context())
+            || self
+                .git_header
+                .form
+                .as_ref()
+                .is_none_or(|form| !form.paths.iter().any(|p| p == path))
+        {
+            self.report_error(
+                "Checkout changed; reopen the commit form before opening a file",
+                cx,
+            );
+            return;
+        }
+        self.open_checkout_file_editor(path, cx);
+    }
+    pub(crate) fn open_checkout_file_editor(
+        &mut self,
+        relative_path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.connection_ready() {
+            return;
+        }
+        let (Some(cwd), Some(editor)) = (self.selected_workspace(), self.preferred_editor()) else {
+            return;
+        };
+        if let Some(reason) = self.editor_unavailable_reason() {
+            self.report_error(reason, cx);
+            return;
+        }
+        if relative_path.is_empty()
+            || relative_path.starts_with(['/', '\\'])
+            || relative_path.contains(':')
+            || relative_path.split(['/', '\\']).any(|part| part == "..")
+        {
             self.report_error("Diff path is outside the selected checkout", cx);
             return;
         }
-        let path = format!("{}/{}", cwd.trim_end_matches(['/', '\\']), file.path);
+        let path = format!("{}/{}", cwd.trim_end_matches(['/', '\\']), relative_path);
         if self.is_remote_editor_checkout() {
             if let Some(host) = self.remote_editor_host()
                 && let Some(link) = remote_editor_url(&editor, host, &path)

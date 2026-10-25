@@ -155,7 +155,7 @@ impl NativeApp {
                                 ),
                         ),
                 ))
-                .when(matches("providers models authentication version capabilities"), |view| view.child(
+                .when(matches("providers instances models authentication version capabilities binary executable API endpoint transport credentials configuration sign-in"), |view| view.child(
                     div()
                         .flex()
                         .flex_col()
@@ -202,6 +202,21 @@ impl NativeApp {
                                         .disabled(self.settings_provider_busy == Some(self.generation) || !self.connection_ready())
                                         .on_click(cx.listener(move |app, enabled: &bool, _, cx| app.set_provider_enabled(&id, *enabled, cx))))
                                 })
+                                .when_some(details.filter(|details| details["__nativeConfiguration"].is_object()), |view, _| {
+                                    let edit_id = instance_id.clone();
+                                    let copy_id = instance_id.clone();
+                                    view.child(div().flex().flex_wrap().gap_2()
+                                        .child(Button::new(gpui_kit::SharedString::from(format!("provider-edit-{edit_id}")))
+                                            .debug_selector({ let id = edit_id.clone(); move || format!("provider-edit-{id}") })
+                                            .label("Edit instance").ghost().small()
+                                            .disabled(self.provider_instance_editor.is_open() || self.settings_provider_busy == Some(self.generation) || !self.connection_ready())
+                                            .on_click(cx.listener(move |app, _, window, cx| app.open_provider_instance(&edit_id, false, window, cx))))
+                                        .child(Button::new(gpui_kit::SharedString::from(format!("provider-copy-{copy_id}")))
+                                            .debug_selector({ let id = copy_id.clone(); move || format!("provider-copy-{id}") })
+                                            .label("Add similar instance").ghost().small()
+                                            .disabled(self.provider_instance_editor.is_open() || self.settings_provider_busy == Some(self.generation) || !self.connection_ready())
+                                            .on_click(cx.listener(move |app, _, window, cx| app.open_provider_instance(&copy_id, true, window, cx)))))
+                                })
                                 .when(provider.enabled && provider.installed && provider.status != "ready" && details.is_some_and(crate::settings_provider::can_sign_in)
                                     && self.auth_state.as_ref().is_none_or(|state| state["instanceId"] != instance_id || !crate::settings_provider::auth_active(state)), |view| view.child(
                                     Button::new(gpui_kit::SharedString::from(format!(
@@ -229,6 +244,7 @@ impl NativeApp {
                                     app.refresh_settings_providers(true, cx)
                                 })),
                         )
+                        .child(self.render_provider_instance_editor(cx))
                         .when_some(self.auth_state.clone(), |view, state| {
                             view.child(
                                 div()

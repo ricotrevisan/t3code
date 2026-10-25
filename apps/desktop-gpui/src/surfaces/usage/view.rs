@@ -5,13 +5,13 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     popover::Popover,
 };
-use gpui_kit::{AnyElement, App, Context, Global, div, prelude::*, rems};
+use gpui_kit::{AnyElement, App, Context, div, prelude::*, rems};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use t3code_desktop_gpui::{connection, surfaces::usage};
 
 #[derive(Default)]
-struct State {
+pub(crate) struct State {
     scope: Option<(String, u64)>,
     open: bool,
     revealed: HashSet<String>,
@@ -19,14 +19,12 @@ struct State {
     busy: HashSet<String>,
     results: HashMap<String, String>,
 }
-impl Global for State {}
-pub(crate) fn init(cx: &mut App) {
-    cx.set_global(State::default());
-}
+// Retain the existing initialization hook; state is owned by each environment page.
+pub(crate) fn init(_cx: &mut App) {}
 impl NativeApp {
     #[cfg(test)]
-    pub(crate) fn usage_feedback(&self, key: &str, cx: &App) -> (Option<String>, bool) {
-        let state = cx.global::<State>();
+    pub(crate) fn usage_feedback(&self, key: &str, _cx: &App) -> (Option<String>, bool) {
+        let state = &self.usage_state;
         (
             state.results.get(key).cloned(),
             state.revealed.contains(key),
@@ -35,7 +33,7 @@ impl NativeApp {
 
     pub(crate) fn toggle_usage_limits(&mut self, cx: &mut Context<Self>) {
         let scope = (self.environment_scope.clone(), self.generation);
-        let state = cx.global_mut::<State>();
+        let state = &mut self.usage_state;
         if state.scope.as_ref() != Some(&scope) {
             *state = State {
                 scope: Some(scope),
@@ -53,7 +51,7 @@ impl NativeApp {
         &self,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let state = cx.global::<State>();
+        let state = &self.usage_state;
         let open = state.open
             && state.scope.as_ref() == Some(&(self.environment_scope.clone(), self.generation));
         let app = cx.entity().downgrade();
@@ -69,7 +67,7 @@ impl NativeApp {
                     .tooltip("Subscription usage limits (not context tokens)"),
             )
             .on_open_change(cx.listener(|app, requested: &bool, _, cx| {
-                let state = cx.global::<State>();
+                let state = &app.usage_state;
                 let current = state.open
                     && state.scope.as_ref()
                         == Some(&(app.environment_scope.clone(), app.generation));
@@ -94,7 +92,7 @@ impl NativeApp {
     }
     fn redeem_usage_credit(&mut self, key: &str, cx: &mut Context<Self>) {
         let scope = (self.environment_scope.clone(), self.generation);
-        let state = cx.global::<State>();
+        let state = &self.usage_state;
         if state.scope.as_ref() != Some(&scope)
             || state.busy.contains(key)
             || !self.connection_ready()
@@ -113,7 +111,7 @@ impl NativeApp {
                 && row.reset_input.as_ref() == Some(&input)
         });
         if !valid {
-            let state = cx.global_mut::<State>();
+            let state = &mut self.usage_state;
             state.confirming = None;
             state.results.insert(
                 key.into(),
@@ -125,7 +123,7 @@ impl NativeApp {
         let Some(sender) = self.commands.clone() else {
             return;
         };
-        let state = cx.global_mut::<State>();
+        let state = &mut self.usage_state;
         state.confirming = None;
         state.busy.insert(key.into());
         state.results.remove(key);
@@ -133,7 +131,7 @@ impl NativeApp {
         cx.spawn(async move |entity, cx| {
             let result = connection::call(&sender, "provider.consumeResetCredit", input).await;
             _ = entity.update(cx, |app, cx| {
-                if (app.environment_scope.clone(), app.generation) != scope || cx.global::<State>().scope.as_ref() != Some(&scope) { return; }
+                if (app.environment_scope.clone(), app.generation) != scope || app.usage_state.scope.as_ref() != Some(&scope) { return; }
                 let text = match result {
                     Ok(value) => value["warning"].as_str().map(str::to_owned).unwrap_or_else(|| match value["outcome"].as_str() {
                         Some("reset") => "Reset applied. Your windows have cleared.",
@@ -144,7 +142,7 @@ impl NativeApp {
                     }.into()),
                     Err(error) => format!("Could not use the reset credit: {error}"),
                 };
-                let state = cx.global_mut::<State>();
+                let state = &mut app.usage_state;
                 state.busy.remove(&key);
                 state.results.insert(key.clone(), text);
                 cx.notify();
@@ -153,7 +151,7 @@ impl NativeApp {
         cx.notify();
     }
     pub(crate) fn render_usage_limits_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let state = cx.global::<State>();
+        let state = &self.usage_state;
         if !state.open
             || state.scope.as_ref() != Some(&(self.environment_scope.clone(), self.generation))
         {
@@ -185,10 +183,10 @@ impl NativeApp {
                             .label("Close")
                             .ghost()
                             .small()
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.global_mut::<State>().open = false;
-                                cx.global_mut::<State>().confirming = None;
-                                cx.global_mut::<State>().revealed.clear();
+                            .on_click(cx.listener(|app, _, _, cx| {
+                                app.usage_state.open = false;
+                                app.usage_state.confirming = None;
+                                app.usage_state.revealed.clear();
                                 cx.notify();
                             })),
                     ),
@@ -202,7 +200,7 @@ impl NativeApp {
             );
         }
         for (index, row) in rows.into_iter().enumerate() {
-            let state = cx.global::<State>();
+            let state = &self.usage_state;
             let key = row.key.clone();
             let busy = state.busy.contains(&key);
             let confirming = state.confirming.as_ref().is_some_and(|(k, _)| k == &key);
@@ -224,8 +222,8 @@ impl NativeApp {
                         })
                         .ghost()
                         .small()
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            let state = cx.global_mut::<State>();
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            let state = &mut app.usage_state;
                             if !state.revealed.remove(&toggle_key) {
                                 state.revealed.insert(toggle_key.clone());
                             }
@@ -275,8 +273,8 @@ impl NativeApp {
                             .secondary()
                             .small()
                             .disabled(busy || !self.connection_ready())
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.global_mut::<State>().confirming =
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.usage_state.confirming =
                                     Some((action_key.clone(), input.clone()));
                                 cx.notify();
                             })),
@@ -311,14 +309,14 @@ impl NativeApp {
                                     .label("Cancel")
                                     .ghost()
                                     .small()
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.global_mut::<State>().confirming = None;
+                                    .on_click(cx.listener(|app, _, _, cx| {
+                                        app.usage_state.confirming = None;
                                         cx.notify();
                                     })),
                             ),
                     );
             }
-            if let Some(result) = cx.global::<State>().results.get(&key) {
+            if let Some(result) = self.usage_state.results.get(&key) {
                 body = body.child(
                     div()
                         .debug_selector(move || format!("usage-result-{index}"))

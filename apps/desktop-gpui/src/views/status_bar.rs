@@ -33,6 +33,39 @@ impl NativeApp {
         choices
     }
 
+    /// Identity is independent of connection state, including for an unsaved endpoint.
+    fn status_environment_identity(&self) -> String {
+        self.server_config
+            .config(self.generation)
+            .and_then(|config| config["environment"]["label"].as_str())
+            .filter(|label| !label.trim().is_empty())
+            .or(self.environment_name.as_deref())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                url::Url::parse(&self.environment_scope)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_owned))
+                    .unwrap_or_else(|| self.environment_scope.clone())
+            })
+    }
+
+    /// Compose each row at menu-open time from its owning page's live phase.
+    /// Never feed the already decorated status-chip text back into the picker.
+    pub(crate) fn status_environment_rows(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> Vec<(String, String, bool)> {
+        self.status_environment_choices(&self.status_environment_identity(), cx)
+            .into_iter()
+            .map(|(origin, identity, enabled)| {
+                let current = origin == self.environment_scope;
+                let label =
+                    environment_choice_label(&identity, &self.environment_phase(&origin), current);
+                (origin, label, enabled && !current)
+            })
+            .collect()
+    }
+
     pub(crate) fn render_status_bar(
         &self,
         window: &gpui_kit::Window,
@@ -46,23 +79,9 @@ impl NativeApp {
         let busy = self.pending_actions > 0;
         let active_model = self.active_model_label(cx);
         let header_branch = self.selected_thread_branch();
-        let environment_host = url::Url::parse(&self.environment_scope)
-            .ok()
-            .and_then(|url| url.host_str().map(str::to_owned))
-            .unwrap_or_else(|| self.environment_scope.clone());
-        let environment_label = self
-            .server_config
-            .config(self.generation)
-            .and_then(|config| config["environment"]["label"].as_str())
-            .filter(|label| !label.trim().is_empty())
-            .or(self.environment_name.as_deref())
-            .unwrap_or(&environment_host)
-            .to_owned();
-        // Picker choices carry identity only; append the live phase once at presentation.
-        let environment_identity = environment_label;
+        let environment_identity = self.status_environment_identity();
         let environment_label =
             format!("{environment_identity} · {}", self.connection_state_text());
-        let environment_choices = self.status_environment_choices(&environment_identity, cx);
         // Size only the identity's contents, not a proportion of the whole bar.
         // The text system caches this shape; extra space is kit xs icon/padding.
         let environment_width = window
@@ -182,8 +201,6 @@ impl NativeApp {
                                     ));
                                 {
                                     let app = cx.entity().downgrade();
-                                    let choices = environment_choices.clone();
-                                    let active = self.environment_scope.clone();
                                     button
                                         .dropdown_menu_with_anchor(
                                             Anchor::BottomLeft,
@@ -191,21 +208,15 @@ impl NativeApp {
                                                 let previous_focus =
                                                     previous_focus.borrow().clone();
                                                 menu = menu.label("Run on · saved endpoints");
+                                                let choices = app
+                                                    .update(cx, |app, cx| {
+                                                        app.status_environment_rows(cx)
+                                                    })
+                                                    .unwrap_or_default();
                                                 for (index, (origin, label, enabled)) in
-                                                    choices.iter().enumerate()
+                                                    choices.into_iter().enumerate()
                                                 {
                                                     let app = app.clone();
-                                                    let origin = origin.clone();
-                                                    let phase = app
-                                                        .update(cx, |app, _| {
-                                                            app.environment_phase(&origin)
-                                                        })
-                                                        .unwrap_or_else(|_| "Offline".into());
-                                                    let label = environment_choice_label(
-                                                        label,
-                                                        &phase,
-                                                        origin == active,
-                                                    );
                                                     menu = menu.item(
                                                         PopupMenuItem::element(move |_, _| {
                                                             div()
@@ -218,7 +229,7 @@ impl NativeApp {
                                                                 .truncate()
                                                                 .child(label.clone())
                                                         })
-                                                        .disabled(!enabled || origin == active)
+                                                        .disabled(!enabled)
                                                         .on_click(move |_, window, cx| {
                                                             _ = app.update(cx, |app, cx| {
                                                                 app.switch_environment(

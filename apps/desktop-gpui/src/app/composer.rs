@@ -63,14 +63,29 @@ impl NativeApp {
     ) {
         if event.prefer_character_input
             || !self.composer.read(cx).focus_handle(cx).is_focused(window)
-            || self.catalog_open
-            || self.mention_open(cx)
-            || self.command_trigger(cx).is_some()
         {
             return;
         }
         let key = &event.keystroke.key;
         let modifiers = event.keystroke.modifiers;
+        if key == "v" && modifiers.shift && (modifiers.platform || modifiers.control) {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                let input = self.composer.read(cx);
+                let mut value = input.value().to_string();
+                value.replace_range(input.selected_range(), &text);
+                if value.encode_utf16().count() > 120_000 {
+                    self.report_error("Pasted text exceeds the message limit", cx);
+                } else {
+                    // Explicit Paste as Text bypasses attachment/folding and
+                    // structured-context import, but remains a native undo edit.
+                    self.composer
+                        .update(cx, |input, cx| input.replace(text, window, cx));
+                    self.remember_composer_draft(cx);
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
         if matches!(key.as_str(), "c" | "x") && (modifiers.platform || modifiers.control) {
             let selected = self.composer.read(cx).selected_value().to_string();
             if let Ok((_, Some(context))) = t3code_desktop_gpui::draft_context::message_context(
@@ -86,6 +101,9 @@ impl NativeApp {
                 cx.stop_propagation();
                 return;
             }
+        }
+        if self.catalog_open || self.mention_open(cx) || self.command_trigger(cx).is_some() {
+            return;
         }
         if key == "enter" {
             let requires_modifier = self
@@ -1048,17 +1066,30 @@ impl NativeApp {
                 "Selected provider is unavailable; choose another instance or check Providers settings",
             );
         }
-        let (mut runtime_mode, mut interaction_mode) = if let Some(draft) = self.pending_threads.iter().find(|d| d.thread.id == id) {
-            let defaults = self.pending_defaults(draft).map_err(|_| "Load valid server defaults before sending the draft")?;
-            (defaults.runtime_mode, defaults.interaction_mode)
-        } else { self.selected_modes() };
+        let (mut runtime_mode, mut interaction_mode) =
+            if let Some(draft) = self.pending_threads.iter().find(|d| d.thread.id == id) {
+                let defaults = self
+                    .pending_defaults(draft)
+                    .map_err(|_| "Load valid server defaults before sending the draft")?;
+                (defaults.runtime_mode, defaults.interaction_mode)
+            } else {
+                self.selected_modes()
+            };
         if let Some(provider) = provider {
             let modes = provider.runtime_modes();
             if !modes.contains(&runtime_mode.as_str()) {
                 if self.pending_threads.iter().any(|d| d.thread.id == id) {
-                    return Err("Selected provider does not support the effective permissions; choose a supported mode explicitly");
+                    return Err(
+                        "Selected provider does not support the effective permissions; choose a supported mode explicitly",
+                    );
                 }
-                runtime_mode = provider.default_runtime_mode.as_deref().filter(|m| modes.contains(m)).or_else(|| modes.first().copied()).ok_or("Provider has no supported runtime mode")?.to_owned();
+                runtime_mode = provider
+                    .default_runtime_mode
+                    .as_deref()
+                    .filter(|m| modes.contains(m))
+                    .or_else(|| modes.first().copied())
+                    .ok_or("Provider has no supported runtime mode")?
+                    .to_owned();
             }
             if provider.show_interaction_mode_toggle == Some(false) {
                 interaction_mode = "default".into();
@@ -1153,7 +1184,9 @@ impl NativeApp {
     }
 
     fn submit_follow_up(&mut self, alternate: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ensure_pending_send_defaults(None, window, cx) { return; }
+        if self.ensure_pending_send_defaults(None, window, cx) {
+            return;
+        }
         if self.checkout_transition_pending() {
             self.report_error(
                 "Finish checkout reconciliation before sending; message retained",
@@ -1216,8 +1249,12 @@ impl NativeApp {
                 }
                 match self.pending_bootstrap(&id, &payload) {
                     Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
-                    Ok(None) => {},
-                    Err(error) => { self.report_error(error, cx); cx.notify(); return; }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.report_error(error, cx);
+                        cx.notify();
+                        return;
+                    }
                 }
                 match self.materialized_checkout_bootstrap(&id) {
                     Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
@@ -1252,7 +1289,9 @@ impl NativeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ensure_pending_send_defaults(Some(steer), window, cx) { return; }
+        if self.ensure_pending_send_defaults(Some(steer), window, cx) {
+            return;
+        }
         if self.checkout_transition_pending() {
             self.report_error(
                 "Finish checkout reconciliation before sending; message retained",
@@ -1270,9 +1309,17 @@ impl NativeApp {
                 return;
             }
         };
-        let bootstrap = match message.start_command(&thread_id).map_err(str::to_owned).and_then(|payload| self.pending_bootstrap(&thread_id, &payload)) {
+        let bootstrap = match message
+            .start_command(&thread_id)
+            .map_err(str::to_owned)
+            .and_then(|payload| self.pending_bootstrap(&thread_id, &payload))
+        {
             Ok(bootstrap) => bootstrap,
-            Err(error) => { self.report_error(error, cx); cx.notify(); return; }
+            Err(error) => {
+                self.report_error(error, cx);
+                cx.notify();
+                return;
+            }
         };
         let state = self.queue_observation(&thread_id);
         if steer
@@ -1308,7 +1355,9 @@ impl NativeApp {
             steer,
             state.as_ref().and_then(|state| state.tool.clone()),
         );
-        if let Some(bootstrap) = bootstrap { self.queues.set_bootstrap(&thread_id, id, bootstrap); }
+        if let Some(bootstrap) = bootstrap {
+            self.queues.set_bootstrap(&thread_id, id, bootstrap);
+        }
         if let Some(context) = context {
             self.consume_sent_context(&self.environment_scope.clone(), &thread_id, &context);
             self.queues.set_context(&thread_id, id, context);
@@ -1370,8 +1419,16 @@ impl NativeApp {
         thread_id: &str,
         background: bool,
     ) -> Option<queue::Observation> {
-        if self.pending_threads.iter().any(|d| d.thread.id == thread_id) && !self.shell.threads.iter().any(|t| t.id == thread_id) {
-            return Some(queue::Observation { identity: format!("pending:{thread_id}"), ..Default::default() });
+        if self
+            .pending_threads
+            .iter()
+            .any(|d| d.thread.id == thread_id)
+            && !self.shell.threads.iter().any(|t| t.id == thread_id)
+        {
+            return Some(queue::Observation {
+                identity: format!("pending:{thread_id}"),
+                ..Default::default()
+            });
         }
         let shell = self
             .shell
@@ -1577,11 +1634,27 @@ impl NativeApp {
         if let Some(source) = self.queues.source_plan(&thread_id, message.id) {
             payload["sourceProposedPlan"] = source;
         }
-        if self.pending_threads.iter().any(|d| d.thread.id == thread_id) && !self.shell.threads.iter().any(|t| t.id == thread_id) {
-            match self.queues.bootstrap(&thread_id, message.id).map(Some).map(Ok).unwrap_or_else(|| self.pending_bootstrap(&thread_id, &payload)) {
+        if self
+            .pending_threads
+            .iter()
+            .any(|d| d.thread.id == thread_id)
+            && !self.shell.threads.iter().any(|t| t.id == thread_id)
+        {
+            match self
+                .queues
+                .bootstrap(&thread_id, message.id)
+                .map(Some)
+                .map(Ok)
+                .unwrap_or_else(|| self.pending_bootstrap(&thread_id, &payload))
+            {
                 Ok(Some(bootstrap)) => payload["bootstrap"] = bootstrap,
-                Ok(None) => {},
-                Err(error) => { self.queues.settle(&thread_id, message.id, false); self.report_error(error, cx); cx.notify(); return; }
+                Ok(None) => {}
+                Err(error) => {
+                    self.queues.settle(&thread_id, message.id, false);
+                    self.report_error(error, cx);
+                    cx.notify();
+                    return;
+                }
             }
         }
         match self.materialized_checkout_bootstrap(&thread_id) {
@@ -1780,6 +1853,11 @@ impl NativeApp {
             return Err("Prompt exceeds the message limit");
         }
         let id = record.id().to_owned();
+        let token = gpui_kit::component::input::InlineToken::new(
+            format!("t3-context://v1/{}/{}", record.kind(), record.id()),
+            record.reference(),
+        )
+        .with_label(record.label().to_owned());
         let key = (environment.to_owned(), thread.to_owned());
         self.composer_state
             .contexts
@@ -1787,7 +1865,20 @@ impl NativeApp {
             .or_insert(records)
             .push(record);
         self.composer.update(cx, |input, cx| {
-            input.set_value(crate::composer_state::prompt_content(&text), window, cx)
+            // A captured reference is an editor edit, not a draft reload. Keep
+            // both earlier typing and the token in Kit's native undo history.
+            let start = input.value().len();
+            input.set_selected_range(start..start, cx);
+            if start > 0 && !input.value().ends_with(char::is_whitespace) {
+                input.replace(" ", window, cx);
+            }
+            let source = token.text().clone();
+            if input.replace_with_token(token, window, cx).is_err() {
+                // A valid payload may have a label Kit cannot render (e.g.
+                // empty or control-containing). Never lose its canonical source.
+                input.replace(source, window, cx);
+            }
+            input.replace(" ", window, cx);
         });
         self.remember_composer_draft(cx);
         cx.notify();
@@ -1822,14 +1913,18 @@ impl NativeApp {
         else {
             return;
         };
-        let text = self
-            .composer
-            .read(cx)
-            .value()
-            .replace(&record.reference(), "");
+        let text = self.composer.read(cx).value();
+        let ranges: Vec<_> = text
+            .match_indices(&record.reference())
+            .map(|(start, reference)| start..start + reference.len())
+            .collect();
         // Keep payload for editor undo; removed references are excluded from transport.
+        // Delete from the end so repeated references retain their original offsets.
         self.composer.update(cx, |input, cx| {
-            input.set_value(crate::composer_state::prompt_content(&text), window, cx)
+            for range in ranges.into_iter().rev() {
+                input.set_selected_range(range, cx);
+                input.replace("", window, cx);
+            }
         });
         self.remember_composer_draft(cx);
         cx.notify();
@@ -2213,13 +2308,20 @@ impl NativeApp {
         };
         let mut text = clipboard.text().unwrap_or_default();
         let mut imported = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for value in records {
             let Ok(record) = serde_json::from_value::<
                 t3code_desktop_gpui::draft_context::DraftContextRecord,
             >(value.clone()) else {
                 continue;
             };
-            if record.validate().is_err() {
+            if record.validate().is_err() || !seen.insert(record.id().to_owned()) {
+                self.report_error("Invalid or duplicate pasted context record", cx);
+                return true;
+            }
+            // Clipboard metadata can contain more than the copied selection.
+            // Do not import unrelated payloads or charge them to this draft.
+            if !text.contains(&record.reference()) {
                 continue;
             }
             if matches!(record.kind(), "file" | "image") {
@@ -2242,6 +2344,10 @@ impl NativeApp {
             );
             imported.push(next);
         }
+        if t3code_desktop_gpui::draft_context::message_context(&text, &imported).is_err() {
+            self.report_error("Pasted context is missing its source record", cx);
+            return true;
+        }
         let mut owned = self.draft_context_records();
         if owned.len() + imported.len() > 200 {
             self.report_error("Too many context records", cx);
@@ -2260,8 +2366,37 @@ impl NativeApp {
             .contexts
             .insert((self.environment_scope.clone(), thread), owned);
         self.composer.update(cx, |input, cx| {
-            input.set_value(crate::composer_state::prompt_content(&value), window, cx);
-            input.set_selected_range(range.start + text.len()..range.start + text.len(), cx);
+            crate::composer_state::insert_prompt_content(input, &text, window, cx);
+        });
+        self.remember_composer_draft(cx);
+        true
+    }
+
+    /// Plain clipboard references use the same chip grammar as picked references.
+    pub(crate) fn paste_prompt_tokens(
+        &mut self,
+        clipboard: &gpui_kit::ClipboardItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(text) = clipboard.text() else {
+            return false;
+        };
+        if crate::composer_state::prompt_content(&text)
+            .tokens()
+            .is_empty()
+        {
+            return false;
+        }
+        let input = self.composer.read(cx);
+        let mut value = input.value().to_string();
+        value.replace_range(input.selected_range(), &text);
+        if value.encode_utf16().count() > 120_000 {
+            self.report_error("Pasted prompt exceeds the message limit", cx);
+            return true;
+        }
+        self.composer.update(cx, |input, cx| {
+            crate::composer_state::insert_prompt_content(input, &text, window, cx);
         });
         self.remember_composer_draft(cx);
         true
@@ -2429,9 +2564,9 @@ impl NativeApp {
         }
         let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
-            directories: false,
+            directories: true,
             multiple: true,
-            prompt: Some("Attach files".into()),
+            prompt: Some("Attach files or folders".into()),
         });
         cx.spawn(async move |entity, cx| {
             let paths = receiver.await.ok().and_then(Result::ok).flatten();
@@ -2705,7 +2840,25 @@ impl NativeApp {
                     }
                 };
                 let ready = entity.update(cx, |app, _| app.attachment_connection_current(&scope)).unwrap_or(false);
-                if !ready { let _ = entity.update(cx, |app, cx| app.transfer_phase(&transfer_id, "Failed", Some(input), cx)); continue; }
+                if !ready || cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Signing already allocated a server-owned resource. Loss of
+                    // readiness must clean it up too, not only HTTP cancellation.
+                    let cleanup = connection::call(&scope.sender, "attachments.delete", json!({"attachmentId":id})).await;
+                    let _ = entity.update(cx, |app, cx| {
+                        let was_cancelled = cancelled.load(std::sync::atomic::Ordering::Relaxed);
+                        let phase = match (was_cancelled, cleanup.is_ok()) {
+                            (true, true) => "Cancelled",
+                            (true, false) => "Cancelled; cleanup failed",
+                            (false, true) => "Failed",
+                            (false, false) => "Failed; cleanup failed",
+                        };
+                        app.transfer_phase(&transfer_id, phase, (!was_cancelled).then_some(input), cx);
+                        if cleanup.is_err() {
+                            app.attachment_notice(&scope, t3code_desktop_gpui::notifications::Outcome::Error, "Attachment could not be released after signing; server cleanup failed", cx);
+                        }
+                    });
+                    continue;
+                }
                 let (bytes, preview) = cx.background_executor().spawn(async move {
                     let preview = image.then(|| crate::composer_thumbnail::thumbnail(&bytes)).flatten();
                     (bytes, preview)

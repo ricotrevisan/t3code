@@ -668,7 +668,7 @@ impl NativeApp {
                     .child(self.render_durable_plan(cx))
                     .child(div().debug_selector(|| "composer-input".into()).child(Textarea::new(&self.composer).on_paste({
                         let app = cx.entity().downgrade();
-                        move |clipboard, window, cx| app.update(cx, |app, cx| app.paste_context_fragment(clipboard, window, cx) || app.paste_composer(clipboard, cx)).unwrap_or(false)
+                        move |clipboard, window, cx| app.update(cx, |app, cx| app.paste_context_fragment(clipboard, window, cx) || app.paste_composer(clipboard, cx) || app.paste_prompt_tokens(clipboard, window, cx)).unwrap_or(false)
                     }))),
             )
             .when(self.composer_state.pending_paste.as_ref().is_some_and(|(scope, _)| scope.origin == self.environment_scope && Some(&scope.thread) == self.selected_thread.as_ref()), |view| {
