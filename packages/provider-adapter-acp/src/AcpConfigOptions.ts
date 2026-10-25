@@ -9,6 +9,8 @@ export const ACP_MODEL_CONFIG_ID = "model";
 export const ACP_REASONING_CONFIG_ID = "reasoning_effort";
 export const T3_REASONING_OPTION_ID = "reasoningEffort";
 export const ACP_EMPTY_VALUE_SENTINEL = "__t3_acp_empty__";
+/** Selectable placeholder used until the first ACP session discloses its opaque model options. */
+export const ACP_AGENT_DEFAULT_MODEL = "__t3_acp_agent_default__";
 
 type AcpSelectConfigOption = Extract<AcpSchema.SessionConfigOption, { readonly type: "select" }>;
 
@@ -133,7 +135,10 @@ const canonicalizeOptions = (
   choices: ReadonlyArray<FlattenedAcpSelectOption>,
 ): CanonicalAcpSelectOptions => {
   const wireValues = new Set(choices.map((choice) => choice.value));
-  const usedCanonicalValues = new Set<string>();
+  // Keep the pre-session placeholder outside the opaque wire-value namespace.
+  // An agent may legitimately use the same string, so remap that value rather
+  // than making the placeholder ambiguous after session/new.
+  const usedCanonicalValues = new Set<string>([ACP_AGENT_DEFAULT_MODEL]);
   let sentinelIndex = 0;
   const nextSentinel = () => {
     let candidate = ACP_EMPTY_VALUE_SENTINEL;
@@ -148,7 +153,10 @@ const canonicalizeOptions = (
   const canonicalToWireValue = new Map<string, string>();
   const wireToCanonicalValue = new Map<string, string>();
   const canonicalChoices = choices.map((choice) => {
-    const isT3Safe = choice.value.length > 0 && choice.value.trim() === choice.value;
+    const isT3Safe =
+      choice.value.length > 0 &&
+      choice.value.trim() === choice.value &&
+      choice.value !== ACP_AGENT_DEFAULT_MODEL;
     const canonicalValue = isT3Safe ? choice.value : nextSentinel();
     usedCanonicalValues.add(canonicalValue);
     canonicalToWireValue.set(canonicalValue, choice.value);

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type * as AcpSchema from "effect-acp/schema";
 
 import {
+  ACP_AGENT_DEFAULT_MODEL,
   ACP_EMPTY_VALUE_SENTINEL,
   findAcpConfigOption,
   findAcpReasoningSelection,
@@ -221,6 +222,23 @@ describe("ACP config option projection", () => {
       configId: "model",
       value: "",
     });
+  });
+
+  it("keeps the pre-session agent default outside the wire model namespace", () => {
+    const projected = projectAcpConfigOptions([
+      {
+        ...modelConfigOption,
+        currentValue: ACP_AGENT_DEFAULT_MODEL,
+        options: [{ value: ACP_AGENT_DEFAULT_MODEL, name: "Literal agent model" }],
+      },
+    ]);
+
+    const [model] = projected.models;
+    expect(model?.slug).not.toBe(ACP_AGENT_DEFAULT_MODEL);
+    expect(projected.modelConfig?.currentValue).toBe(model?.slug);
+    expect(projected.modelConfig?.canonicalToWireValue.get(model!.slug)).toBe(
+      ACP_AGENT_DEFAULT_MODEL,
+    );
   });
 
   it("chooses collision-free sentinels for every value T3 cannot round-trip", () => {

@@ -25,6 +25,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type * as AcpSchema from "effect-acp/schema";
 
+import { ACP_AGENT_DEFAULT_MODEL } from "./AcpConfigOptions.ts";
 import { defineAcpStdioAdapterV1, type AcpStdioAdapterConfig } from "./AcpStdioAdapter.ts";
 
 interface WireMessage {
@@ -488,6 +489,45 @@ describe("AcpStdioAdapter", () => {
         yield* instance.adapter.stopAll();
         assert.equal(yield* Ref.get(control!.expectExitCount), 1);
         assert.equal(yield* Ref.get(control!.closeCount), 1);
+      }),
+    ),
+  );
+
+  it.effect("offers the agent default before the first session resolves model options", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const instance = yield* createInstance(harness.host);
+        const threadId = ThreadId.make("thread-agent-default");
+
+        assert.deepEqual((yield* instance.snapshot.getSnapshot).models, [
+          {
+            slug: ACP_AGENT_DEFAULT_MODEL,
+            name: "Agent default",
+            isCustom: false,
+            isDefault: true,
+            capabilities: null,
+          },
+        ]);
+
+        const session = yield* instance.adapter.startSession(
+          startInput(threadId, {
+            modelSelection: { instanceId, model: ACP_AGENT_DEFAULT_MODEL },
+          }),
+        );
+        const [control] = yield* Ref.get(harness.processes);
+        assert.notInclude(yield* methodsOf(control!), "session/set_config_option");
+        assert.equal(session.model, "model-a");
+        assert.deepEqual(
+          (yield* instance.snapshot.getSnapshot).models.map((model) => model.slug),
+          ["model-a", "model-b"],
+        );
+
+        yield* instance.adapter.stopSession(threadId);
+        assert.deepEqual(
+          (yield* instance.snapshot.getSnapshot).models.map((model) => model.slug),
+          [ACP_AGENT_DEFAULT_MODEL],
+        );
       }),
     ),
   );
@@ -974,7 +1014,10 @@ describe("AcpStdioAdapter", () => {
         yield* instance.adapter.stopSession(threadId);
 
         assert.isFalse(yield* instance.adapter.hasSession(threadId));
-        assert.deepEqual((yield* instance.snapshot.getSnapshot).models, []);
+        assert.deepEqual(
+          (yield* instance.snapshot.getSnapshot).models.map((model) => model.slug),
+          [ACP_AGENT_DEFAULT_MODEL],
+        );
       }),
     ),
   );

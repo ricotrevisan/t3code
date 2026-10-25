@@ -32,6 +32,7 @@ import * as Stream from "effect/Stream";
 import * as AcpSchema from "effect-acp/schema";
 
 import {
+  ACP_AGENT_DEFAULT_MODEL,
   findAcpReasoningSelection,
   getAcpConfigOptionUpdate,
   projectAcpConfigOptions,
@@ -245,6 +246,17 @@ export const defineAcpStdioAdapterV1 = (
           ),
         };
         const adapterPackage = packageReference(definition.manifest);
+        const agentDefaultModels: ServerProvider["models"] = input.enabled
+          ? [
+              {
+                slug: ACP_AGENT_DEFAULT_MODEL,
+                name: "Agent default",
+                isCustom: false,
+                isDefault: true,
+                capabilities: null,
+              },
+            ]
+          : [];
 
         const nextIdentity = (prefix: string): string => {
           sequence += 1;
@@ -266,7 +278,7 @@ export const defineAcpStdioAdapterV1 = (
           status: input.enabled ? "ready" : "disabled",
           auth: { status: "unknown" },
           checkedAt: now(),
-          models: [],
+          models: agentDefaultModels,
           slashCommands: [],
           skills: [],
         };
@@ -305,7 +317,7 @@ export const defineAcpStdioAdapterV1 = (
             currentSnapshot = {
               ...currentSnapshot,
               checkedAt: now(),
-              models: projection.models,
+              models: projection.models.length > 0 ? projection.models : agentDefaultModels,
               slashCommands,
             };
             return PubSub.publish(snapshotChanges, currentSnapshot).pipe(Effect.asVoid);
@@ -709,28 +721,34 @@ export const defineAcpStdioAdapterV1 = (
               Effect.sync(() => projectAcpConfigOptions(state.mapper.configOptions)),
             );
             const requestedModel = selection.model;
-            if (
-              !projection.modelConfig ||
-              !projection.modelConfig.values.includes(requestedModel)
-            ) {
-              return yield* adapterError(
-                "session/set_config_option",
-                `ACP model option '${requestedModel}' is unavailable.`,
-              );
-            }
-            const modelUpdate = getAcpConfigOptionUpdate(projection.modelConfig, requestedModel);
-            if (modelUpdate) {
-              const result = yield* client.agent.setSessionConfigOption({
-                sessionId: state.acpSessionId,
-                ...modelUpdate,
-              });
-              yield* state.mapperLock.withPermits(1)(
-                Effect.sync(() => {
-                  state.mapper = { ...state.mapper, configOptions: result.configOptions };
-                  updateSessionFromConfig(state);
-                }),
-              );
-              yield* publishSnapshotFor(state);
+            // Before session/new, T3 can only offer the adapter-owned default
+            // placeholder. It means "keep the agent's current model", while
+            // every real model value remains validated against the fresh ACP
+            // options returned for this session.
+            if (requestedModel !== ACP_AGENT_DEFAULT_MODEL) {
+              if (
+                !projection.modelConfig ||
+                !projection.modelConfig.values.includes(requestedModel)
+              ) {
+                return yield* adapterError(
+                  "session/set_config_option",
+                  `ACP model option '${requestedModel}' is unavailable.`,
+                );
+              }
+              const modelUpdate = getAcpConfigOptionUpdate(projection.modelConfig, requestedModel);
+              if (modelUpdate) {
+                const result = yield* client.agent.setSessionConfigOption({
+                  sessionId: state.acpSessionId,
+                  ...modelUpdate,
+                });
+                yield* state.mapperLock.withPermits(1)(
+                  Effect.sync(() => {
+                    state.mapper = { ...state.mapper, configOptions: result.configOptions };
+                    updateSessionFromConfig(state);
+                  }),
+                );
+                yield* publishSnapshotFor(state);
+              }
             }
 
             projection = yield* state.mapperLock.withPermits(1)(
